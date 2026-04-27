@@ -5,5 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Project model, geometry, units, and change events for the pcb tool."
 
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["sync"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
 [lints]
 workspace = true

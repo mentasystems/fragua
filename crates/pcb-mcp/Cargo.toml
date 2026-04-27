@@ -5,5 +5,16 @@ edition.workspace = true
 license.workspace = true
 description = "MCP server exposing pcb tools to AI agents."
 
+[dependencies]
+pcb-core = { path = "../pcb-core" }
+pcb-render = { path = "../pcb-render" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "io-std", "rt-multi-thread", "macros", "sync"] }
+
+[[bin]]
+name = "pcb-mcp-stdio"
+path = "src/bin/stdio.rs"
+
 [lints]
 workspace = true
