@@ -1,0 +1,29 @@
+[package]
+name = "pcb-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tauri host for the pcb tool."
+
+[lib]
+name = "pcb_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "pcb-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+pcb-core = { path = "../crates/pcb-core" }
+pcb-render = { path = "../crates/pcb-render" }
+pcb-mcp = { path = "../crates/pcb-mcp" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util"] }
+
+[lints]
+workspace = true

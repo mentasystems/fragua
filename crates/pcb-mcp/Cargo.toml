@@ -10,11 +10,18 @@ pcb-core = { path = "../pcb-core" }
 pcb-render = { path = "../pcb-render" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["io-util", "io-std", "rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["io-util", "io-std", "rt-multi-thread", "macros", "sync", "net"] }
 
 [[bin]]
 name = "pcb-mcp-stdio"
 path = "src/bin/stdio.rs"
+
+[[bin]]
+name = "pcb-mcp-bridge"
+path = "src/bin/bridge.rs"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "io-std", "rt-multi-thread", "macros", "sync", "net", "time"] }
 
 [lints]
 workspace = true
