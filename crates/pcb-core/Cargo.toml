@@ -1,0 +1,9 @@
+[package]
+name = "pcb-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Project model, geometry, units, and change events for the pcb tool."
+
+[lints]
+workspace = true

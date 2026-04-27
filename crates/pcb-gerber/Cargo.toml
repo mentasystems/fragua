@@ -1,0 +1,9 @@
+[package]
+name = "pcb-gerber"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Gerber RS-274X, Excellon drill, BOM, and pick-and-place writers."
+
+[lints]
+workspace = true

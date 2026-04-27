@@ -1,0 +1,9 @@
+[package]
+name = "pcb-router"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native autorouter for the pcb tool."
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Tauri (added in next phase)
+/src-tauri/target
+/src-tauri/gen
+
+# Frontend (added in next phase)
+/frontend/node_modules
+/frontend/dist
+/frontend/.vite
+
+.DS_Store
