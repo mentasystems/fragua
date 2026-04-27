@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! `pcb-mcp` — MCP server.
 //!
 //! Speaks MCP / JSON-RPC 2.0 (stdio for now; SSE later) and exposes the

@@ -150,6 +150,53 @@ pub fn catalog() -> Value {
             }
         },
         {
+            "name": "placement.from_schematic",
+            "description": "Bridge schematic → board. For each entry, find the same-reference symbol in the schematic, build a Footprint with the given physical pad geometry, and copy the schematic's net assignments onto each pad. Pads are looked up by number; use pin_map={schematic_pin: board_pad} if a footprint's pad numbers do not match the schematic's pin numbers (e.g. an MCU package with pin names instead of numbers). Returns the list of placed footprints and the ratsnest (pads grouped by net) so a future router has a starting point.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["footprints"],
+                "properties": {
+                    "footprints": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["reference", "library", "x_mm", "y_mm", "pads"],
+                            "properties": {
+                                "reference": { "type": "string" },
+                                "library":   { "type": "string", "description": "e.g. Resistor_SMD:R_0805" },
+                                "x_mm":      { "type": "number" },
+                                "y_mm":      { "type": "number" },
+                                "rotation":  { "type": "number", "default": 0 },
+                                "layer":     { "type": "string", "enum": ["top","bottom"], "default": "top" },
+                                "pin_map":   {
+                                    "type": "object",
+                                    "description": "schematic_pin → board_pad mapping; identity if omitted",
+                                    "additionalProperties": { "type": "string" }
+                                },
+                                "pads": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "required": ["number","x_mm","y_mm","w_mm","h_mm"],
+                                        "properties": {
+                                            "number": { "type": "string" },
+                                            "x_mm":   { "type": "number" },
+                                            "y_mm":   { "type": "number" },
+                                            "w_mm":   { "type": "number" },
+                                            "h_mm":   { "type": "number" },
+                                            "layer":  { "type": "string", "enum": ["top","bottom"], "default": "top" }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "minItems": 1
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "output.fab_pack",
             "description": "Write the manufacturing fab pack — Gerber RS-274X (copper, mask, edge cuts), Excellon drill files, BOM CSV, and pick-and-place CSV — to a directory on disk. Returns the absolute paths of every file written.",
             "inputSchema": {
@@ -175,6 +222,7 @@ pub fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Value, To
         "schematic.connect" => tool_schematic_connect(project, args),
         "schematic.status" => tool_schematic_status(project),
         "schematic.snapshot" => tool_schematic_snapshot(project),
+        "placement.from_schematic" => tool_placement_from_schematic(project, args),
         "output.fab_pack" => tool_output_fab_pack(project, args),
         _ => Err(ToolError {
             code: crate::protocol::error_code::METHOD_NOT_FOUND,
@@ -497,6 +545,153 @@ fn tool_schematic_snapshot(project: &Project) -> Result<Value, ToolError> {
     let snap = project.read();
     let svg = pcb_render::render_schematic_svg(snap.schematic());
     Ok(text_result(svg).into())
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaceFromSchInput {
+    footprints: Vec<FootprintPlan>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FootprintPlan {
+    reference: String,
+    library: String,
+    x_mm: f64,
+    y_mm: f64,
+    #[serde(default)]
+    rotation: f32,
+    #[serde(default = "default_layer")]
+    layer: LayerInput,
+    #[serde(default)]
+    pin_map: std::collections::HashMap<String, String>,
+    pads: Vec<PadPlan>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PadPlan {
+    number: String,
+    x_mm: f64,
+    y_mm: f64,
+    w_mm: f64,
+    h_mm: f64,
+    #[serde(default = "default_layer")]
+    layer: LayerInput,
+}
+
+fn tool_placement_from_schematic(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: PlaceFromSchInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("placement.from_schematic: {e}")))?;
+
+    // Resolve every plan against the current schematic before mutating
+    // the board: if any reference is missing, fail fast and leave the
+    // project untouched.
+    let mut placed: Vec<(Footprint, Vec<(String, Option<String>)>)> = Vec::new();
+    {
+        let snap = project.read();
+        let sch = snap.schematic();
+        for plan in &input.footprints {
+            let symbol = sch.find_by_reference(&plan.reference).ok_or_else(|| {
+                ToolError::invalid_params(format!(
+                    "no schematic symbol named {}",
+                    plan.reference
+                ))
+            })?;
+            let mut pads = Vec::with_capacity(plan.pads.len());
+            let mut net_summary = Vec::with_capacity(plan.pads.len());
+            for pad_plan in &plan.pads {
+                // Identity by default; override via pin_map.
+                let schematic_pin = plan
+                    .pin_map
+                    .iter()
+                    .find_map(|(sch_p, board_p)| {
+                        (board_p == &pad_plan.number).then(|| sch_p.clone())
+                    })
+                    .unwrap_or_else(|| pad_plan.number.clone());
+                let net = sch
+                    .net_for_pin(symbol.id, &schematic_pin)
+                    .map(str::to_string);
+                net_summary.push((pad_plan.number.clone(), net.clone()));
+                pads.push(Pad {
+                    number: pad_plan.number.clone(),
+                    offset: Point::new(
+                        Length::from_mm(pad_plan.x_mm),
+                        Length::from_mm(pad_plan.y_mm),
+                    ),
+                    size: (
+                        Length::from_mm(pad_plan.w_mm),
+                        Length::from_mm(pad_plan.h_mm),
+                    ),
+                    layer: pad_plan.layer.into(),
+                    net,
+                });
+            }
+            let footprint = Footprint {
+                id: pcb_core::Id::new(),
+                reference: plan.reference.clone(),
+                value: symbol.value.clone(),
+                library: plan.library.clone(),
+                position: Point::new(
+                    Length::from_mm(plan.x_mm),
+                    Length::from_mm(plan.y_mm),
+                ),
+                rotation: plan.rotation,
+                layer: plan.layer.into(),
+                pads,
+            };
+            placed.push((footprint, net_summary));
+        }
+    }
+
+    let mut placed_summaries = Vec::with_capacity(placed.len());
+    for (footprint, net_summary) in placed {
+        let reference = footprint.reference.clone();
+        let id = project.add_footprint(footprint);
+        placed_summaries.push(json!({
+            "id": id.0.to_string(),
+            "reference": reference,
+            "pads": net_summary.iter().map(|(num, net)| {
+                json!({"number": num, "net": net})
+            }).collect::<Vec<_>>(),
+        }));
+    }
+
+    // Ratsnest: pads grouped by net, derived from the freshly-placed
+    // footprints so the agent (and a future router) has the connectivity
+    // graph in hand without re-querying.
+    let mut ratsnest: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    {
+        let snap = project.read();
+        for fp in snap.board().footprints_in_order() {
+            for pad in &fp.pads {
+                if let Some(net) = &pad.net {
+                    ratsnest
+                        .entry(net.clone())
+                        .or_default()
+                        .push(format!("{}.{}", fp.reference, pad.number));
+                }
+            }
+        }
+    }
+    let ratsnest_json: Vec<Value> = ratsnest
+        .into_iter()
+        .map(|(net, pads)| json!({"net": net, "pads": pads}))
+        .collect();
+
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "placement.from_schematic: placed {} footprint(s)",
+            placed_summaries.len()
+        ),
+    );
+    Ok(text_result(format!(
+        "Placed {} footprint(s) from the schematic",
+        placed_summaries.len()
+    ))
+    .with_data(json!({
+        "placed": placed_summaries,
+        "ratsnest": ratsnest_json,
+    })))
 }
 
 #[derive(Debug, Deserialize)]
