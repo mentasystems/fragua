@@ -79,6 +79,19 @@ pub fn catalog() -> Value {
                 "properties": {},
                 "additionalProperties": false
             }
+        },
+        {
+            "name": "output.fab_pack",
+            "description": "Write the manufacturing fab pack — Gerber RS-274X (copper, mask, edge cuts), Excellon drill files, BOM CSV, and pick-and-place CSV — to a directory on disk. Returns the absolute paths of every file written.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["out_dir"],
+                "properties": {
+                    "out_dir": { "type": "string", "description": "absolute path to the output directory (created if missing)" },
+                    "name":    { "type": "string", "description": "optional filename stem; defaults to the project name" }
+                },
+                "additionalProperties": false
+            }
         }
     ])
 }
@@ -89,6 +102,7 @@ pub fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Value, To
         "project.status" => tool_project_status(project),
         "placement.add" => tool_placement_add(project, args),
         "view.snapshot" => tool_view_snapshot(project),
+        "output.fab_pack" => tool_output_fab_pack(project, args),
         _ => Err(ToolError {
             code: crate::protocol::error_code::METHOD_NOT_FOUND,
             message: format!("unknown tool: {name}"),
@@ -207,6 +221,52 @@ fn tool_view_snapshot(project: &Project) -> Result<Value, ToolError> {
     let snap = project.read();
     let svg = pcb_render::render_svg(snap.board());
     Ok(text_result(svg).into())
+}
+
+#[derive(Debug, Deserialize)]
+struct FabPackInput {
+    out_dir: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+fn tool_output_fab_pack(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: FabPackInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("output.fab_pack: {e}")))?;
+
+    let snap = project.read();
+    let stem = input
+        .name
+        .unwrap_or_else(|| snap.name().to_string());
+    let out_dir = std::path::PathBuf::from(&input.out_dir);
+
+    let paths = pcb_gerber::write_fab_pack(snap.board(), &stem, &out_dir).map_err(|e| ToolError {
+        code: crate::protocol::error_code::INTERNAL_ERROR,
+        message: format!("write_fab_pack: {e}"),
+    })?;
+
+    let path_strings: Vec<String> = paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "output.fab_pack: wrote {} files to {}",
+            path_strings.len(),
+            out_dir.display()
+        ),
+    );
+
+    Ok(text_result(format!(
+        "Wrote {} files:\n{}",
+        path_strings.len(),
+        path_strings.join("\n")
+    ))
+    .with_data(json!({
+        "out_dir": out_dir.display().to_string(),
+        "files": path_strings,
+    })))
 }
 
 /// Builds the MCP tool result envelope. The text content is what the

@@ -13,7 +13,7 @@ use crate::geometry::Point;
 
 /// Anything observable that changes the project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind")]
 pub enum Event {
     /// A new project has been opened or created.
     ProjectChanged,

@@ -23,7 +23,11 @@ type AnyEvent =
   | { kind: "FootprintRemoved" }
   | { kind: "OutlineChanged" };
 
-const root = document.getElementById("app")!;
+const root = document.getElementById("app");
+if (!root) {
+  throw new Error("missing #app root");
+}
+
 root.innerHTML = `
   <div class="topbar">
     <span class="label">project</span><span class="value" id="proj-name">—</span>
@@ -48,10 +52,20 @@ const els = {
 function appendActivity(level: string, message: string) {
   const entry = document.createElement("div");
   entry.className = `entry ${level}`;
-  entry.innerHTML = `<span class="level">${level}</span><span class="msg"></span>`;
+  entry.innerHTML = `<span class="level"></span><span class="msg"></span>`;
+  entry.querySelector(".level")!.textContent = level;
   entry.querySelector(".msg")!.textContent = message;
   els.log.appendChild(entry);
   els.log.scrollTop = els.log.scrollHeight;
+}
+
+function reportFatal(err: unknown) {
+  const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
+  appendActivity("error", msg);
+  // Also surface the error in the canvas pane so the user sees it even
+  // if the activity panel is hidden or empty.
+  els.canvas.innerHTML = `<pre style="padding:12px;color:#f85149;white-space:pre-wrap;font-size:12px;">${msg}</pre>`;
+  console.error(err);
 }
 
 async function refresh() {
@@ -62,16 +76,23 @@ async function refresh() {
   els.canvas.innerHTML = state.svg;
 }
 
-await refresh();
-appendActivity("info", "ui ready");
-
-await listen<AnyEvent>("pcb://event", async (ev) => {
-  const data = ev.payload;
-  if (data.kind === "Activity") {
-    appendActivity(data.level, data.message);
-    return;
-  }
-  // Any model-mutating event triggers a re-render. Cheap because the
-  // backend builds the SVG; the frontend only swaps innerHTML.
+async function start() {
+  appendActivity("info", "ui boot");
   await refresh();
-});
+  appendActivity("info", "ui ready");
+
+  await listen<AnyEvent>("pcb://event", async (ev) => {
+    try {
+      const data = ev.payload;
+      if (data.kind === "Activity") {
+        appendActivity(data.level, data.message);
+        return;
+      }
+      await refresh();
+    } catch (err) {
+      reportFatal(err);
+    }
+  });
+}
+
+start().catch(reportFatal);

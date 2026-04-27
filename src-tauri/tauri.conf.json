@@ -4,9 +4,7 @@
   "version": "0.0.0",
   "identifier": "dev.kidandcat.pcb",
   "build": {
-    "beforeDevCommand": "npm --prefix ../frontend run dev",
     "beforeBuildCommand": "npm --prefix ../frontend run build",
-    "devUrl": "http://localhost:1420",
     "frontendDist": "../frontend/dist"
   },
   "app": {

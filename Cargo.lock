@@ -2152,12 +2152,16 @@ version = "0.0.0"
 [[package]]
 name = "pcb-gerber"
 version = "0.0.0"
+dependencies = [
+ "pcb-core",
+]
 
 [[package]]
 name = "pcb-mcp"
 version = "0.0.0"
 dependencies = [
  "pcb-core",
+ "pcb-gerber",
  "pcb-render",
  "serde",
  "serde_json",

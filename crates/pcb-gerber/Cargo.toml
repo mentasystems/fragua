@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 description = "Gerber RS-274X, Excellon drill, BOM, and pick-and-place writers."
 
+[dependencies]
+pcb-core = { path = "../pcb-core" }
+
 [lints]
 workspace = true

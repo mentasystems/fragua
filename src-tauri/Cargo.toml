@@ -20,7 +20,7 @@ tauri-build = { version = "2", features = [] }
 pcb-core = { path = "../crates/pcb-core" }
 pcb-render = { path = "../crates/pcb-render" }
 pcb-mcp = { path = "../crates/pcb-mcp" }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util"] }
