@@ -43,6 +43,28 @@ html, body, #app {
 .topbar .label { color: var(--muted); }
 .topbar .value { color: var(--text); }
 .topbar .accent { color: var(--accent); }
+.topbar .spacer { flex: 1; }
+.topbar .tabs {
+  display: flex;
+  gap: 4px;
+  margin-left: 12px;
+}
+.topbar .tab {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 12px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.topbar .tab.active {
+  background: var(--bg);
+  color: var(--text);
+  border-color: var(--accent);
+}
+.topbar .tab span { color: var(--text); }
 
 .canvas-pane {
   grid-area: canvas;

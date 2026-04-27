@@ -25,6 +25,10 @@ pub enum Event {
     FootprintRemoved { id: Id },
     /// The board outline was set or replaced.
     OutlineChanged,
+    /// A schematic symbol was added.
+    SymbolAdded { id: Id, reference: String },
+    /// The connections of a net were set or replaced.
+    NetChanged { name: String, connection_count: usize },
     /// Free-form activity log line for the UI's activity panel.
     Activity { level: ActivityLevel, message: String },
 }

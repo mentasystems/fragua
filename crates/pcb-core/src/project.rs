@@ -9,6 +9,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 use crate::board::{Board, Footprint, Id};
 use crate::event::{ActivityLevel, Event, EventBus};
 use crate::geometry::Point;
+use crate::schematic::{Net, Schematic, Symbol};
 
 /// Cheap-to-clone handle around the shared project state.
 ///
@@ -24,6 +25,7 @@ pub struct Project {
 struct ProjectInner {
     name: String,
     board: Board,
+    schematic: Schematic,
 }
 
 impl Project {
@@ -33,6 +35,7 @@ impl Project {
             inner: Arc::new(RwLock::new(ProjectInner {
                 name: name.into(),
                 board: Board::new(),
+                schematic: Schematic::new(),
             })),
             bus: EventBus::new(),
         };
@@ -91,6 +94,51 @@ impl Project {
         }
         removed
     }
+
+    pub fn add_symbol(&self, symbol: Symbol) -> Id {
+        let reference = symbol.reference.clone();
+        let id = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.schematic.add_symbol(symbol)
+        };
+        self.bus.publish(Event::SymbolAdded { id, reference });
+        id
+    }
+
+    /// Replace the connections on a named net. Returns an error if any
+    /// referenced symbol or pin does not exist — keeps the netlist
+    /// consistent so downstream tools (router, BOM) never see dangling
+    /// references.
+    pub fn set_net(&self, net: Net) -> Result<(), String> {
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        for c in &net.connections {
+            let symbol = inner
+                .schematic
+                .symbols
+                .get(&c.symbol_id)
+                .ok_or_else(|| format!("unknown symbol {}", c.symbol_id.0))?;
+            let valid = symbol
+                .kind
+                .pins()
+                .into_iter()
+                .any(|p| p.number == c.pin_number);
+            if !valid {
+                return Err(format!(
+                    "symbol {} has no pin {}",
+                    symbol.reference, c.pin_number
+                ));
+            }
+        }
+        let count = net.connections.len();
+        let name = net.name.clone();
+        inner.schematic.set_net(net);
+        drop(inner);
+        self.bus.publish(Event::NetChanged {
+            name,
+            connection_count: count,
+        });
+        Ok(())
+    }
 }
 
 /// Read-only view of the project, held while the caller is reading.
@@ -107,5 +155,10 @@ impl ProjectSnapshot<'_> {
     #[must_use]
     pub fn board(&self) -> &Board {
         &self.guard.board
+    }
+
+    #[must_use]
+    pub fn schematic(&self) -> &Schematic {
+        &self.guard.schematic
     }
 }

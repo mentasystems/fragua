@@ -1,8 +1,11 @@
-//! `pcb-render` — board → SVG.
+//! `pcb-render` — board / schematic → SVG.
 //!
 //! SVG is the primary output: the frontend can style and animate it, and
 //! it is trivial for the agent to attach as visual context. PNG comes
 //! later if/when we hit perf or fidelity needs.
+
+pub mod schematic;
+pub use schematic::render_schematic_svg;
 
 use std::fmt::Write;
 

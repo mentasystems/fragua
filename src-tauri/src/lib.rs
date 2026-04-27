@@ -19,8 +19,11 @@ struct AppState {
 struct ProjectStatePayload {
     name: String,
     footprint_count: usize,
+    symbol_count: usize,
+    net_count: usize,
     mcp_addr: String,
-    svg: String,
+    board_svg: String,
+    schematic_svg: String,
 }
 
 #[tauri::command]
@@ -29,8 +32,11 @@ fn project_state(state: State<'_, AppState>) -> ProjectStatePayload {
     ProjectStatePayload {
         name: snap.name().to_string(),
         footprint_count: snap.board().footprints.len(),
+        symbol_count: snap.schematic().symbols.len(),
+        net_count: snap.schematic().nets.len(),
         mcp_addr: state.mcp_addr.clone(),
-        svg: pcb_render::render_svg(snap.board()),
+        board_svg: pcb_render::render_svg(snap.board()),
+        schematic_svg: pcb_render::render_schematic_svg(snap.schematic()),
     }
 }
 
