@@ -88,6 +88,30 @@ impl Footprint {
     }
 }
 
+/// A copper trace segment. Traces are stored as straight 2-point
+/// segments — polylines and arcs become multiple `Trace`s.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Trace {
+    pub id: Id,
+    pub layer: CopperLayer,
+    pub start: Point,
+    pub end: Point,
+    pub width: Length,
+    pub net: String,
+}
+
+/// A through-hole via that joins both copper layers. Phase 5 only models
+/// pad-on-via vias (no buried/blind layers); `diameter` is the copper
+/// pad diameter, `drill` the hole diameter — annular ring is implicit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Via {
+    pub id: Id,
+    pub position: Point,
+    pub drill: Length,
+    pub diameter: Length,
+    pub net: String,
+}
+
 /// The board itself.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Board {
@@ -97,6 +121,8 @@ pub struct Board {
     pub footprints: HashMap<Id, Footprint>,
     /// Insertion order for deterministic rendering and serialisation.
     pub footprint_order: Vec<Id>,
+    pub traces: Vec<Trace>,
+    pub vias: Vec<Via>,
 }
 
 impl Board {
@@ -140,5 +166,24 @@ impl Board {
         let mut iter = self.footprints_in_order().filter_map(Footprint::bounds);
         let first = iter.next()?;
         Some(iter.fold(first, Rect::union))
+    }
+
+    pub fn add_trace(&mut self, trace: Trace) -> Id {
+        let id = trace.id;
+        self.traces.push(trace);
+        id
+    }
+
+    pub fn add_via(&mut self, via: Via) -> Id {
+        let id = via.id;
+        self.vias.push(via);
+        id
+    }
+
+    /// Drop every trace and via on the board. The router uses this
+    /// before re-laying the routing — keeps re-routes idempotent.
+    pub fn clear_routing(&mut self) {
+        self.traces.clear();
+        self.vias.clear();
     }
 }

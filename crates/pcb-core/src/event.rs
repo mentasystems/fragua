@@ -29,6 +29,9 @@ pub enum Event {
     SymbolAdded { id: Id, reference: String },
     /// The connections of a net were set or replaced.
     NetChanged { name: String, connection_count: usize },
+    /// Routing (traces + vias) changed in bulk — typically emitted
+    /// after a router pass or a manual clear.
+    RoutingChanged { trace_count: usize, via_count: usize },
     /// Free-form activity log line for the UI's activity panel.
     Activity { level: ActivityLevel, message: String },
 }

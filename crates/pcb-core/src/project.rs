@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
-use crate::board::{Board, Footprint, Id};
+use crate::board::{Board, Footprint, Id, Trace, Via};
 use crate::event::{ActivityLevel, Event, EventBus};
 use crate::geometry::Point;
 use crate::schematic::{Net, Schematic, Symbol};
@@ -93,6 +93,42 @@ impl Project {
             self.bus.publish(Event::FootprintRemoved { id });
         }
         removed
+    }
+
+    pub fn add_trace(&self, trace: Trace) -> Id {
+        let id = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.board.add_trace(trace)
+        };
+        self.publish_routing_counts();
+        id
+    }
+
+    pub fn add_via(&self, via: Via) -> Id {
+        let id = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.board.add_via(via)
+        };
+        self.publish_routing_counts();
+        id
+    }
+
+    /// Drop every trace and via on the board. Used by the router before
+    /// re-laying routing on a fresh canvas.
+    pub fn clear_routing(&self) {
+        {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.board.clear_routing();
+        }
+        self.publish_routing_counts();
+    }
+
+    fn publish_routing_counts(&self) {
+        let inner = self.inner.read().expect("project lock poisoned");
+        self.bus.publish(Event::RoutingChanged {
+            trace_count: inner.board.traces.len(),
+            via_count: inner.board.vias.len(),
+        });
     }
 
     pub fn add_symbol(&self, symbol: Symbol) -> Id {

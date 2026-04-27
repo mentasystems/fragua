@@ -2163,6 +2163,7 @@ dependencies = [
  "pcb-core",
  "pcb-gerber",
  "pcb-render",
+ "pcb-router",
  "serde",
  "serde_json",
  "tokio",
@@ -2178,6 +2179,9 @@ dependencies = [
 [[package]]
 name = "pcb-router"
 version = "0.0.0"
+dependencies = [
+ "pcb-core",
+]
 
 [[package]]
 name = "percent-encoding"

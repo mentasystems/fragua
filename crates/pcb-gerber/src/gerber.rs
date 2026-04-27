@@ -120,12 +120,16 @@ fn footer(w: &mut impl Write) -> io::Result<()> {
     writeln!(w, "M02*")
 }
 
-/// Write the copper layer for the given side.
+/// Write the copper layer for the given side. Includes pad flashes,
+/// trace polylines (drawn with circular line apertures), and via copper
+/// pads (flashed on every layer the via punches through).
 pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result<()> {
     write_header(w, side.copper_label())?;
     let mut table = Table::default();
     let mut flashes = Vec::<(u32, Point)>::new();
+    let mut draws = Vec::<(u32, Point, Point)>::new();
     let layer = side.copper_layer();
+
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
             if pad.layer != layer {
@@ -139,6 +143,15 @@ pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result
             flashes.push((id, center));
         }
     }
+    for trace in board.traces.iter().filter(|t| t.layer == layer) {
+        let id = table.intern(Aperture::Round { d: trace.width });
+        draws.push((id, trace.start, trace.end));
+    }
+    for via in &board.vias {
+        let id = table.intern(Aperture::Round { d: via.diameter });
+        flashes.push((id, via.position));
+    }
+
     write_apertures(w, &table)?;
     let mut current = 0u32;
     for (id, p) in flashes {
@@ -147,6 +160,14 @@ pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result
             current = id;
         }
         flash(w, p)?;
+    }
+    for (id, a, b) in draws {
+        if id != current {
+            select(w, id)?;
+            current = id;
+        }
+        move_to(w, a)?;
+        line_to(w, b)?;
     }
     footer(w)
 }

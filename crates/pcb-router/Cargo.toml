@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 description = "Native autorouter for the pcb tool."
 
+[dependencies]
+pcb-core = { path = "../pcb-core" }
+
 [lints]
 workspace = true

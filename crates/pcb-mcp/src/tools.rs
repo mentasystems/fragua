@@ -5,7 +5,7 @@
 //! all the design reasoning; tools are pure data primitives.
 
 use pcb_core::schematic::{Net, NetConnection, PinSide, SchPin, Symbol, SymbolKind};
-use pcb_core::{ActivityLevel, CopperLayer, Footprint, Length, Pad, Point, Project};
+use pcb_core::{ActivityLevel, CopperLayer, Footprint, Length, Pad, Point, Project, Trace, Via};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -197,6 +197,65 @@ pub fn catalog() -> Value {
             }
         },
         {
+            "name": "route.add_trace",
+            "description": "Add a single straight copper trace segment between (x1,y1) and (x2,y2) on a copper layer. Used by the agent for hand-routing or by future routers laying paths segment-by-segment.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["net","layer","x1_mm","y1_mm","x2_mm","y2_mm","width_mm"],
+                "properties": {
+                    "net":     { "type": "string" },
+                    "layer":   { "type": "string", "enum": ["top","bottom"] },
+                    "x1_mm":   { "type": "number" },
+                    "y1_mm":   { "type": "number" },
+                    "x2_mm":   { "type": "number" },
+                    "y2_mm":   { "type": "number" },
+                    "width_mm":{ "type": "number" }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "route.add_via",
+            "description": "Add a through-hole via at (x,y). Joins both copper layers and produces an entry in the PTH drill file.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["net","x_mm","y_mm","drill_mm","diameter_mm"],
+                "properties": {
+                    "net":         { "type": "string" },
+                    "x_mm":        { "type": "number" },
+                    "y_mm":        { "type": "number" },
+                    "drill_mm":    { "type": "number", "description": "hole diameter" },
+                    "diameter_mm": { "type": "number", "description": "copper pad diameter (drill + 2 × annular ring)" }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "route.run",
+            "description": "Auto-route every net on the board using the native grid A* router on two copper layers. Existing routing is cleared before the pass. Returns per-net outcome (success with trace/via counts, or failure reason) plus aggregate totals. Net order is set by the router (smallest pad-count first); the agent does not need to specify it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cell_mm":         { "type": "number", "default": 0.25, "description": "grid cell pitch" },
+                    "trace_width_mm":  { "type": "number", "default": 0.25 },
+                    "clearance_mm":    { "type": "number", "default": 0.20 },
+                    "via_cost":        { "type": "integer", "default": 8, "description": "cells of penalty per layer flip" },
+                    "via_drill_mm":    { "type": "number", "default": 0.30 },
+                    "via_diameter_mm": { "type": "number", "default": 0.60 }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "route.clear",
+            "description": "Drop every trace and via on the board. Footprints and the schematic are untouched.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "output.fab_pack",
             "description": "Write the manufacturing fab pack — Gerber RS-274X (copper, mask, edge cuts), Excellon drill files, BOM CSV, and pick-and-place CSV — to a directory on disk. Returns the absolute paths of every file written.",
             "inputSchema": {
@@ -223,6 +282,10 @@ pub fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Value, To
         "schematic.status" => tool_schematic_status(project),
         "schematic.snapshot" => tool_schematic_snapshot(project),
         "placement.from_schematic" => tool_placement_from_schematic(project, args),
+        "route.add_trace" => tool_route_add_trace(project, args),
+        "route.add_via" => tool_route_add_via(project, args),
+        "route.clear" => tool_route_clear(project),
+        "route.run" => tool_route_run(project, args),
         "output.fab_pack" => tool_output_fab_pack(project, args),
         _ => Err(ToolError {
             code: crate::protocol::error_code::METHOD_NOT_FOUND,
@@ -691,6 +754,159 @@ fn tool_placement_from_schematic(project: &Project, args: &Value) -> Result<Valu
     .with_data(json!({
         "placed": placed_summaries,
         "ratsnest": ratsnest_json,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AddTraceInput {
+    net: String,
+    layer: LayerInput,
+    x1_mm: f64,
+    y1_mm: f64,
+    x2_mm: f64,
+    y2_mm: f64,
+    width_mm: f64,
+}
+
+fn tool_route_add_trace(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: AddTraceInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("route.add_trace: {e}")))?;
+    let id = project.add_trace(Trace {
+        id: pcb_core::Id::new(),
+        layer: input.layer.into(),
+        start: Point::new(Length::from_mm(input.x1_mm), Length::from_mm(input.y1_mm)),
+        end: Point::new(Length::from_mm(input.x2_mm), Length::from_mm(input.y2_mm)),
+        width: Length::from_mm(input.width_mm),
+        net: input.net.clone(),
+    });
+    Ok(text_result(format!(
+        "trace {} on {:?} ({})",
+        id.0, input.layer, input.net
+    ))
+    .with_data(json!({"id": id.0.to_string()})))
+}
+
+#[derive(Debug, Deserialize)]
+struct AddViaInput {
+    net: String,
+    x_mm: f64,
+    y_mm: f64,
+    drill_mm: f64,
+    diameter_mm: f64,
+}
+
+fn tool_route_add_via(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: AddViaInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("route.add_via: {e}")))?;
+    let id = project.add_via(Via {
+        id: pcb_core::Id::new(),
+        position: Point::new(Length::from_mm(input.x_mm), Length::from_mm(input.y_mm)),
+        drill: Length::from_mm(input.drill_mm),
+        diameter: Length::from_mm(input.diameter_mm),
+        net: input.net.clone(),
+    });
+    Ok(text_result(format!("via {} ({})", id.0, input.net))
+        .with_data(json!({"id": id.0.to_string()})))
+}
+
+fn tool_route_clear(project: &Project) -> Result<Value, ToolError> {
+    project.clear_routing();
+    project.log(ActivityLevel::Info, "route.clear");
+    Ok(text_result("Cleared all traces and vias").into())
+}
+
+#[derive(Debug, Deserialize)]
+struct RouteRunInput {
+    #[serde(default = "default_cell")]
+    cell_mm: f64,
+    #[serde(default = "default_trace_w")]
+    trace_width_mm: f64,
+    #[serde(default = "default_clearance")]
+    clearance_mm: f64,
+    #[serde(default = "default_via_cost")]
+    via_cost: u32,
+    #[serde(default = "default_via_drill")]
+    via_drill_mm: f64,
+    #[serde(default = "default_via_diameter")]
+    via_diameter_mm: f64,
+}
+
+fn default_cell() -> f64 { 0.25 }
+fn default_trace_w() -> f64 { 0.25 }
+fn default_clearance() -> f64 { 0.20 }
+fn default_via_cost() -> u32 { 8 }
+fn default_via_drill() -> f64 { 0.30 }
+fn default_via_diameter() -> f64 { 0.60 }
+
+fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: RouteRunInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("route.run: {e}")))?;
+
+    let opts = pcb_router::RouteOptions {
+        cell: Length::from_mm(input.cell_mm),
+        trace_width: Length::from_mm(input.trace_width_mm),
+        clearance: Length::from_mm(input.clearance_mm),
+        via_cost: input.via_cost,
+        via_drill: Length::from_mm(input.via_drill_mm),
+        via_diameter: Length::from_mm(input.via_diameter_mm),
+    };
+
+    // Route on a clone so the lock is released quickly; then push the
+    // result back into the live Project via the regular APIs (which
+    // emit RoutingChanged events for the UI).
+    let mut work = project.read().board().clone();
+    let report = pcb_router::route(&mut work, &opts);
+
+    project.clear_routing();
+    for trace in &work.traces {
+        project.add_trace(trace.clone());
+    }
+    for via in &work.vias {
+        project.add_via(via.clone());
+    }
+
+    let per_net: Vec<Value> = report
+        .per_net
+        .iter()
+        .map(|(name, outcome)| match outcome {
+            pcb_router::Outcome::Ok { trace_segments, vias } => json!({
+                "net": name, "ok": true,
+                "trace_segments": trace_segments, "vias": vias,
+            }),
+            pcb_router::Outcome::Failed { reason } => json!({
+                "net": name, "ok": false, "reason": reason,
+            }),
+        })
+        .collect();
+    let failed: Vec<&str> = report
+        .per_net
+        .iter()
+        .filter_map(|(n, o)| matches!(o, pcb_router::Outcome::Failed { .. }).then_some(n.as_str()))
+        .collect();
+
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "route.run: {} traces, {} vias, {} net(s) failed",
+            report.trace_count,
+            report.via_count,
+            failed.len()
+        ),
+    );
+    Ok(text_result(format!(
+        "Routed: {} traces, {} vias{}",
+        report.trace_count,
+        report.via_count,
+        if failed.is_empty() {
+            String::new()
+        } else {
+            format!(" ({} failed: {})", failed.len(), failed.join(", "))
+        }
+    ))
+    .with_data(json!({
+        "trace_count": report.trace_count,
+        "via_count": report.via_count,
+        "per_net": per_net,
     })))
 }
 

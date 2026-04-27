@@ -9,7 +9,7 @@ pub use schematic::render_schematic_svg;
 
 use std::fmt::Write;
 
-use pcb_core::{Board, CopperLayer, Footprint, Pad, Rect};
+use pcb_core::{Board, CopperLayer, Footprint, Pad, Rect, Trace, Via};
 
 /// Margin (in board nm) added around the content bounding box when no
 /// explicit outline is set, so footprints aren't flush against the edge.
@@ -53,8 +53,18 @@ pub fn render_svg(board: &Board) -> String {
         write_rect_stroke(&mut svg, outline, "#7d8590", 0.15);
     }
 
+    // Bottom traces first so top traces visually win at crossings.
+    for trace in board.traces.iter().filter(|t| t.layer == CopperLayer::Bottom) {
+        write_trace(&mut svg, trace);
+    }
     for fp in board.footprints_in_order() {
         write_footprint(&mut svg, fp);
+    }
+    for trace in board.traces.iter().filter(|t| t.layer == CopperLayer::Top) {
+        write_trace(&mut svg, trace);
+    }
+    for via in &board.vias {
+        write_via(&mut svg, via);
     }
 
     svg.push_str("</g></svg>");
@@ -108,6 +118,33 @@ fn write_pad(svg: &mut String, fp: &Footprint, pad: &Pad) {
         r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="{fill}"/>"##,
         x = cx - w / 2.0,
         y = cy - h / 2.0,
+    );
+}
+
+fn write_trace(svg: &mut String, trace: &Trace) {
+    let stroke = match trace.layer {
+        CopperLayer::Top => "#c97a2b",
+        CopperLayer::Bottom => "#2b6cc9",
+    };
+    let _ = write!(
+        svg,
+        r##"<line x1="{x1:.3}" y1="{y1:.3}" x2="{x2:.3}" y2="{y2:.3}" stroke="{stroke}" stroke-width="{w:.3}" stroke-linecap="round"/>"##,
+        x1 = trace.start.x.to_mm(),
+        y1 = trace.start.y.to_mm(),
+        x2 = trace.end.x.to_mm(),
+        y2 = trace.end.y.to_mm(),
+        w = trace.width.to_mm(),
+    );
+}
+
+fn write_via(svg: &mut String, via: &Via) {
+    let cx = via.position.x.to_mm();
+    let cy = via.position.y.to_mm();
+    let outer = via.diameter.to_mm() / 2.0;
+    let inner = via.drill.to_mm() / 2.0;
+    let _ = write!(
+        svg,
+        r##"<circle cx="{cx:.3}" cy="{cy:.3}" r="{outer:.3}" fill="#7d8590"/><circle cx="{cx:.3}" cy="{cy:.3}" r="{inner:.3}" fill="#0e1116"/>"##,
     );
 }
 
