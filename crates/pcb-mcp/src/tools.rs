@@ -231,6 +231,49 @@ pub fn catalog() -> Value {
             }
         },
         {
+            "name": "placement.rotate",
+            "description": "Rotate a footprint already on the board. `degrees` is the new absolute rotation (CCW); use 0, 90, 180, or 270 for clean orthogonal layouts.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["reference","degrees"],
+                "properties": {
+                    "reference": {"type":"string"},
+                    "degrees":   {"type":"number"}
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "route.clear_net",
+            "description": "Drop every trace and via belonging to one net. Use this before re-routing only that net (route.run reroutes everything).",
+            "inputSchema": {
+                "type": "object",
+                "required": ["net"],
+                "properties": { "net": {"type":"string"} },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "route.delete_trace",
+            "description": "Remove a single trace segment by id. Use the id returned by route.run or read from view.snapshot's structured content.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["id"],
+                "properties": { "id": {"type":"string"} },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "route.delete_via",
+            "description": "Remove a via by id.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["id"],
+                "properties": { "id": {"type":"string"} },
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "placement.move",
             "description": "Move a footprint already on the board to a new position. Used by the human's drag-within-canvas gesture.",
             "inputSchema": {
@@ -411,6 +454,10 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "palette.clear" => tool_palette_clear(project),
         "placement.place_from_palette" => tool_place_from_palette(project, args),
         "placement.move" => tool_placement_move(project, args),
+        "placement.rotate" => tool_placement_rotate(project, args),
+        "route.clear_net" => tool_route_clear_net(project, args),
+        "route.delete_trace" => tool_route_delete_trace(project, args),
+        "route.delete_via" => tool_route_delete_via(project, args),
         "route.add_trace" => tool_route_add_trace(project, args),
         "route.add_via" => tool_route_add_via(project, args),
         "route.clear" => tool_route_clear(project),
@@ -564,8 +611,69 @@ fn tool_placement_add(project: &Project, args: &Value) -> Result<Value, ToolErro
 
 fn tool_view_snapshot(project: &Project) -> Result<Value, ToolError> {
     let snap = project.read();
-    let svg = pcb_render::render_svg(snap.board());
-    Ok(text_result(svg).into())
+    let board = snap.board();
+    let svg = pcb_render::render_svg(board);
+
+    // Structured introspection so the agent can act on the board
+    // without parsing SVG: every footprint, trace, via with id, world
+    // position, net.
+    let outline = board.outline.map(|r| {
+        json!({
+            "x_mm": r.min.x.to_mm(),
+            "y_mm": r.min.y.to_mm(),
+            "w_mm": r.width().to_mm(),
+            "h_mm": r.height().to_mm(),
+        })
+    });
+    let footprints: Vec<Value> = board
+        .footprints_in_order()
+        .map(|fp| {
+            json!({
+                "id": fp.id.0.to_string(),
+                "reference": fp.reference,
+                "value": fp.value,
+                "library": fp.library,
+                "x_mm": fp.position.x.to_mm(),
+                "y_mm": fp.position.y.to_mm(),
+                "rotation": fp.rotation,
+                "pads": fp.pads.iter().map(|p| json!({
+                    "number": p.number,
+                    "net": p.net,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let traces: Vec<Value> = board
+        .traces
+        .iter()
+        .map(|t| json!({
+            "id": t.id.0.to_string(),
+            "net": t.net,
+            "layer": match t.layer { pcb_core::CopperLayer::Top => "top", pcb_core::CopperLayer::Bottom => "bottom" },
+            "x1_mm": t.start.x.to_mm(), "y1_mm": t.start.y.to_mm(),
+            "x2_mm": t.end.x.to_mm(),   "y2_mm": t.end.y.to_mm(),
+            "width_mm": t.width.to_mm(),
+        }))
+        .collect();
+    let vias: Vec<Value> = board
+        .vias
+        .iter()
+        .map(|v| json!({
+            "id": v.id.0.to_string(),
+            "net": v.net,
+            "x_mm": v.position.x.to_mm(),
+            "y_mm": v.position.y.to_mm(),
+            "drill_mm": v.drill.to_mm(),
+            "diameter_mm": v.diameter.to_mm(),
+        }))
+        .collect();
+
+    Ok(text_result(svg).with_data(json!({
+        "outline": outline,
+        "footprints": footprints,
+        "traces": traces,
+        "vias": vias,
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -904,6 +1012,71 @@ fn tool_placement_move(project: &Project, args: &Value) -> Result<Value, ToolErr
         input.reference, input.x_mm, input.y_mm
     ))
     .into())
+}
+
+#[derive(Debug, Deserialize)]
+struct PlacementRotateInput {
+    reference: String,
+    degrees: f32,
+}
+
+fn tool_placement_rotate(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: PlacementRotateInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("placement.rotate: {e}")))?;
+    let normalised = input.degrees.rem_euclid(360.0);
+    project
+        .rotate_footprint(&input.reference, normalised)
+        .map_err(ToolError::invalid_params)?;
+    project.log(
+        ActivityLevel::Info,
+        format!("placement.rotate: {} → {normalised:.0}°", input.reference),
+    );
+    Ok(text_result(format!(
+        "Rotated {} to {normalised:.0}°",
+        input.reference
+    ))
+    .into())
+}
+
+#[derive(Debug, Deserialize)]
+struct ClearNetInput { net: String }
+
+fn tool_route_clear_net(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: ClearNetInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("route.clear_net: {e}")))?;
+    let removed = project.clear_net_routing(&input.net);
+    project.log(
+        ActivityLevel::Info,
+        format!("route.clear_net: {} ({} item(s))", input.net, removed),
+    );
+    Ok(text_result(format!("Cleared {removed} item(s) from net {}", input.net))
+        .with_data(json!({"removed": removed})))
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteByIdInput { id: String }
+
+fn parse_id(s: &str) -> Result<pcb_core::Id, ToolError> {
+    pcb_core::Id::parse(s)
+        .map_err(|e| ToolError::invalid_params(format!("invalid id {s}: {e}")))
+}
+
+fn tool_route_delete_trace(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: DeleteByIdInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("route.delete_trace: {e}")))?;
+    let id = parse_id(&input.id)?;
+    let ok = project.delete_trace(id);
+    Ok(text_result(if ok { "Trace removed" } else { "Trace not found" }.to_string())
+        .with_data(json!({"removed": ok})))
+}
+
+fn tool_route_delete_via(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: DeleteByIdInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("route.delete_via: {e}")))?;
+    let id = parse_id(&input.id)?;
+    let ok = project.delete_via(id);
+    Ok(text_result(if ok { "Via removed" } else { "Via not found" }.to_string())
+        .with_data(json!({"removed": ok})))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1405,29 +1578,40 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         .filter_map(|(n, o)| matches!(o, pcb_router::Outcome::Failed { .. }).then_some(n.as_str()))
         .collect();
 
+    // Run DRC right after the route so the agent gets the verdict
+    // in a single round-trip and can iterate without a second call.
+    let drc_report = {
+        let snap = project.read();
+        pcb_drc::run(snap.board(), &pcb_drc::DrcOptions::default())
+    };
     project.log(
         ActivityLevel::Info,
         format!(
-            "route.run: {} traces, {} vias, {} net(s) failed",
+            "route.run: {} traces, {} vias, {} net(s) failed; DRC {}E {}W",
             report.trace_count,
             report.via_count,
-            failed.len()
+            failed.len(),
+            drc_report.error_count,
+            drc_report.warning_count,
         ),
     );
     Ok(text_result(format!(
-        "Routed: {} traces, {} vias{}",
+        "Routed: {} traces, {} vias{}; DRC: {} error(s), {} warning(s)",
         report.trace_count,
         report.via_count,
         if failed.is_empty() {
             String::new()
         } else {
             format!(" ({} failed: {})", failed.len(), failed.join(", "))
-        }
+        },
+        drc_report.error_count,
+        drc_report.warning_count,
     ))
     .with_data(json!({
         "trace_count": report.trace_count,
         "via_count": report.via_count,
         "per_net": per_net,
+        "drc": serde_json::to_value(&drc_report).unwrap_or(json!({})),
     })))
 }
 

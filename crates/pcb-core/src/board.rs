@@ -24,6 +24,12 @@ impl Id {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    /// Parse a UUID string. Used by MCP tool inputs that accept ids
+    /// as strings.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        Uuid::parse_str(s).map(Self).map_err(|e| e.to_string())
+    }
 }
 
 impl Default for Id {

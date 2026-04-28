@@ -272,6 +272,49 @@ impl Project {
         Ok(id)
     }
 
+    /// Drop every trace and via belonging to one net. Returns the
+    /// number of items removed.
+    pub fn clear_net_routing(&self, net: &str) -> usize {
+        let removed = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            let before = inner.board.traces.len() + inner.board.vias.len();
+            inner.board.traces.retain(|t| t.net != net);
+            inner.board.vias.retain(|v| v.net != net);
+            before - (inner.board.traces.len() + inner.board.vias.len())
+        };
+        if removed > 0 {
+            self.publish_routing_counts();
+        }
+        removed
+    }
+
+    /// Remove a single trace by id. Returns whether anything was removed.
+    pub fn delete_trace(&self, id: Id) -> bool {
+        let removed = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            let before = inner.board.traces.len();
+            inner.board.traces.retain(|t| t.id != id);
+            inner.board.traces.len() != before
+        };
+        if removed {
+            self.publish_routing_counts();
+        }
+        removed
+    }
+
+    pub fn delete_via(&self, id: Id) -> bool {
+        let removed = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            let before = inner.board.vias.len();
+            inner.board.vias.retain(|v| v.id != id);
+            inner.board.vias.len() != before
+        };
+        if removed {
+            self.publish_routing_counts();
+        }
+        removed
+    }
+
     /// Drop every trace and via on the board. Used by the router before
     /// re-laying routing on a fresh canvas.
     pub fn clear_routing(&self) {
