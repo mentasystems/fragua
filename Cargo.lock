@@ -2127,6 +2127,7 @@ name = "pcb-app"
 version = "0.0.0"
 dependencies = [
  "pcb-core",
+ "pcb-drc",
  "pcb-gerber",
  "pcb-mcp",
  "pcb-placer",
@@ -2151,6 +2152,10 @@ dependencies = [
 [[package]]
 name = "pcb-drc"
 version = "0.0.0"
+dependencies = [
+ "pcb-core",
+ "serde",
+]
 
 [[package]]
 name = "pcb-gerber"
@@ -2164,6 +2169,7 @@ name = "pcb-mcp"
 version = "0.0.0"
 dependencies = [
  "pcb-core",
+ "pcb-drc",
  "pcb-gerber",
  "pcb-placer",
  "pcb-render",

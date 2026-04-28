@@ -167,6 +167,55 @@ fn move_footprint(
         .map(|_| ())
 }
 
+/// Run the native DRC and return the report. The frontend reads
+/// `violations` to paint markers on the board.
+#[tauri::command]
+fn run_drc(state: State<'_, AppState>) -> Result<DrcReportPayload, String> {
+    let snap = state.project.read();
+    let report = pcb_drc::run(snap.board(), &pcb_drc::DrcOptions::default());
+    drop(snap);
+    state.project.log(
+        pcb_core::ActivityLevel::Info,
+        format!(
+            "drc: {} error(s), {} warning(s)",
+            report.error_count, report.warning_count
+        ),
+    );
+    Ok(DrcReportPayload {
+        error_count: report.error_count,
+        warning_count: report.warning_count,
+        violations: report
+            .violations
+            .iter()
+            .map(|v| DrcViolationPayload {
+                kind: format!("{:?}", v.kind),
+                severity: format!("{:?}", v.severity).to_lowercase(),
+                message: v.message.clone(),
+                x_mm: v.x_mm,
+                y_mm: v.y_mm,
+                involved: v.involved.clone(),
+            })
+            .collect(),
+    })
+}
+
+#[derive(Serialize)]
+struct DrcReportPayload {
+    error_count: usize,
+    warning_count: usize,
+    violations: Vec<DrcViolationPayload>,
+}
+
+#[derive(Serialize)]
+struct DrcViolationPayload {
+    kind: String,
+    severity: String,
+    message: String,
+    x_mm: f64,
+    y_mm: f64,
+    involved: Vec<String>,
+}
+
 /// Run the native autorouter with default options.
 #[tauri::command]
 fn run_router(state: State<'_, AppState>) -> Result<String, String> {
@@ -480,6 +529,7 @@ pub fn run() {
             rotate_footprint,
             run_auto_placement,
             run_router,
+            run_drc,
             export_fab_pack
         ])
         .run(tauri::generate_context!())

@@ -65,6 +65,7 @@ root.innerHTML = `
     </span>
     <button class="action" id="auto-place-btn" title="Run simulated-annealing placement on every palette item">auto-place</button>
     <button class="action" id="route-btn" title="Auto-route every net">route</button>
+    <button class="action" id="drc-btn" title="Run design-rule checker">drc</button>
     <button class="action" id="export-btn" title="Write Gerbers + drill + BOM + pick-and-place to ~/Downloads">export…</button>
     <button class="action danger" id="reset-btn" title="Wipe schematic, palette, and board">reset</button>
     <span class="spacer"></span>
@@ -91,6 +92,7 @@ const els = {
   palette: document.getElementById("palette-strip")!,
   autoPlace: document.getElementById("auto-place-btn")! as HTMLButtonElement,
   route: document.getElementById("route-btn")! as HTMLButtonElement,
+  drc: document.getElementById("drc-btn")! as HTMLButtonElement,
   export: document.getElementById("export-btn")! as HTMLButtonElement,
   reset: document.getElementById("reset-btn")! as HTMLButtonElement,
   boardW: document.getElementById("board-w")! as HTMLInputElement,
@@ -98,10 +100,25 @@ const els = {
   boardSet: document.getElementById("board-set")! as HTMLButtonElement,
 };
 
+type DrcViolation = {
+  kind: string;
+  severity: string;
+  message: string;
+  x_mm: number;
+  y_mm: number;
+  involved: string[];
+};
+type DrcReport = {
+  error_count: number;
+  warning_count: number;
+  violations: DrcViolation[];
+};
+
 let view: View = "board";
 let lastState: ProjectState | null = null;
 let hoveredRef: string | null = null;
 let selectedRef: string | null = null;
+let drcViolations: DrcViolation[] = [];
 
 function setView(v: View) {
   view = v;
@@ -146,10 +163,37 @@ els.route.addEventListener("click", async () => {
     setView("board");
     const summary = await invoke<string>("run_router");
     appendActivity("info", summary);
+    // Routing changes the geometry; clear stale DRC markers.
+    drcViolations = [];
+    if (lastState) paintCanvas(lastState);
   } catch (err) {
     appendActivity("error", String(err));
   } finally {
     els.route.disabled = false;
+  }
+});
+
+els.drc.addEventListener("click", async () => {
+  els.drc.disabled = true;
+  try {
+    setView("board");
+    const report = await invoke<DrcReport>("run_drc");
+    drcViolations = report.violations;
+    appendActivity(
+      report.error_count > 0 ? "error" : "info",
+      `DRC: ${report.error_count} error(s), ${report.warning_count} warning(s)`,
+    );
+    for (const v of report.violations.slice(0, 10)) {
+      appendActivity(v.severity === "error" ? "error" : "warn", `  ${v.message}`);
+    }
+    if (report.violations.length > 10) {
+      appendActivity("info", `  …and ${report.violations.length - 10} more`);
+    }
+    if (lastState) paintCanvas(lastState);
+  } catch (err) {
+    appendActivity("error", String(err));
+  } finally {
+    els.drc.disabled = false;
   }
 });
 
@@ -196,7 +240,53 @@ function reportFatal(err: unknown) {
 
 function paintCanvas(state: ProjectState) {
   els.canvas.innerHTML = view === "schematic" ? state.schematic_svg : state.board_svg;
-  if (view === "board") attachBoardPointerHandlers();
+  if (view === "board") {
+    attachBoardPointerHandlers();
+    paintDrcMarkers();
+  }
+}
+
+function paintDrcMarkers() {
+  if (drcViolations.length === 0) return;
+  const svg = els.canvas.querySelector("svg") as SVGSVGElement | null;
+  if (!svg) return;
+  const inner = svg.querySelector("g[transform='scale(1,-1)']") as SVGGElement | null;
+  const host = inner ?? svg;
+  // SVG namespace required for createElementNS.
+  const NS = "http://www.w3.org/2000/svg";
+  const layer = document.createElementNS(NS, "g");
+  layer.setAttribute("class", "drc-markers");
+  for (const v of drcViolations) {
+    const color = v.severity === "error" ? "#f85149" : "#d29922";
+    const r = 1.2;
+    const circle = document.createElementNS(NS, "circle");
+    circle.setAttribute("cx", String(v.x_mm));
+    circle.setAttribute("cy", String(v.y_mm));
+    circle.setAttribute("r", String(r));
+    circle.setAttribute("fill", "none");
+    circle.setAttribute("stroke", color);
+    circle.setAttribute("stroke-width", "0.25");
+    const title = document.createElementNS(NS, "title");
+    title.textContent = v.message;
+    circle.appendChild(title);
+    layer.appendChild(circle);
+    // X mark inside.
+    const len = r * 0.6;
+    for (const [x1, y1, x2, y2] of [
+      [v.x_mm - len, v.y_mm - len, v.x_mm + len, v.y_mm + len],
+      [v.x_mm - len, v.y_mm + len, v.x_mm + len, v.y_mm - len],
+    ] as const) {
+      const line = document.createElementNS(NS, "line");
+      line.setAttribute("x1", String(x1));
+      line.setAttribute("y1", String(y1));
+      line.setAttribute("x2", String(x2));
+      line.setAttribute("y2", String(y2));
+      line.setAttribute("stroke", color);
+      line.setAttribute("stroke-width", "0.18");
+      layer.appendChild(line);
+    }
+  }
+  host.appendChild(layer);
 }
 
 function paintPalette(state: ProjectState) {

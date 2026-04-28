@@ -364,6 +364,20 @@ pub fn catalog() -> Value {
             }
         },
         {
+            "name": "drc.run",
+            "description": "Run the native design-rule checker on the current board: pad↔pad / trace↔trace / trace↔pad clearance, edge clearance, unconnected pads, narrow traces, small drills. Returns a structured report with the list of violations (each has a position, severity, and the items involved).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "min_clearance_mm": { "type": "number", "default": 0.2 },
+                    "edge_clearance_mm": { "type": "number", "default": 0.3 },
+                    "min_trace_width_mm": { "type": "number", "default": 0.1 },
+                    "min_drill_mm": { "type": "number", "default": 0.2 }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "output.fab_pack",
             "description": "Write the manufacturing fab pack — Gerber RS-274X (copper, mask, edge cuts), Excellon drill files, BOM CSV, and pick-and-place CSV — to a directory on disk. Returns the absolute paths of every file written.",
             "inputSchema": {
@@ -401,6 +415,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "route.add_via" => tool_route_add_via(project, args),
         "route.clear" => tool_route_clear(project),
         "route.run" => tool_route_run(project, args),
+        "drc.run" => tool_drc_run(project, args),
         "output.fab_pack" => tool_output_fab_pack(project, args),
         _ => Err(ToolError {
             code: crate::protocol::error_code::METHOD_NOT_FOUND,
@@ -1414,6 +1429,46 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         "via_count": report.via_count,
         "per_net": per_net,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+struct DrcInput {
+    #[serde(default)]
+    min_clearance_mm: Option<f64>,
+    #[serde(default)]
+    edge_clearance_mm: Option<f64>,
+    #[serde(default)]
+    min_trace_width_mm: Option<f64>,
+    #[serde(default)]
+    min_drill_mm: Option<f64>,
+}
+
+fn tool_drc_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: DrcInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("drc.run: {e}")))?;
+
+    let mut opts = pcb_drc::DrcOptions::default();
+    if let Some(v) = input.min_clearance_mm { opts.min_clearance = Length::from_mm(v); }
+    if let Some(v) = input.edge_clearance_mm { opts.edge_clearance = Length::from_mm(v); }
+    if let Some(v) = input.min_trace_width_mm { opts.min_trace_width = Length::from_mm(v); }
+    if let Some(v) = input.min_drill_mm { opts.min_drill = Length::from_mm(v); }
+
+    let snap = project.read();
+    let report = pcb_drc::run(snap.board(), &opts);
+    drop(snap);
+
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "drc.run: {} error(s), {} warning(s)",
+            report.error_count, report.warning_count
+        ),
+    );
+    let summary = format!(
+        "DRC: {} error(s), {} warning(s)",
+        report.error_count, report.warning_count
+    );
+    Ok(text_result(summary).with_data(serde_json::to_value(&report).unwrap_or(json!({}))))
 }
 
 #[derive(Debug, Deserialize)]

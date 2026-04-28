@@ -1,7 +1,568 @@
-//! `pcb-drc` — design rule check.
+//! `pcb-drc` — native design rule checker.
 //!
-//! Geometric checks over a `Board`: clearance, track width, drill sizes,
-//! via annular ring, edge clearance, unconnected nets. Emits violations
-//! with positions so the UI can highlight them and the agent can react.
+//! Phase 4 implementation: five geometric checks over a `Board`.
+//! - **PadPadClearance**: two pads on the same copper layer that
+//!   belong to different nets must keep `min_clearance` of breathing
+//!   room between their outer edges.
+//! - **TraceTraceClearance**: two trace segments on the same layer
+//!   from different nets must do likewise (edge-to-edge after
+//!   subtracting the trace half-widths).
+//! - **TracePadClearance**: trace edge vs pad edge across nets.
+//! - **EdgeClearance**: every copper item (pad, trace, via) must sit
+//!   at least `edge_clearance` inside the board outline.
+//! - **UnconnectedPad**: a pad declares a net but no copper item of
+//!   that net touches it — usually means the router gave up.
 //!
-//! Pure geometry, no shell-out to `kicad-cli`.
+//! Pads are axis-aligned in world coords because we only model 90°
+//! rotations; this lets the geometry collapse to AABB-vs-AABB and
+//! AABB-vs-segment distance checks instead of full polygon clipping.
+
+use serde::Serialize;
+
+use pcb_core::{Board, CopperLayer, Footprint, Length, Pad, Rect, Trace};
+
+#[derive(Debug, Clone)]
+pub struct DrcOptions {
+    pub min_clearance: Length,
+    pub edge_clearance: Length,
+    pub min_trace_width: Length,
+    pub min_drill: Length,
+}
+
+impl Default for DrcOptions {
+    fn default() -> Self {
+        Self {
+            // 0.2 mm matches our router's `clearance` baseline; DRC
+            // is the receipt that the router actually honoured it.
+            min_clearance: Length::from_mm(0.2),
+            edge_clearance: Length::from_mm(0.3),
+            min_trace_width: Length::from_mm(0.1),
+            min_drill: Length::from_mm(0.2),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViolationKind {
+    PadPadClearance,
+    TraceTraceClearance,
+    TracePadClearance,
+    EdgeClearance,
+    UnconnectedPad,
+    NarrowTrace,
+    SmallDrill,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Violation {
+    pub kind: ViolationKind,
+    pub severity: Severity,
+    pub message: String,
+    /// Centre of the offending region in board mm; the UI draws a
+    /// marker here.
+    pub x_mm: f64,
+    pub y_mm: f64,
+    /// References of items involved (e.g. `["R1.2", "C1.1"]`).
+    pub involved: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DrcReport {
+    pub violations: Vec<Violation>,
+    pub error_count: usize,
+    pub warning_count: usize,
+}
+
+impl DrcReport {
+    fn push(&mut self, v: Violation) {
+        match v.severity {
+            Severity::Error => self.error_count += 1,
+            Severity::Warning => self.warning_count += 1,
+        }
+        self.violations.push(v);
+    }
+}
+
+#[must_use]
+pub fn run(board: &Board, opts: &DrcOptions) -> DrcReport {
+    let mut report = DrcReport::default();
+    let pads = collect_pad_geometry(board);
+    check_pad_pad(&pads, opts, &mut report);
+    check_trace_trace(board, opts, &mut report);
+    check_trace_pad(board, &pads, opts, &mut report);
+    if let Some(outline) = board.outline {
+        check_edge(board, &pads, outline, opts, &mut report);
+    }
+    check_unconnected_pads(board, &pads, &mut report);
+    check_narrow_traces(board, opts, &mut report);
+    check_small_drills(board, opts, &mut report);
+    report
+}
+
+/// World-space pad geometry — flattened so the checks don't have to
+/// re-do the rotation maths repeatedly.
+struct PadGeom<'a> {
+    fp_reference: &'a str,
+    pad_number: &'a str,
+    layer: CopperLayer,
+    rect: Rect,
+    net: Option<&'a str>,
+}
+
+impl PadGeom<'_> {
+    fn label(&self) -> String {
+        format!("{}.{}", self.fp_reference, self.pad_number)
+    }
+}
+
+fn collect_pad_geometry(board: &Board) -> Vec<PadGeom<'_>> {
+    let mut out = Vec::new();
+    for fp in board.footprints_in_order() {
+        for pad in &fp.pads {
+            out.push(PadGeom {
+                fp_reference: fp.reference.as_str(),
+                pad_number: pad.number.as_str(),
+                layer: pad.layer,
+                rect: pad_world_rect(fp, pad),
+                net: pad.net.as_deref(),
+            });
+        }
+    }
+    out
+}
+
+fn pad_world_rect(fp: &Footprint, pad: &Pad) -> Rect {
+    let center = fp.pad_world_center(pad);
+    let (w, h) = fp.pad_world_size(pad);
+    Rect::from_center(center, w, h)
+}
+
+fn check_pad_pad(pads: &[PadGeom], opts: &DrcOptions, report: &mut DrcReport) {
+    let clr = opts.min_clearance.to_mm();
+    for i in 0..pads.len() {
+        for j in (i + 1)..pads.len() {
+            let a = &pads[i];
+            let b = &pads[j];
+            if a.layer != b.layer {
+                continue;
+            }
+            // Same net or both unassigned: not a clearance violation.
+            if a.net == b.net && a.net.is_some() {
+                continue;
+            }
+            let gap = aabb_gap_mm(a.rect, b.rect);
+            if gap + 1e-6 < clr {
+                let mid = midpoint(a.rect, b.rect);
+                report.push(Violation {
+                    kind: ViolationKind::PadPadClearance,
+                    severity: Severity::Error,
+                    message: format!(
+                        "pad {} – pad {}: {gap:.3} mm < {clr:.3} mm",
+                        a.label(),
+                        b.label()
+                    ),
+                    x_mm: mid.0,
+                    y_mm: mid.1,
+                    involved: vec![a.label(), b.label()],
+                });
+            }
+        }
+    }
+}
+
+fn check_trace_trace(board: &Board, opts: &DrcOptions, report: &mut DrcReport) {
+    let clr = opts.min_clearance.to_mm();
+    let traces: Vec<&Trace> = board.traces.iter().collect();
+    for i in 0..traces.len() {
+        for j in (i + 1)..traces.len() {
+            let a = traces[i];
+            let b = traces[j];
+            if a.layer != b.layer {
+                continue;
+            }
+            if a.net == b.net {
+                continue;
+            }
+            let half_a = a.width.to_mm() / 2.0;
+            let half_b = b.width.to_mm() / 2.0;
+            let centerline_dist = segment_segment_distance(
+                (a.start.x.to_mm(), a.start.y.to_mm()),
+                (a.end.x.to_mm(), a.end.y.to_mm()),
+                (b.start.x.to_mm(), b.start.y.to_mm()),
+                (b.end.x.to_mm(), b.end.y.to_mm()),
+            );
+            let gap = centerline_dist - half_a - half_b;
+            if gap + 1e-6 < clr {
+                let pa_mid = (
+                    (a.start.x.to_mm() + a.end.x.to_mm()) / 2.0,
+                    (a.start.y.to_mm() + a.end.y.to_mm()) / 2.0,
+                );
+                let pb_mid = (
+                    (b.start.x.to_mm() + b.end.x.to_mm()) / 2.0,
+                    (b.start.y.to_mm() + b.end.y.to_mm()) / 2.0,
+                );
+                report.push(Violation {
+                    kind: ViolationKind::TraceTraceClearance,
+                    severity: Severity::Error,
+                    message: format!(
+                        "trace {} – trace {}: {gap:.3} mm < {clr:.3} mm",
+                        a.net, b.net
+                    ),
+                    x_mm: (pa_mid.0 + pb_mid.0) / 2.0,
+                    y_mm: (pa_mid.1 + pb_mid.1) / 2.0,
+                    involved: vec![a.net.clone(), b.net.clone()],
+                });
+            }
+        }
+    }
+}
+
+fn check_trace_pad(
+    board: &Board,
+    pads: &[PadGeom],
+    opts: &DrcOptions,
+    report: &mut DrcReport,
+) {
+    let clr = opts.min_clearance.to_mm();
+    for trace in &board.traces {
+        let half = trace.width.to_mm() / 2.0;
+        for pad in pads {
+            if pad.layer != trace.layer {
+                continue;
+            }
+            if pad.net == Some(trace.net.as_str()) {
+                continue;
+            }
+            let centerline_dist = segment_aabb_distance(
+                (trace.start.x.to_mm(), trace.start.y.to_mm()),
+                (trace.end.x.to_mm(), trace.end.y.to_mm()),
+                pad.rect,
+            );
+            let gap = centerline_dist - half;
+            if gap + 1e-6 < clr {
+                let mid_p = pad_center(pad.rect);
+                report.push(Violation {
+                    kind: ViolationKind::TracePadClearance,
+                    severity: Severity::Error,
+                    message: format!(
+                        "trace {} – pad {}: {gap:.3} mm < {clr:.3} mm",
+                        trace.net,
+                        pad.label()
+                    ),
+                    x_mm: mid_p.0,
+                    y_mm: mid_p.1,
+                    involved: vec![trace.net.clone(), pad.label()],
+                });
+            }
+        }
+    }
+}
+
+fn check_edge(
+    board: &Board,
+    pads: &[PadGeom],
+    outline: Rect,
+    opts: &DrcOptions,
+    report: &mut DrcReport,
+) {
+    let clr = opts.edge_clearance.to_mm();
+    let ox0 = outline.min.x.to_mm();
+    let oy0 = outline.min.y.to_mm();
+    let ox1 = outline.max.x.to_mm();
+    let oy1 = outline.max.y.to_mm();
+    let edge_gap = |x0: f64, y0: f64, x1: f64, y1: f64| -> f64 {
+        let inside_x0 = x0 - ox0;
+        let inside_x1 = ox1 - x1;
+        let inside_y0 = y0 - oy0;
+        let inside_y1 = oy1 - y1;
+        inside_x0.min(inside_x1).min(inside_y0).min(inside_y1)
+    };
+    for pad in pads {
+        let r = pad.rect;
+        let gap = edge_gap(r.min.x.to_mm(), r.min.y.to_mm(), r.max.x.to_mm(), r.max.y.to_mm());
+        if gap + 1e-6 < clr {
+            let p = pad_center(r);
+            report.push(Violation {
+                kind: ViolationKind::EdgeClearance,
+                severity: Severity::Error,
+                message: format!("pad {} touches edge: {gap:.3} mm < {clr:.3} mm", pad.label()),
+                x_mm: p.0,
+                y_mm: p.1,
+                involved: vec![pad.label()],
+            });
+        }
+    }
+    for trace in &board.traces {
+        let half = trace.width.to_mm() / 2.0;
+        let xmin = trace.start.x.to_mm().min(trace.end.x.to_mm()) - half;
+        let xmax = trace.start.x.to_mm().max(trace.end.x.to_mm()) + half;
+        let ymin = trace.start.y.to_mm().min(trace.end.y.to_mm()) - half;
+        let ymax = trace.start.y.to_mm().max(trace.end.y.to_mm()) + half;
+        let gap = edge_gap(xmin, ymin, xmax, ymax);
+        if gap + 1e-6 < clr {
+            let mx = (trace.start.x.to_mm() + trace.end.x.to_mm()) / 2.0;
+            let my = (trace.start.y.to_mm() + trace.end.y.to_mm()) / 2.0;
+            report.push(Violation {
+                kind: ViolationKind::EdgeClearance,
+                severity: Severity::Error,
+                message: format!("trace {} touches edge: {gap:.3} mm < {clr:.3} mm", trace.net),
+                x_mm: mx,
+                y_mm: my,
+                involved: vec![trace.net.clone()],
+            });
+        }
+    }
+    for via in &board.vias {
+        let r = via.diameter.to_mm() / 2.0;
+        let cx = via.position.x.to_mm();
+        let cy = via.position.y.to_mm();
+        let gap = edge_gap(cx - r, cy - r, cx + r, cy + r);
+        if gap + 1e-6 < clr {
+            report.push(Violation {
+                kind: ViolationKind::EdgeClearance,
+                severity: Severity::Error,
+                message: format!("via {} touches edge: {gap:.3} mm < {clr:.3} mm", via.net),
+                x_mm: cx,
+                y_mm: cy,
+                involved: vec![via.net.clone()],
+            });
+        }
+    }
+}
+
+fn check_unconnected_pads(board: &Board, pads: &[PadGeom], report: &mut DrcReport) {
+    for pad in pads {
+        let Some(net) = pad.net else { continue; };
+        // Acceptable: another same-net pad on the same layer overlaps
+        // (rare, would mean pads butted together) OR a trace endpoint
+        // of the same net touches the pad rect on the same layer OR
+        // a via on this net sits on top (any layer).
+        let touched = pad_has_same_net_neighbour(pads, pad)
+            || trace_touches_pad(board, pad, net)
+            || via_touches_pad(board, pad, net);
+        if !touched {
+            let p = pad_center(pad.rect);
+            report.push(Violation {
+                kind: ViolationKind::UnconnectedPad,
+                severity: Severity::Warning,
+                message: format!("pad {} on net {net} has no copper", pad.label()),
+                x_mm: p.0,
+                y_mm: p.1,
+                involved: vec![pad.label()],
+            });
+        }
+    }
+}
+
+fn pad_has_same_net_neighbour(pads: &[PadGeom], pad: &PadGeom) -> bool {
+    let net = match pad.net {
+        Some(n) => n,
+        None => return false,
+    };
+    for other in pads {
+        if std::ptr::eq(other, pad) {
+            continue;
+        }
+        if other.layer != pad.layer {
+            continue;
+        }
+        if other.net != Some(net) {
+            continue;
+        }
+        if aabb_gap_mm(pad.rect, other.rect) <= 0.0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn trace_touches_pad(board: &Board, pad: &PadGeom, net: &str) -> bool {
+    for trace in &board.traces {
+        if trace.layer != pad.layer || trace.net != net {
+            continue;
+        }
+        let d = segment_aabb_distance(
+            (trace.start.x.to_mm(), trace.start.y.to_mm()),
+            (trace.end.x.to_mm(), trace.end.y.to_mm()),
+            pad.rect,
+        );
+        let half = trace.width.to_mm() / 2.0;
+        if d - half <= 1e-6 {
+            return true;
+        }
+    }
+    false
+}
+
+fn via_touches_pad(board: &Board, pad: &PadGeom, net: &str) -> bool {
+    for via in &board.vias {
+        if via.net != net {
+            continue;
+        }
+        let r = via.diameter.to_mm() / 2.0;
+        let cx = via.position.x.to_mm();
+        let cy = via.position.y.to_mm();
+        // Distance from circle to AABB.
+        let dx = (cx - pad.rect.max.x.to_mm().min(cx.max(pad.rect.min.x.to_mm()))).abs();
+        let dy = (cy - pad.rect.max.y.to_mm().min(cy.max(pad.rect.min.y.to_mm()))).abs();
+        let d = (dx * dx + dy * dy).sqrt();
+        if d <= r + 1e-6 {
+            return true;
+        }
+    }
+    false
+}
+
+fn check_narrow_traces(board: &Board, opts: &DrcOptions, report: &mut DrcReport) {
+    let min_w = opts.min_trace_width.to_mm();
+    for trace in &board.traces {
+        let w = trace.width.to_mm();
+        if w + 1e-6 < min_w {
+            let mx = (trace.start.x.to_mm() + trace.end.x.to_mm()) / 2.0;
+            let my = (trace.start.y.to_mm() + trace.end.y.to_mm()) / 2.0;
+            report.push(Violation {
+                kind: ViolationKind::NarrowTrace,
+                severity: Severity::Warning,
+                message: format!("trace {} is {w:.3} mm < min {min_w:.3} mm", trace.net),
+                x_mm: mx,
+                y_mm: my,
+                involved: vec![trace.net.clone()],
+            });
+        }
+    }
+}
+
+fn check_small_drills(board: &Board, opts: &DrcOptions, report: &mut DrcReport) {
+    let min_d = opts.min_drill.to_mm();
+    for via in &board.vias {
+        let d = via.drill.to_mm();
+        if d + 1e-6 < min_d {
+            report.push(Violation {
+                kind: ViolationKind::SmallDrill,
+                severity: Severity::Warning,
+                message: format!(
+                    "via on {} drilled at {d:.3} mm < min {min_d:.3} mm",
+                    via.net
+                ),
+                x_mm: via.position.x.to_mm(),
+                y_mm: via.position.y.to_mm(),
+                involved: vec![via.net.clone()],
+            });
+        }
+    }
+}
+
+// -- Geometry helpers ---------------------------------------------
+
+fn aabb_gap_mm(a: Rect, b: Rect) -> f64 {
+    let ax0 = a.min.x.to_mm();
+    let ay0 = a.min.y.to_mm();
+    let ax1 = a.max.x.to_mm();
+    let ay1 = a.max.y.to_mm();
+    let bx0 = b.min.x.to_mm();
+    let by0 = b.min.y.to_mm();
+    let bx1 = b.max.x.to_mm();
+    let by1 = b.max.y.to_mm();
+    let gap_x = (bx0 - ax1).max(ax0 - bx1).max(0.0);
+    let gap_y = (by0 - ay1).max(ay0 - by1).max(0.0);
+    (gap_x * gap_x + gap_y * gap_y).sqrt()
+}
+
+fn pad_center(r: Rect) -> (f64, f64) {
+    (
+        (r.min.x.to_mm() + r.max.x.to_mm()) / 2.0,
+        (r.min.y.to_mm() + r.max.y.to_mm()) / 2.0,
+    )
+}
+
+fn midpoint(a: Rect, b: Rect) -> (f64, f64) {
+    let pa = pad_center(a);
+    let pb = pad_center(b);
+    ((pa.0 + pb.0) / 2.0, (pa.1 + pb.1) / 2.0)
+}
+
+fn point_segment_distance(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+    let dx = b.0 - a.0;
+    let dy = b.1 - a.1;
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-12 {
+        let ex = p.0 - a.0;
+        let ey = p.1 - a.1;
+        return (ex * ex + ey * ey).sqrt();
+    }
+    let t = ((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2;
+    let t = t.clamp(0.0, 1.0);
+    let cx = a.0 + t * dx;
+    let cy = a.1 + t * dy;
+    let ex = p.0 - cx;
+    let ey = p.1 - cy;
+    (ex * ex + ey * ey).sqrt()
+}
+
+fn segment_segment_distance(
+    a0: (f64, f64),
+    a1: (f64, f64),
+    b0: (f64, f64),
+    b1: (f64, f64),
+) -> f64 {
+    if segments_intersect(a0, a1, b0, b1) {
+        return 0.0;
+    }
+    point_segment_distance(a0, b0, b1)
+        .min(point_segment_distance(a1, b0, b1))
+        .min(point_segment_distance(b0, a0, a1))
+        .min(point_segment_distance(b1, a0, a1))
+}
+
+fn segments_intersect(
+    a0: (f64, f64),
+    a1: (f64, f64),
+    b0: (f64, f64),
+    b1: (f64, f64),
+) -> bool {
+    fn orient(p: (f64, f64), q: (f64, f64), r: (f64, f64)) -> f64 {
+        (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0)
+    }
+    let o1 = orient(a0, a1, b0);
+    let o2 = orient(a0, a1, b1);
+    let o3 = orient(b0, b1, a0);
+    let o4 = orient(b0, b1, a1);
+    (o1 * o2 < 0.0) && (o3 * o4 < 0.0)
+}
+
+fn segment_aabb_distance(a: (f64, f64), b: (f64, f64), rect: Rect) -> f64 {
+    let rx0 = rect.min.x.to_mm();
+    let ry0 = rect.min.y.to_mm();
+    let rx1 = rect.max.x.to_mm();
+    let ry1 = rect.max.y.to_mm();
+    // If either endpoint is inside the rect → 0.
+    let endpoint_inside = |p: (f64, f64)| -> bool {
+        p.0 >= rx0 && p.0 <= rx1 && p.1 >= ry0 && p.1 <= ry1
+    };
+    if endpoint_inside(a) || endpoint_inside(b) {
+        return 0.0;
+    }
+    // Distance from segment to each rect edge.
+    let edges = [
+        ((rx0, ry0), (rx1, ry0)),
+        ((rx1, ry0), (rx1, ry1)),
+        ((rx1, ry1), (rx0, ry1)),
+        ((rx0, ry1), (rx0, ry0)),
+    ];
+    let mut best = f64::INFINITY;
+    for (e0, e1) in edges {
+        let d = segment_segment_distance(a, b, e0, e1);
+        if d < best {
+            best = d;
+        }
+    }
+    best
+}
