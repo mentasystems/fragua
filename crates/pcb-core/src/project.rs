@@ -113,6 +113,17 @@ impl Project {
         id
     }
 
+    /// Drop everything: schematic, footprints, traces, vias. Useful
+    /// between demo runs so state doesn't accumulate across calls.
+    pub fn reset(&self) {
+        {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.board = Board::new();
+            inner.schematic = Schematic::new();
+        }
+        self.bus.publish(Event::ProjectChanged);
+    }
+
     /// Drop every trace and via on the board. Used by the router before
     /// re-laying routing on a fresh canvas.
     pub fn clear_routing(&self) {

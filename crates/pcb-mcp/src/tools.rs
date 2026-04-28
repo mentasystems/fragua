@@ -82,6 +82,15 @@ pub fn catalog() -> Value {
             }
         },
         {
+            "name": "project.reset",
+            "description": "Drop every symbol, net, footprint, trace, and via. Returns the project to an empty state — useful between demos or when starting a new design from scratch.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "schematic.add_symbol",
             "description": "Add a symbol to the schematic. For discrete primitives (resistor, capacitor, inductor, led, diode), pins are implicit. For generic ICs, declare every pin with its number, optional name, and side (left/right/top/bottom). Position is in millimetres on the schematic page; if omitted the symbol is placed on the next free 5×3 grid slot.",
             "inputSchema": {
@@ -275,6 +284,7 @@ pub fn catalog() -> Value {
 pub fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Value, ToolError> {
     match name {
         "project.status" => tool_project_status(project),
+        "project.reset" => tool_project_reset(project),
         "placement.add" => tool_placement_add(project, args),
         "view.snapshot" => tool_view_snapshot(project),
         "schematic.add_symbol" => tool_schematic_add_symbol(project, args),
@@ -292,6 +302,12 @@ pub fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Value, To
             message: format!("unknown tool: {name}"),
         }),
     }
+}
+
+fn tool_project_reset(project: &Project) -> Result<Value, ToolError> {
+    project.reset();
+    project.log(ActivityLevel::Info, "project.reset");
+    Ok(text_result("Project reset").into())
 }
 
 fn tool_project_status(project: &Project) -> Result<Value, ToolError> {
