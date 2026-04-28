@@ -59,7 +59,7 @@ impl McpServer {
             if line.trim().is_empty() {
                 continue;
             }
-            if let Some(reply) = self.handle_line(&line) {
+            if let Some(reply) = self.handle_line(&line).await {
                 let mut bytes = serde_json::to_vec(&reply).unwrap_or_default();
                 bytes.push(b'\n');
                 writer.write_all(&bytes).await?;
@@ -69,7 +69,7 @@ impl McpServer {
         Ok(())
     }
 
-    fn handle_line(&self, line: &str) -> Option<Response> {
+    async fn handle_line(&self, line: &str) -> Option<Response> {
         let req: Request = match serde_json::from_str(line) {
             Ok(r) => r,
             Err(e) => {
@@ -84,10 +84,10 @@ impl McpServer {
         let Some(id) = req.id.clone() else {
             return None;
         };
-        Some(self.dispatch(&req, id))
+        Some(self.dispatch(&req, id).await)
     }
 
-    fn dispatch(&self, req: &Request, id: Value) -> Response {
+    async fn dispatch(&self, req: &Request, id: Value) -> Response {
         match req.method.as_str() {
             "initialize" => Response::ok(
                 id,
@@ -109,7 +109,7 @@ impl McpServer {
                 id,
                 json!({ "tools": tools::catalog() }),
             ),
-            "tools/call" => self.handle_tool_call(req, id),
+            "tools/call" => self.handle_tool_call(req, id).await,
             "ping" => Response::ok(id, json!({})),
             other => Response::err(
                 id,
@@ -119,7 +119,7 @@ impl McpServer {
         }
     }
 
-    fn handle_tool_call(&self, req: &Request, id: Value) -> Response {
+    async fn handle_tool_call(&self, req: &Request, id: Value) -> Response {
         let name = req
             .params
             .get("name")
@@ -130,7 +130,7 @@ impl McpServer {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
-        match tools::dispatch(&self.project, name, &args) {
+        match tools::dispatch(&self.project, name, &args).await {
             Ok(value) => Response::ok(id, value),
             Err(err) => Response::err(id, err.code, err.message),
         }

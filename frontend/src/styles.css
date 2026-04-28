@@ -23,9 +23,10 @@ html, body, #app {
 #app {
   display: grid;
   grid-template-columns: 1fr 320px;
-  grid-template-rows: 36px 1fr;
+  grid-template-rows: 36px auto 1fr;
   grid-template-areas:
     "topbar topbar"
+    "palette activity"
     "canvas activity";
 }
 
@@ -76,6 +77,94 @@ html, body, #app {
   width: 100%;
   height: 100%;
   display: block;
+}
+
+.palette-strip {
+  grid-area: palette;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  min-height: 36px;
+  align-items: center;
+}
+.palette-strip.empty {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: italic;
+}
+.palette-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  font-size: 11px;
+  cursor: grab;
+  user-select: none;
+}
+.palette-chip:active { cursor: grabbing; }
+.palette-chip.dragging { opacity: 0.5; }
+.palette-chip .chip-ref { color: var(--accent); font-weight: 600; }
+.palette-chip .chip-val { color: var(--text); }
+.palette-chip .chip-meta { color: var(--muted); font-size: 10px; }
+
+.topbar .action {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 3px 12px;
+  font: inherit;
+  font-size: 11px;
+  border-radius: 3px;
+  cursor: pointer;
+  margin-left: 12px;
+}
+.topbar .action:hover { background: var(--accent); color: var(--bg); }
+.topbar .action:disabled { opacity: 0.4; cursor: progress; }
+
+.topbar .board-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 16px;
+}
+.topbar .board-size input {
+  width: 50px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 2px 6px;
+  font: inherit;
+  font-size: 11px;
+  border-radius: 3px;
+  text-align: right;
+}
+.topbar .board-size input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.topbar .board-size .action {
+  margin-left: 4px;
+  padding: 2px 8px;
+}
+
+.drag-ghost {
+  position: fixed;
+  pointer-events: none;
+  z-index: 1000;
+  background: var(--accent);
+  color: var(--bg);
+  padding: 3px 8px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 3px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
 }
 
 .activity-pane {

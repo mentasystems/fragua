@@ -7,6 +7,7 @@ members = [
     "crates/pcb-gerber",
     "crates/pcb-render",
     "crates/pcb-mcp",
+    "crates/pcb-placer",
     "src-tauri",
 ]
 

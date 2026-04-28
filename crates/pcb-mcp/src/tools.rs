@@ -82,6 +82,19 @@ pub fn catalog() -> Value {
             }
         },
         {
+            "name": "board.set_outline",
+            "description": "Set the rectangular outline (Edge.Cuts) of the board, in millimetres. Required before placement.auto so the placer has a workspace and the gerbers have a cut shape. Origin is (0,0) at the top-left corner of the rectangle.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["w_mm","h_mm"],
+                "properties": {
+                    "w_mm": { "type": "number", "minimum": 1 },
+                    "h_mm": { "type": "number", "minimum": 1 }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "project.reset",
             "description": "Drop every symbol, net, footprint, trace, and via. Returns the project to an empty state — useful between demos or when starting a new design from scratch.",
             "inputSchema": {
@@ -155,6 +168,92 @@ pub fn catalog() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {},
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "palette.add",
+            "description": "Register footprints in the project's palette — the strip of components shown above the board canvas. Items in the palette are not yet on the board; the human drags them in (locking them where dropped) or the agent calls placement.auto to settle the remaining ones automatically. Pads are tagged with their schematic net so once they hit the board the routing is ready to run.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["footprints"],
+                "properties": {
+                    "footprints": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["reference","library","pads"],
+                            "properties": {
+                                "reference": { "type": "string" },
+                                "library":   { "type": "string" },
+                                "rotation":  { "type": "number", "default": 0 },
+                                "layer":     { "type": "string", "enum": ["top","bottom"], "default": "top" },
+                                "pads": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "required": ["number","x_mm","y_mm","w_mm","h_mm"],
+                                        "properties": {
+                                            "number": {"type":"string"},
+                                            "x_mm":   {"type":"number"},
+                                            "y_mm":   {"type":"number"},
+                                            "w_mm":   {"type":"number"},
+                                            "h_mm":   {"type":"number"},
+                                            "layer":  {"type":"string","enum":["top","bottom"],"default":"top"}
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "minItems": 1
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "palette.clear",
+            "description": "Drop every footprint currently in the palette. Footprints already on the board are untouched.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "placement.place_from_palette",
+            "description": "Take the named footprint out of the palette and place it on the board at (x_mm, y_mm). The footprint is then locked at that position from the auto-placer's point of view (it's a board obstacle). Used by the human's drag-from-palette gesture.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["reference","x_mm","y_mm"],
+                "properties": {
+                    "reference": {"type":"string"},
+                    "x_mm":      {"type":"number"},
+                    "y_mm":      {"type":"number"}
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "placement.move",
+            "description": "Move a footprint already on the board to a new position. Used by the human's drag-within-canvas gesture.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["reference","x_mm","y_mm"],
+                "properties": {
+                    "reference": {"type":"string"},
+                    "x_mm":      {"type":"number"},
+                    "y_mm":      {"type":"number"}
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "placement.auto",
+            "description": "Auto-place every footprint currently in the palette using a force-directed simulation. Footprints already on the board are treated as locked obstacles — they don't move. The simulation streams frames to the UI so the human watches components settle in real time. Idempotent: repeated calls just re-settle the same palette items. Requires the board outline to be set first (board.set_outline).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "iterations":   { "type": "integer", "default": 200 },
+                    "frame_every":  { "type": "integer", "default": 4 },
+                    "frame_delay_ms":{ "type": "integer", "default": 100 }
+                },
                 "additionalProperties": false
             }
         },
@@ -281,10 +380,11 @@ pub fn catalog() -> Value {
 }
 
 /// Dispatch a `tools/call` to the right handler.
-pub fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Value, ToolError> {
+pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Value, ToolError> {
     match name {
         "project.status" => tool_project_status(project),
         "project.reset" => tool_project_reset(project),
+        "board.set_outline" => tool_board_set_outline(project, args),
         "placement.add" => tool_placement_add(project, args),
         "view.snapshot" => tool_view_snapshot(project),
         "schematic.add_symbol" => tool_schematic_add_symbol(project, args),
@@ -292,6 +392,11 @@ pub fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Value, To
         "schematic.status" => tool_schematic_status(project),
         "schematic.snapshot" => tool_schematic_snapshot(project),
         "placement.from_schematic" => tool_placement_from_schematic(project, args),
+        "placement.auto" => tool_placement_auto(project, args).await,
+        "palette.add" => tool_palette_add(project, args),
+        "palette.clear" => tool_palette_clear(project),
+        "placement.place_from_palette" => tool_place_from_palette(project, args),
+        "placement.move" => tool_placement_move(project, args),
         "route.add_trace" => tool_route_add_trace(project, args),
         "route.add_via" => tool_route_add_via(project, args),
         "route.clear" => tool_route_clear(project),
@@ -308,6 +413,31 @@ fn tool_project_reset(project: &Project) -> Result<Value, ToolError> {
     project.reset();
     project.log(ActivityLevel::Info, "project.reset");
     Ok(text_result("Project reset").into())
+}
+
+#[derive(Debug, Deserialize)]
+struct SetOutlineInput {
+    w_mm: f64,
+    h_mm: f64,
+}
+
+fn tool_board_set_outline(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: SetOutlineInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("board.set_outline: {e}")))?;
+    let outline = pcb_core::Rect::from_corners(
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+        Point::new(Length::from_mm(input.w_mm), Length::from_mm(input.h_mm)),
+    );
+    project.set_outline(outline);
+    project.log(
+        ActivityLevel::Info,
+        format!("board.set_outline: {:.1} × {:.1} mm", input.w_mm, input.h_mm),
+    );
+    Ok(text_result(format!(
+        "Board outline set to {:.1} × {:.1} mm",
+        input.w_mm, input.h_mm
+    ))
+    .with_data(json!({"w_mm": input.w_mm, "h_mm": input.h_mm})))
 }
 
 fn tool_project_status(project: &Project) -> Result<Value, ToolError> {
@@ -624,6 +754,361 @@ fn tool_schematic_snapshot(project: &Project) -> Result<Value, ToolError> {
     let snap = project.read();
     let svg = pcb_render::render_schematic_svg(snap.schematic());
     Ok(text_result(svg).into())
+}
+
+#[derive(Debug, Deserialize)]
+struct PaletteAddInput {
+    footprints: Vec<PaletteFootprint>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaletteFootprint {
+    reference: String,
+    library: String,
+    #[serde(default)]
+    rotation: f32,
+    #[serde(default = "default_layer")]
+    layer: LayerInput,
+    pads: Vec<PadPlan>,
+}
+
+fn tool_palette_add(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: PaletteAddInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("palette.add: {e}")))?;
+
+    let mut added = Vec::with_capacity(input.footprints.len());
+    for plan in input.footprints {
+        // Pull the value + net assignments from the schematic so the
+        // palette item carries everything the bridge would have given it.
+        let (value, pads) = {
+            let snap = project.read();
+            let sch = snap.schematic();
+            let symbol = sch.find_by_reference(&plan.reference).ok_or_else(|| {
+                ToolError::invalid_params(format!(
+                    "palette.add: no schematic symbol named {}",
+                    plan.reference
+                ))
+            })?;
+            let value = symbol.value.clone();
+            let pads: Vec<Pad> = plan
+                .pads
+                .iter()
+                .map(|pad_plan| {
+                    let net = sch.net_for_pin(symbol.id, &pad_plan.number).map(str::to_string);
+                    Pad {
+                        number: pad_plan.number.clone(),
+                        offset: Point::new(
+                            Length::from_mm(pad_plan.x_mm),
+                            Length::from_mm(pad_plan.y_mm),
+                        ),
+                        size: (Length::from_mm(pad_plan.w_mm), Length::from_mm(pad_plan.h_mm)),
+                        layer: pad_plan.layer.into(),
+                        net,
+                    }
+                })
+                .collect();
+            (value, pads)
+        };
+        let footprint = Footprint {
+            id: pcb_core::Id::new(),
+            reference: plan.reference.clone(),
+            value,
+            library: plan.library,
+            // Initial position will be overridden by the UI strip
+            // (laid out left-to-right above the board) so any value is
+            // fine; we put it off-canvas to avoid a flash of bad layout.
+            position: Point::new(Length::from_mm(-100.0), Length::from_mm(-100.0)),
+            rotation: plan.rotation,
+            layer: plan.layer.into(),
+            pads,
+        };
+        project
+            .palette_add(footprint)
+            .map_err(ToolError::invalid_params)?;
+        added.push(plan.reference);
+    }
+    project.log(
+        ActivityLevel::Info,
+        format!("palette.add: {} component(s)", added.len()),
+    );
+    Ok(text_result(format!("Added {} item(s) to palette", added.len()))
+        .with_data(json!({ "added": added })))
+}
+
+fn tool_palette_clear(project: &Project) -> Result<Value, ToolError> {
+    project.palette_clear();
+    project.log(ActivityLevel::Info, "palette.clear");
+    Ok(text_result("Palette cleared").into())
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaceFromPaletteInput {
+    reference: String,
+    x_mm: f64,
+    y_mm: f64,
+}
+
+fn tool_place_from_palette(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: PlaceFromPaletteInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("placement.place_from_palette: {e}")))?;
+    let id = project
+        .place_from_palette(
+            &input.reference,
+            Point::new(Length::from_mm(input.x_mm), Length::from_mm(input.y_mm)),
+        )
+        .map_err(ToolError::invalid_params)?;
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "placement.place_from_palette: {} at ({:.2}, {:.2}) mm",
+            input.reference, input.x_mm, input.y_mm
+        ),
+    );
+    Ok(text_result(format!("Placed {}", input.reference))
+        .with_data(json!({"id": id.0.to_string()})))
+}
+
+#[derive(Debug, Deserialize)]
+struct PlacementMoveInput {
+    reference: String,
+    x_mm: f64,
+    y_mm: f64,
+}
+
+fn tool_placement_move(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: PlacementMoveInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("placement.move: {e}")))?;
+    project
+        .move_footprint_to(
+            &input.reference,
+            Point::new(Length::from_mm(input.x_mm), Length::from_mm(input.y_mm)),
+        )
+        .map_err(ToolError::invalid_params)?;
+    Ok(text_result(format!(
+        "Moved {} to ({:.2}, {:.2}) mm",
+        input.reference, input.x_mm, input.y_mm
+    ))
+    .into())
+}
+
+#[derive(Debug, Deserialize)]
+struct AutoPlaceInput {
+    #[serde(default = "default_iterations")]
+    iterations: u32,
+    #[serde(default = "default_frame_every")]
+    frame_every: u32,
+    #[serde(default = "default_frame_delay_ms")]
+    frame_delay_ms: u64,
+}
+
+fn default_iterations() -> u32 { 200 }
+fn default_frame_every() -> u32 { 4 }
+fn default_frame_delay_ms() -> u64 { 100 }
+
+async fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: AutoPlaceInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("placement.auto: {e}")))?;
+
+    let bounds = project.read().board().outline.ok_or_else(|| {
+        ToolError::invalid_params(
+            "no board outline; call board.set_outline { w_mm, h_mm } first".to_string(),
+        )
+    })?;
+
+    // Snapshot the inputs: palette items become the unlocked particles,
+    // footprints already on the board are anchors. Both contribute to
+    // the spring + repulsion model.
+    struct Item {
+        reference: String,
+        bbox_w: Length,
+        bbox_h: Length,
+        position: Point,
+        locked: bool,
+        footprint: Footprint,
+        is_palette: bool,
+    }
+    let mut items: Vec<Item> = Vec::new();
+    {
+        let snap = project.read();
+        for fp in snap.board().footprints_in_order() {
+            let bounds_fp = fp.bounds().unwrap_or_else(|| {
+                pcb_core::Rect::from_corners(fp.position, fp.position)
+            });
+            items.push(Item {
+                reference: fp.reference.clone(),
+                bbox_w: bounds_fp.width(),
+                bbox_h: bounds_fp.height(),
+                position: fp.position,
+                locked: true,
+                footprint: fp.clone(),
+                is_palette: false,
+            });
+        }
+        for fp in snap.palette() {
+            let bounds_fp = fp.bounds().unwrap_or_else(|| {
+                pcb_core::Rect::from_corners(fp.position, fp.position)
+            });
+            items.push(Item {
+                reference: fp.reference.clone(),
+                bbox_w: bounds_fp.width(),
+                bbox_h: bounds_fp.height(),
+                position: fp.position, // off-canvas placeholder
+                locked: false,
+                footprint: fp.clone(),
+                is_palette: true,
+            });
+        }
+    }
+    let palette_count = items.iter().filter(|i| i.is_palette).count();
+    if palette_count == 0 {
+        return Ok(text_result("Palette is empty; nothing to auto-place").into());
+    }
+
+    // Sprinkle palette particles inside the board so they have a
+    // sensible starting point. Locked items keep their current
+    // position.
+    {
+        #[allow(clippy::cast_precision_loss)]
+        let n = palette_count as f64;
+        let cols = (n.sqrt().ceil()).max(1.0);
+        let bx = bounds.min.x.to_mm();
+        let by = bounds.min.y.to_mm();
+        let bw = (bounds.max.x - bounds.min.x).to_mm();
+        let bh = (bounds.max.y - bounds.min.y).to_mm();
+        let dx = bw / (cols + 1.0);
+        let dy = bh / (cols + 1.0);
+        let mut pi = 0_f64;
+        for item in items.iter_mut().filter(|i| i.is_palette) {
+            let row = (pi / cols).floor();
+            let col = pi - row * cols;
+            item.position = Point::new(
+                Length::from_mm(bx + dx * (col + 1.0)),
+                Length::from_mm(by + dy * (row + 1.0)),
+            );
+            item.footprint.position = item.position;
+            pi += 1.0;
+        }
+    }
+
+    let placeable: Vec<pcb_placer::PlaceableFootprint> = items
+        .iter()
+        .map(|i| pcb_placer::PlaceableFootprint {
+            reference: i.reference.clone(),
+            bbox_w: i.bbox_w,
+            bbox_h: i.bbox_h,
+            position: i.position,
+            locked: i.locked,
+            footprint: i.footprint.clone(),
+        })
+        .collect();
+    let footprints_for_board: Vec<Footprint> =
+        items.iter().map(|i| i.footprint.clone()).collect();
+    let palette_refs: std::collections::HashSet<String> = items
+        .iter()
+        .filter(|i| i.is_palette)
+        .map(|i| i.reference.clone())
+        .collect();
+
+    // Nets for the placer come from the schematic — group references
+    // touching each net and let the placer pull them together.
+    let nets: Vec<Vec<String>> = {
+        let snap = project.read();
+        let sch = snap.schematic();
+        sch.nets
+            .values()
+            .map(|n| {
+                let mut refs: Vec<String> = n
+                    .connections
+                    .iter()
+                    .filter_map(|c| sch.symbols.get(&c.symbol_id).map(|s| s.reference.clone()))
+                    .collect();
+                refs.sort();
+                refs.dedup();
+                refs
+            })
+            .filter(|v| v.len() >= 2)
+            .collect()
+    };
+
+    let placer_input = pcb_placer::PlacementInput {
+        footprints: placeable,
+        nets,
+        bounds: Some(bounds),
+    };
+    let mut placer = pcb_placer::Placer::new(
+        placer_input,
+        pcb_placer::PlacerOptions {
+            total_steps: input.iterations,
+            ..Default::default()
+        },
+    );
+
+    // Move every palette item onto the board at its initial sprinkled
+    // position. From this point on they are regular board footprints
+    // that we update with placement.move on each frame; the placer's
+    // locked flag determines who actually gets moved.
+    for reference in &palette_refs {
+        let item = items
+            .iter()
+            .find(|i| &i.reference == reference)
+            .expect("palette ref present");
+        if let Err(e) = project.place_from_palette(reference, item.position) {
+            return Err(ToolError {
+                code: crate::protocol::error_code::INTERNAL_ERROR,
+                message: format!("place_from_palette({reference}): {e}"),
+            });
+        }
+    }
+    project.clear_routing();
+
+    // Animate. Each frame: write the new positions of the palette
+    // items (locked items stay where they are) and emit progress.
+    let _ = footprints_for_board; // kept for future per-frame templating
+    for i in 0..input.iterations {
+        let frame = placer.step();
+        if i % input.frame_every == 0 || i == input.iterations - 1 {
+            for (reference, position) in &frame.positions {
+                if !palette_refs.contains(reference) {
+                    continue; // locked, don't move
+                }
+                let _ = project.move_footprint_to(reference, *position);
+            }
+            project
+                .events()
+                .publish(pcb_core::Event::PlacementProgress { iteration: frame.iteration });
+            tokio::time::sleep(std::time::Duration::from_millis(input.frame_delay_ms)).await;
+        }
+    }
+
+    placer.finalise();
+    // Apply the best-cost positions to the project.
+    for fp in placer.current() {
+        let _ = project.move_footprint_to(&fp.reference, fp.position);
+    }
+    let final_state = placer.current();
+    let final_positions: Vec<Value> = final_state
+        .iter()
+        .map(|fp| {
+            json!({
+                "reference": fp.reference,
+                "x_mm": fp.position.x.to_mm(),
+                "y_mm": fp.position.y.to_mm(),
+            })
+        })
+        .collect();
+    project.log(
+        ActivityLevel::Info,
+        format!("placement.auto: settled after {} iterations", input.iterations),
+    );
+    Ok(text_result(format!(
+        "Placed {} footprint(s) over {} iterations",
+        final_state.len(),
+        input.iterations
+    ))
+    .with_data(json!({
+        "iterations": input.iterations,
+        "positions": final_positions,
+    })))
 }
 
 #[derive(Debug, Deserialize)]

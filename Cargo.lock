@@ -2128,6 +2128,7 @@ version = "0.0.0"
 dependencies = [
  "pcb-core",
  "pcb-mcp",
+ "pcb-placer",
  "pcb-render",
  "serde",
  "serde_json",
@@ -2162,11 +2163,19 @@ version = "0.0.0"
 dependencies = [
  "pcb-core",
  "pcb-gerber",
+ "pcb-placer",
  "pcb-render",
  "pcb-router",
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "pcb-placer"
+version = "0.0.0"
+dependencies = [
+ "pcb-core",
 ]
 
 [[package]]

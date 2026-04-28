@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use crate::board::{Board, Footprint, Id, Trace, Via};
 use crate::event::{ActivityLevel, Event, EventBus};
-use crate::geometry::Point;
+use crate::geometry::{Point, Rect};
 use crate::schematic::{Net, Schematic, Symbol};
 
 /// Cheap-to-clone handle around the shared project state.
@@ -26,6 +26,10 @@ struct ProjectInner {
     name: String,
     board: Board,
     schematic: Schematic,
+    /// Footprints declared but not yet placed on the board. The UI
+    /// shows these in the palette strip; drag-and-drop or
+    /// `placement.auto` move them into `board.footprints`.
+    palette: Vec<Footprint>,
 }
 
 impl Project {
@@ -36,6 +40,7 @@ impl Project {
                 name: name.into(),
                 board: Board::new(),
                 schematic: Schematic::new(),
+                palette: Vec::new(),
             })),
             bus: EventBus::new(),
         };
@@ -95,6 +100,14 @@ impl Project {
         removed
     }
 
+    pub fn set_outline(&self, outline: Rect) {
+        {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.board.outline = Some(outline);
+        }
+        self.bus.publish(Event::OutlineChanged);
+    }
+
     pub fn add_trace(&self, trace: Trace) -> Id {
         let id = {
             let mut inner = self.inner.write().expect("project lock poisoned");
@@ -113,15 +126,108 @@ impl Project {
         id
     }
 
-    /// Drop everything: schematic, footprints, traces, vias. Useful
-    /// between demo runs so state doesn't accumulate across calls.
+    /// Drop everything: schematic, palette, footprints, traces, vias.
+    /// Useful between demo runs so state doesn't accumulate across calls.
     pub fn reset(&self) {
         {
             let mut inner = self.inner.write().expect("project lock poisoned");
             inner.board = Board::new();
             inner.schematic = Schematic::new();
+            inner.palette.clear();
         }
         self.bus.publish(Event::ProjectChanged);
+    }
+
+    /// Append a footprint to the palette. References must be unique
+    /// across palette + board.
+    pub fn palette_add(&self, footprint: Footprint) -> Result<(), String> {
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        let already = inner
+            .board
+            .footprints
+            .values()
+            .any(|f| f.reference == footprint.reference)
+            || inner.palette.iter().any(|f| f.reference == footprint.reference);
+        if already {
+            return Err(format!("reference {} already in palette or board", footprint.reference));
+        }
+        inner.palette.push(footprint);
+        let count = inner.palette.len();
+        drop(inner);
+        self.bus.publish(Event::PaletteChanged { count });
+        Ok(())
+    }
+
+    pub fn palette_clear(&self) {
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        inner.palette.clear();
+        drop(inner);
+        self.bus.publish(Event::PaletteChanged { count: 0 });
+    }
+
+    /// Move a palette item onto the board at `position`. The footprint
+    /// disappears from the palette. Returns the new board id, or an
+    /// error if no palette item with that reference exists.
+    pub fn place_from_palette(&self, reference: &str, position: Point) -> Result<Id, String> {
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        let idx = inner
+            .palette
+            .iter()
+            .position(|f| f.reference == reference)
+            .ok_or_else(|| format!("no palette item named {reference}"))?;
+        let mut fp = inner.palette.remove(idx);
+        fp.position = position;
+        let id = inner.board.add_footprint(fp);
+        let palette_count = inner.palette.len();
+        let reference_owned = reference.to_string();
+        drop(inner);
+        self.bus.publish(Event::PaletteChanged { count: palette_count });
+        self.bus.publish(Event::FootprintAdded {
+            id,
+            reference: reference_owned,
+        });
+        Ok(id)
+    }
+
+    /// Set the rotation (in degrees, CCW) of a footprint already on
+    /// the board, identified by reference.
+    pub fn rotate_footprint(&self, reference: &str, rotation_deg: f32) -> Result<Id, String> {
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        let id = inner
+            .board
+            .footprints
+            .iter_mut()
+            .find(|(_, f)| f.reference == reference)
+            .map(|(id, fp)| {
+                fp.rotation = rotation_deg;
+                *id
+            })
+            .ok_or_else(|| format!("no board footprint named {reference}"))?;
+        let position = inner.board.footprints[&id].position;
+        drop(inner);
+        // Re-emit a "moved" event so the UI re-renders; rotation
+        // doesn't have its own event variant yet and adding one would
+        // be cosmetic noise.
+        self.bus.publish(Event::FootprintMoved { id, position });
+        Ok(id)
+    }
+
+    /// Move a footprint already on the board to a new position.
+    pub fn move_footprint_to(&self, reference: &str, position: Point) -> Result<Id, String> {
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        let id = inner
+            .board
+            .footprints
+            .iter()
+            .find(|(_, f)| f.reference == reference)
+            .map(|(id, _)| *id)
+            .ok_or_else(|| format!("no board footprint named {reference}"))?;
+        if !inner.board.move_footprint(id, position) {
+            return Err(format!("move_footprint failed for {reference}"));
+        }
+        drop(inner);
+        self.bus.publish(Event::FootprintMoved { id, position });
+        Ok(id)
     }
 
     /// Drop every trace and via on the board. Used by the router before
@@ -207,5 +313,10 @@ impl ProjectSnapshot<'_> {
     #[must_use]
     pub fn schematic(&self) -> &Schematic {
         &self.guard.schematic
+    }
+
+    #[must_use]
+    pub fn palette(&self) -> &[Footprint] {
+        &self.guard.palette
     }
 }

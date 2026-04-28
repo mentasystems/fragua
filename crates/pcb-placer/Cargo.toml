@@ -1,0 +1,12 @@
+[package]
+name = "pcb-placer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Force-directed auto-placement for the pcb tool."
+
+[dependencies]
+pcb-core = { path = "../pcb-core" }
+
+[lints]
+workspace = true
