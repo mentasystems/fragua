@@ -74,17 +74,49 @@ pub struct Footprint {
 }
 
 impl Footprint {
-    /// Bounding box of the footprint in board coordinates, derived from
-    /// its pads. Rotation is ignored for Phase 1 — we are bbox'ing the
-    /// nominal shape; precise rotated bounds come with the routing work.
+    /// Bounding box of the footprint in board coordinates, taking the
+    /// footprint's rotation into account.
     #[must_use]
     pub fn bounds(&self) -> Option<Rect> {
         let mut iter = self.pads.iter().map(|pad| {
-            let center = self.position.translate(pad.offset.x, pad.offset.y);
-            Rect::from_center(center, pad.size.0, pad.size.1)
+            let center = self.pad_world_center(pad);
+            let (w, h) = self.pad_world_size(pad);
+            Rect::from_center(center, w, h)
         });
         let first = iter.next()?;
         Some(iter.fold(first, Rect::union))
+    }
+
+    /// Absolute board-coord centre of `pad` after applying the
+    /// footprint's position and rotation. The pad's offset is treated
+    /// as a vector in footprint-local coords and rotated CCW around
+    /// the footprint origin.
+    #[must_use]
+    pub fn pad_world_center(&self, pad: &Pad) -> Point {
+        let theta = f64::from(self.rotation).to_radians();
+        let (sin, cos) = (theta.sin(), theta.cos());
+        let ox = pad.offset.x.to_mm();
+        let oy = pad.offset.y.to_mm();
+        let rx = ox * cos - oy * sin;
+        let ry = ox * sin + oy * cos;
+        Point::new(
+            crate::units::Length::from_mm(self.position.x.to_mm() + rx),
+            crate::units::Length::from_mm(self.position.y.to_mm() + ry),
+        )
+    }
+
+    /// Pad dimensions on the board after rotation. We only model 90°
+    /// increments (the placer and the rotate-by-keypress path both
+    /// produce multiples of 90) so this just swaps width ↔ height
+    /// when the rotation lands in the 90° / 270° quadrant.
+    #[must_use]
+    pub fn pad_world_size(&self, pad: &Pad) -> (crate::units::Length, crate::units::Length) {
+        let r = f64::from(self.rotation).rem_euclid(360.0);
+        if (45.0..135.0).contains(&r) || (225.0..315.0).contains(&r) {
+            (pad.size.1, pad.size.0)
+        } else {
+            (pad.size.0, pad.size.1)
+        }
     }
 }
 

@@ -2127,9 +2127,11 @@ name = "pcb-app"
 version = "0.0.0"
 dependencies = [
  "pcb-core",
+ "pcb-gerber",
  "pcb-mcp",
  "pcb-placer",
  "pcb-render",
+ "pcb-router",
  "serde",
  "serde_json",
  "tauri",

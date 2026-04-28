@@ -184,7 +184,7 @@ fn write_ratsnest(svg: &mut String, board: &Board) {
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
             if let Some(net) = pad.net.as_deref() {
-                let center = fp.position.translate(pad.offset.x, pad.offset.y);
+                let center = fp.pad_world_center(pad);
                 net_pads
                     .entry(net)
                     .or_default()
@@ -221,14 +221,19 @@ fn write_trace(svg: &mut String, trace: &Trace) {
         CopperLayer::Top => "#c97a2b",
         CopperLayer::Bottom => "#2b6cc9",
     };
+    let layer_label = match trace.layer {
+        CopperLayer::Top => "top",
+        CopperLayer::Bottom => "bottom",
+    };
     let _ = write!(
         svg,
-        r##"<line x1="{x1:.3}" y1="{y1:.3}" x2="{x2:.3}" y2="{y2:.3}" stroke="{stroke}" stroke-width="{w:.3}" stroke-linecap="round"/>"##,
+        r##"<line x1="{x1:.3}" y1="{y1:.3}" x2="{x2:.3}" y2="{y2:.3}" stroke="{stroke}" stroke-width="{w:.3}" stroke-linecap="round"><title>{net} ({layer_label})</title></line>"##,
         x1 = trace.start.x.to_mm(),
         y1 = trace.start.y.to_mm(),
         x2 = trace.end.x.to_mm(),
         y2 = trace.end.y.to_mm(),
         w = trace.width.to_mm(),
+        net = escape(&trace.net),
     );
 }
 
@@ -239,7 +244,8 @@ fn write_via(svg: &mut String, via: &Via) {
     let inner = via.drill.to_mm() / 2.0;
     let _ = write!(
         svg,
-        r##"<circle cx="{cx:.3}" cy="{cy:.3}" r="{outer:.3}" fill="#7d8590"/><circle cx="{cx:.3}" cy="{cy:.3}" r="{inner:.3}" fill="#0e1116"/>"##,
+        r##"<g><title>{net} (via)</title><circle cx="{cx:.3}" cy="{cy:.3}" r="{outer:.3}" fill="#7d8590"/><circle cx="{cx:.3}" cy="{cy:.3}" r="{inner:.3}" fill="#0e1116"/></g>"##,
+        net = escape(&via.net),
     );
 }
 

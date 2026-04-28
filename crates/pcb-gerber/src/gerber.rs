@@ -135,11 +135,9 @@ pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result
             if pad.layer != layer {
                 continue;
             }
-            let center = fp.position.translate(pad.offset.x, pad.offset.y);
-            let id = table.intern(Aperture::Rect {
-                w: pad.size.0,
-                h: pad.size.1,
-            });
+            let center = fp.pad_world_center(pad);
+            let (pw, ph) = fp.pad_world_size(pad);
+            let id = table.intern(Aperture::Rect { w: pw, h: ph });
             flashes.push((id, center));
         }
     }
@@ -183,10 +181,11 @@ pub fn write_mask(board: &Board, side: Side, w: &mut impl Write) -> io::Result<(
             if pad.layer != layer {
                 continue;
             }
-            let center = fp.position.translate(pad.offset.x, pad.offset.y);
+            let center = fp.pad_world_center(pad);
+            let (pw, ph) = fp.pad_world_size(pad);
             let id = table.intern(Aperture::Rect {
-                w: pad.size.0 + MASK_CLEARANCE + MASK_CLEARANCE,
-                h: pad.size.1 + MASK_CLEARANCE + MASK_CLEARANCE,
+                w: pw + MASK_CLEARANCE + MASK_CLEARANCE,
+                h: ph + MASK_CLEARANCE + MASK_CLEARANCE,
             });
             flashes.push((id, center));
         }

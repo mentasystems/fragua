@@ -78,6 +78,15 @@ fn project_state(state: State<'_, AppState>) -> ProjectStatePayload {
     }
 }
 
+/// Wipe schematic + palette + board.
+#[tauri::command]
+fn reset_project(state: State<'_, AppState>) {
+    state.project.reset();
+    state
+        .project
+        .log(pcb_core::ActivityLevel::Info, "project.reset (UI button)");
+}
+
 /// Set the rectangular Edge.Cuts outline of the board.
 #[tauri::command]
 fn set_board_outline(state: State<'_, AppState>, w_mm: f64, h_mm: f64) -> Result<(), String> {
@@ -158,11 +167,85 @@ fn move_footprint(
         .map(|_| ())
 }
 
-/// Run the force-directed auto-placement on every palette item with the
-/// board outline as bounds. Footprints already on the board are
-/// treated as locked obstacles.
+/// Run the native autorouter with default options.
+#[tauri::command]
+fn run_router(state: State<'_, AppState>) -> Result<String, String> {
+    let mut work = state.project.read().board().clone();
+    let report = pcb_router::route(&mut work, &pcb_router::RouteOptions::default());
+
+    state.project.clear_routing();
+    for trace in &work.traces {
+        state.project.add_trace(trace.clone());
+    }
+    for via in &work.vias {
+        state.project.add_via(via.clone());
+    }
+
+    let failed: Vec<&str> = report
+        .per_net
+        .iter()
+        .filter_map(|(n, o)| {
+            matches!(o, pcb_router::Outcome::Failed { .. }).then_some(n.as_str())
+        })
+        .collect();
+    let summary = if failed.is_empty() {
+        format!(
+            "Routed {} traces, {} vias",
+            report.trace_count, report.via_count
+        )
+    } else {
+        format!(
+            "Routed {} traces, {} vias ({} failed: {})",
+            report.trace_count,
+            report.via_count,
+            failed.len(),
+            failed.join(", ")
+        )
+    };
+    state
+        .project
+        .log(pcb_core::ActivityLevel::Info, format!("route.run: {summary}"));
+    Ok(summary)
+}
+
+/// Write the full fab pack (Gerbers + Excellon + BOM + pos.csv) into
+/// `~/Downloads/pcb-{name}-{timestamp}/` and return the directory.
+#[tauri::command]
+fn export_fab_pack(state: State<'_, AppState>) -> Result<String, String> {
+    let snap = state.project.read();
+    let name = snap.name().to_string();
+    let board = snap.board().clone();
+    drop(snap);
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    let home = std::env::var("HOME").map_err(|_| "no HOME env var".to_string())?;
+    let dir = std::path::PathBuf::from(home)
+        .join("Downloads")
+        .join(format!("pcb-{name}-{stamp}"));
+
+    let paths = pcb_gerber::write_fab_pack(&board, &name, &dir).map_err(|e| e.to_string())?;
+    state.project.log(
+        pcb_core::ActivityLevel::Info,
+        format!(
+            "output.fab_pack: wrote {} files to {}",
+            paths.len(),
+            dir.display()
+        ),
+    );
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Run the simulated-annealing placer on every palette item plus any
+/// footprint currently outside the board outline (so dragging a
+/// footprint past the edge and pressing auto-place repositions it).
+/// Footprints fully inside the board are treated as locked obstacles.
 #[tauri::command]
 async fn run_auto_placement(state: State<'_, AppState>) -> Result<(), String> {
+    // Pull stragglers back into the palette before the simulation.
+    let _ = state.project.unplace_out_of_bounds();
     use pcb_core::Footprint;
 
     let project = state.project.clone();
@@ -251,6 +334,7 @@ async fn run_auto_placement(state: State<'_, AppState>) -> Result<(), String> {
             bbox_w: i.bbox_w,
             bbox_h: i.bbox_h,
             position: i.position,
+            rotation: i.footprint.rotation,
             locked: i.locked,
             footprint: i.footprint.clone(),
         })
@@ -325,6 +409,7 @@ async fn run_auto_placement(state: State<'_, AppState>) -> Result<(), String> {
     for fp in placer.current() {
         if palette_refs.contains(&fp.reference) {
             let _ = project.move_footprint_to(&fp.reference, fp.position);
+            let _ = project.rotate_footprint(&fp.reference, fp.rotation);
         }
     }
     project.log(
@@ -388,11 +473,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             project_state,
             add_demo_resistor,
+            reset_project,
             set_board_outline,
             place_from_palette,
             move_footprint,
             rotate_footprint,
-            run_auto_placement
+            run_auto_placement,
+            run_router,
+            export_fab_pack
         ])
         .run(tauri::generate_context!())
         .expect("tauri runtime");

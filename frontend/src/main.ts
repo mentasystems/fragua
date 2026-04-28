@@ -63,7 +63,10 @@ root.innerHTML = `
       <span class="label">mm</span>
       <button class="action" id="board-set" title="Set the board outline">set</button>
     </span>
-    <button class="action" id="auto-place-btn" title="Run force-directed placement on every palette item">auto-place</button>
+    <button class="action" id="auto-place-btn" title="Run simulated-annealing placement on every palette item">auto-place</button>
+    <button class="action" id="route-btn" title="Auto-route every net">route</button>
+    <button class="action" id="export-btn" title="Write Gerbers + drill + BOM + pick-and-place to ~/Downloads">export…</button>
+    <button class="action danger" id="reset-btn" title="Wipe schematic, palette, and board">reset</button>
     <span class="spacer"></span>
     <span class="label">mcp</span><span class="value accent" id="proj-mcp">—</span>
   </div>
@@ -87,6 +90,9 @@ const els = {
   tabSch: document.getElementById("tab-sch")!,
   palette: document.getElementById("palette-strip")!,
   autoPlace: document.getElementById("auto-place-btn")! as HTMLButtonElement,
+  route: document.getElementById("route-btn")! as HTMLButtonElement,
+  export: document.getElementById("export-btn")! as HTMLButtonElement,
+  reset: document.getElementById("reset-btn")! as HTMLButtonElement,
   boardW: document.getElementById("board-w")! as HTMLInputElement,
   boardH: document.getElementById("board-h")! as HTMLInputElement,
   boardSet: document.getElementById("board-set")! as HTMLButtonElement,
@@ -95,6 +101,7 @@ const els = {
 let view: View = "board";
 let lastState: ProjectState | null = null;
 let hoveredRef: string | null = null;
+let selectedRef: string | null = null;
 
 function setView(v: View) {
   view = v;
@@ -130,6 +137,43 @@ els.autoPlace.addEventListener("click", async () => {
     appendActivity("error", String(err));
   } finally {
     els.autoPlace.disabled = false;
+  }
+});
+
+els.route.addEventListener("click", async () => {
+  els.route.disabled = true;
+  try {
+    setView("board");
+    const summary = await invoke<string>("run_router");
+    appendActivity("info", summary);
+  } catch (err) {
+    appendActivity("error", String(err));
+  } finally {
+    els.route.disabled = false;
+  }
+});
+
+els.export.addEventListener("click", async () => {
+  els.export.disabled = true;
+  try {
+    const dir = await invoke<string>("export_fab_pack");
+    appendActivity("info", `exported to ${dir}`);
+  } catch (err) {
+    appendActivity("error", String(err));
+  } finally {
+    els.export.disabled = false;
+  }
+});
+
+els.reset.addEventListener("click", async () => {
+  // No confirm() here — Tauri's webview swallows JS dialogs and the
+  // button used to silently no-op. The activity log line afterward
+  // is the receipt.
+  try {
+    await invoke("reset_project");
+    appendActivity("info", "project reset (UI button)");
+  } catch (err) {
+    appendActivity("error", String(err));
   }
 });
 
@@ -250,6 +294,14 @@ function attachBoardPointerHandlers() {
   svg.addEventListener("pointerdown", (ev) => {
     const target = ev.target as Element;
 
+    // Click on a footprint? Select it (also drag-starts below).
+    const refClicked = target.closest("[data-board-ref]")?.getAttribute("data-board-ref") ?? null;
+    if (refClicked) {
+      selectedRef = refClicked;
+    } else {
+      selectedRef = null;
+    }
+
     // Outline resize handle?
     const edge = target.closest("[data-resize-edge]")?.getAttribute("data-resize-edge");
     if (edge && lastState?.outline) {
@@ -330,13 +382,15 @@ document.addEventListener("keydown", async (ev) => {
   // Ignore key events from inputs (board size, etc).
   const target = ev.target as Element | null;
   if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
-  if (ev.key.toLowerCase() === "r" && hoveredRef) {
+  if (ev.key.toLowerCase() === "r") {
+    const ref = selectedRef ?? hoveredRef;
+    if (!ref) return;
     ev.preventDefault();
     const delta = ev.shiftKey ? -90 : 90;
     try {
-      await invoke("rotate_footprint", { reference: hoveredRef, degreesDelta: delta });
+      await invoke("rotate_footprint", { reference: ref, degreesDelta: delta });
     } catch (err) {
-      appendActivity("error", `rotate(${hoveredRef}): ${err}`);
+      appendActivity("error", `rotate(${ref}): ${err}`);
     }
   }
 });

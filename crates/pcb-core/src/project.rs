@@ -165,6 +165,48 @@ impl Project {
         self.bus.publish(Event::PaletteChanged { count: 0 });
     }
 
+    /// Send any board footprint whose body bounding-box pokes outside
+    /// the outline back to the palette. Uses the full bbox (not just
+    /// the centre) so a component dragged half-way off the board edge
+    /// gets reclaimed too.
+    pub fn unplace_out_of_bounds(&self) -> Vec<String> {
+        let mut moved = Vec::new();
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        let Some(outline) = inner.board.outline else {
+            return moved;
+        };
+        let ids: Vec<Id> = inner
+            .board
+            .footprints
+            .iter()
+            .filter(|(_, fp)| {
+                let Some(bbox) = fp.bounds() else { return false; };
+                bbox.min.x.0 < outline.min.x.0
+                    || bbox.max.x.0 > outline.max.x.0
+                    || bbox.min.y.0 < outline.min.y.0
+                    || bbox.max.y.0 > outline.max.y.0
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            if let Some(fp) = inner.board.remove_footprint(id) {
+                moved.push(fp.reference.clone());
+                inner.palette.push(fp);
+            }
+        }
+        let palette_count = inner.palette.len();
+        drop(inner);
+        if !moved.is_empty() {
+            self.bus.publish(Event::PaletteChanged { count: palette_count });
+            for r in &moved {
+                // Loose change event so the UI repaints.
+                let _ = r;
+            }
+            self.bus.publish(Event::ProjectChanged);
+        }
+        moved
+    }
+
     /// Move a palette item onto the board at `position`. The footprint
     /// disappears from the palette. Returns the new board id, or an
     /// error if no palette item with that reference exists.

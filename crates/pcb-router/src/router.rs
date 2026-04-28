@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use pcb_core::{Board, CopperLayer, Footprint, Length, Pad, Point, Rect, Trace, Via};
+use pcb_core::{Board, CopperLayer, Length, Point, Rect, Trace, Via};
 
 use crate::astar::search;
 use crate::grid::{Grid, GridPoint};
@@ -31,7 +31,11 @@ impl Default for RouteOptions {
         Self {
             cell: Length::from_mm(0.25),
             trace_width: Length::from_mm(0.25),
-            clearance: Length::from_mm(0.20),
+            // 0.4 mm gives a 2-cell halo around traces and pads on a
+            // 0.25 mm grid: even at the closest legal spacing, two
+            // foreign-net traces have at least one empty cell of gap
+            // between them, so they never appear visually pegged.
+            clearance: Length::from_mm(0.40),
             via_cost: 8,
             via_drill: Length::from_mm(0.3),
             via_diameter: Length::from_mm(0.6),
@@ -87,6 +91,13 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     let mut grid = Grid::new(region, opts.cell);
     let net_id_lookup = |n: &str| net_id_of.get(n).copied();
     grid.stamp_pads(board, &net_id_lookup, opts.clearance);
+    // Halo around freshly-laid traces, in cells: clearance / cell.
+    // Round up so 0.20 mm clearance on a 0.25 mm grid still gives one
+    // cell of breathing room.
+    let halo_cells = {
+        let raw = (opts.clearance.0 + opts.cell.0 - 1) / opts.cell.0;
+        i32::try_from(raw).unwrap_or(1).max(1)
+    };
 
     let mut per_net = Vec::with_capacity(nets.len());
     let mut total_traces = 0;
@@ -126,7 +137,8 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
                 failed = true;
                 break;
             };
-            let (segs, vias) = lay_path(board, &mut grid, &result.path, &net_name, net_id, opts);
+            let (segs, vias) =
+                lay_path(board, &mut grid, &result.path, &net_name, net_id, opts, halo_cells);
             net_segments += segs;
             net_vias += vias;
         }
@@ -160,6 +172,7 @@ fn lay_path(
     net: &str,
     net_id: u32,
     opts: &RouteOptions,
+    halo_cells: i32,
 ) -> (usize, usize) {
     if path.len() < 2 {
         return (0, 0);
@@ -171,10 +184,16 @@ fn lay_path(
         let prev = path[i - 1];
         let cur = path[i];
         if cur.layer != prev.layer {
-            // Emit the trace up to here on the previous layer, then a
-            // via, then continue on the new layer.
             if seg_start_idx < i - 1 {
-                emit_trace(board, grid, &path[seg_start_idx..i], net, net_id, opts);
+                emit_trace(
+                    board,
+                    grid,
+                    &path[seg_start_idx..i],
+                    net,
+                    net_id,
+                    opts,
+                    halo_cells,
+                );
                 segments += 1;
             }
             board.add_via(Via {
@@ -184,12 +203,21 @@ fn lay_path(
                 diameter: opts.via_diameter,
                 net: net.to_string(),
             });
+            grid.stamp_via(prev, net_id, halo_cells);
             vias += 1;
             seg_start_idx = i;
         }
     }
     if seg_start_idx < path.len() - 1 {
-        emit_trace(board, grid, &path[seg_start_idx..], net, net_id, opts);
+        emit_trace(
+            board,
+            grid,
+            &path[seg_start_idx..],
+            net,
+            net_id,
+            opts,
+            halo_cells,
+        );
         segments += 1;
     }
     (segments, vias)
@@ -202,13 +230,12 @@ fn emit_trace(
     net: &str,
     net_id: u32,
     opts: &RouteOptions,
+    halo_cells: i32,
 ) {
     if path.len() < 2 {
         return;
     }
     let layer = path[0].copper_layer();
-    // Compress the run into corner-to-corner segments so we don't emit
-    // a trace per cell. A change of direction breaks the segment.
     let mut start_idx = 0;
     for i in 1..path.len() {
         let a = path[i - 1];
@@ -226,7 +253,7 @@ fn emit_trace(
                 width: opts.trace_width,
                 net: net.to_string(),
             };
-            grid.stamp_trace(s, a, net_id);
+            grid.stamp_trace(s, a, net_id, halo_cells);
             board.add_trace(trace);
             start_idx = i - 1;
         }
@@ -241,25 +268,22 @@ fn emit_trace(
         width: opts.trace_width,
         net: net.to_string(),
     };
-    grid.stamp_trace(s, e, net_id);
+    grid.stamp_trace(s, e, net_id, halo_cells);
     board.add_trace(trace);
 }
 
 /// For every footprint pad with a net assignment, record the pad's
-/// center point and copper layer under that net's name.
+/// world-coord center (rotation-aware) and copper layer under that
+/// net's name.
 fn collect_nets(board: &Board) -> BTreeMap<String, Vec<(Point, CopperLayer)>> {
     let mut nets: BTreeMap<String, Vec<(Point, CopperLayer)>> = BTreeMap::new();
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
             if let Some(net) = &pad.net {
-                let center = pad_center(fp, pad);
+                let center = fp.pad_world_center(pad);
                 nets.entry(net.clone()).or_default().push((center, pad.layer));
             }
         }
     }
     nets
-}
-
-fn pad_center(fp: &Footprint, pad: &Pad) -> Point {
-    fp.position.translate(pad.offset.x, pad.offset.y)
 }

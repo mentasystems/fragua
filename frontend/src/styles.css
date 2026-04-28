@@ -126,6 +126,8 @@ html, body, #app {
 }
 .topbar .action:hover { background: var(--accent); color: var(--bg); }
 .topbar .action:disabled { opacity: 0.4; cursor: progress; }
+.topbar .action.danger { border-color: #f85149; color: #f85149; }
+.topbar .action.danger:hover { background: #f85149; color: var(--bg); }
 
 .topbar .board-size {
   display: inline-flex;

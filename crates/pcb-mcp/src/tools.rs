@@ -909,6 +909,9 @@ async fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, T
     let input: AutoPlaceInput = serde_json::from_value(args.clone())
         .map_err(|e| ToolError::invalid_params(format!("placement.auto: {e}")))?;
 
+    // Reclaim any board footprint that drifted outside the outline.
+    let _ = project.unplace_out_of_bounds();
+
     let bounds = project.read().board().outline.ok_or_else(|| {
         ToolError::invalid_params(
             "no board outline; call board.set_outline { w_mm, h_mm } first".to_string(),
@@ -997,6 +1000,7 @@ async fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, T
             bbox_w: i.bbox_w,
             bbox_h: i.bbox_h,
             position: i.position,
+            rotation: i.footprint.rotation,
             locked: i.locked,
             footprint: i.footprint.clone(),
         })
@@ -1081,9 +1085,10 @@ async fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, T
     }
 
     placer.finalise();
-    // Apply the best-cost positions to the project.
+    // Apply the best-cost positions and rotations to the project.
     for fp in placer.current() {
         let _ = project.move_footprint_to(&fp.reference, fp.position);
+        let _ = project.rotate_footprint(&fp.reference, fp.rotation);
     }
     let final_state = placer.current();
     let final_positions: Vec<Value> = final_state

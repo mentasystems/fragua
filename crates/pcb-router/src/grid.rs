@@ -128,9 +128,10 @@ impl Grid {
                     CopperLayer::Top => 0,
                     CopperLayer::Bottom => 1,
                 };
-                let center = fp.position.translate(pad.offset.x, pad.offset.y);
-                let half_w = pad.size.0 / 2 + clearance;
-                let half_h = pad.size.1 / 2 + clearance;
+                let center = fp.pad_world_center(pad);
+                let (pw, ph) = fp.pad_world_size(pad);
+                let half_w = pw / 2 + clearance;
+                let half_h = ph / 2 + clearance;
                 let min = center.translate(-half_w, -half_h);
                 let max = center.translate(half_w, half_h);
                 let cmin = self.snap(min, pad.layer);
@@ -157,25 +158,23 @@ impl Grid {
         }
     }
 
-    /// Mark the path of an existing trace as `Trace(net)`. Foreign nets
-    /// then treat it as a soft obstacle.
+    /// Mark the path of an existing trace as `Trace(net)`, plus a
+    /// `halo` of cells around it on the same layer so foreign nets
+    /// can't run flush against this one. The halo radius is the
+    /// router's clearance converted to grid cells.
     pub fn stamp_trace(
         &mut self,
         a: GridPoint,
         b: GridPoint,
         net: u32,
+        halo: i32,
     ) {
-        // Manhattan walk: A* paths are 4-connected so stamping the full
-        // line is just iterating the cells between endpoints.
         debug_assert_eq!(a.layer, b.layer);
         let layer = a.layer;
         let (mut c, mut r) = (a.col, a.row);
         let (tc, tr) = (b.col, b.row);
         loop {
-            let gp = GridPoint { layer, col: c, row: r };
-            if matches!(self.get(gp), Cell::Free) {
-                self.set(gp, Cell::Trace(net));
-            }
+            self.stamp_cell_with_halo(layer, c, r, net, halo);
             if c == tc && r == tr {
                 break;
             }
@@ -183,6 +182,44 @@ impl Grid {
                 c += if tc > c { 1 } else { -1 };
             } else if r != tr {
                 r += if tr > r { 1 } else { -1 };
+            }
+        }
+    }
+
+    /// Mark a via and its halo on both layers. Vias punch through, so
+    /// they need clearance on copper top *and* bottom; otherwise a
+    /// trace on the opposite layer might come right up against the
+    /// via pad.
+    pub fn stamp_via(&mut self, p: GridPoint, net: u32, halo: i32) {
+        for layer in 0..2u8 {
+            self.stamp_cell_with_halo(layer, p.col, p.row, net, halo);
+        }
+    }
+
+    fn stamp_cell_with_halo(&mut self, layer: u8, c: i32, r: i32, net: u32, halo: i32) {
+        // Centre cell: Trace(net) — walkable by the same net so star
+        // routes can share path along the trunk.
+        let centre = GridPoint { layer, col: c, row: r };
+        if matches!(self.get(centre), Cell::Free) {
+            self.set(centre, Cell::Trace(net));
+        }
+        // Halo cells: Obstacle — blocked for *every* net, including
+        // the trace's own. This stops same-net parallel spokes from
+        // running in cells adjacent to the trunk (which used to make
+        // pairs of blue lines look glued together).
+        for dr in -halo..=halo {
+            for dc in -halo..=halo {
+                if dr == 0 && dc == 0 {
+                    continue;
+                }
+                let gp = GridPoint {
+                    layer,
+                    col: c + dc,
+                    row: r + dr,
+                };
+                if matches!(self.get(gp), Cell::Free) {
+                    self.set(gp, Cell::Obstacle);
+                }
             }
         }
     }

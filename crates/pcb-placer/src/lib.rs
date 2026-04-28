@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use pcb_core::{Footprint, Length, Point, Rect};
+use pcb_core::{Footprint, Length, Pad, Point, Rect};
 
 #[derive(Debug, Clone)]
 pub struct PlacementInput {
@@ -36,8 +36,42 @@ pub struct PlaceableFootprint {
     pub bbox_w: Length,
     pub bbox_h: Length,
     pub position: Point,
+    /// Degrees CCW. Modified by the placer's rotate-move; the caller
+    /// reads it back via `current()` after `finalise()` and applies
+    /// it to the board.
+    pub rotation: f32,
     pub locked: bool,
     pub footprint: Footprint,
+}
+
+impl PlaceableFootprint {
+    /// Bbox dimensions taking the current rotation into account: a
+    /// 90° / 270° rotation swaps width and height.
+    fn rotated_bbox(&self) -> (Length, Length) {
+        let r = self.rotation.rem_euclid(360.0);
+        if (45.0..135.0).contains(&r) || (225.0..315.0).contains(&r) {
+            (self.bbox_h, self.bbox_w)
+        } else {
+            (self.bbox_w, self.bbox_h)
+        }
+    }
+
+    /// World-coord centre of `pad` using the placer's *current*
+    /// position and rotation (the embedded `footprint.position` /
+    /// `footprint.rotation` are stale during the run; `Footprint::
+    /// pad_world_center` would use them).
+    fn pad_world_center(&self, pad: &Pad) -> Point {
+        let theta = f64::from(self.rotation).to_radians();
+        let (sin, cos) = (theta.sin(), theta.cos());
+        let ox = pad.offset.x.to_mm();
+        let oy = pad.offset.y.to_mm();
+        let rx = ox * cos - oy * sin;
+        let ry = ox * sin + oy * cos;
+        Point::new(
+            Length::from_mm(self.position.x.to_mm() + rx),
+            Length::from_mm(self.position.y.to_mm() + ry),
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -66,18 +100,26 @@ pub struct PlacerOptions {
     pub jitter_scale_mm: f64,
     /// Probability of a swap-move vs a jitter-move per trial.
     pub swap_prob: f64,
+    /// Probability of a 90° rotation move per trial.
+    pub rotate_prob: f64,
 }
 
 impl Default for PlacerOptions {
     fn default() -> Self {
         Self {
-            moves_per_step: 40,
-            total_steps: 200,
-            t_initial: 60.0,
+            // 80 × 400 = 32 000 trial moves; enough for SA to do real
+            // global exploration on boards up to ~20 components.
+            moves_per_step: 80,
+            total_steps: 400,
+            // Higher initial temperature so the early phase actually
+            // accepts uphill moves and rotations, escaping the local
+            // minimum that 8000 moves used to settle into.
+            t_initial: 120.0,
             t_final: 0.02,
             overlap_weight: 500.0,
             jitter_scale_mm: 12.0,
             swap_prob: 0.20,
+            rotate_prob: 0.15,
         }
     }
 }
@@ -86,8 +128,6 @@ pub struct Placer {
     input: PlacementInput,
     opts: PlacerOptions,
     iteration: u32,
-    /// Reference → footprint index for fast HPWL lookup.
-    ref_idx: HashMap<String, usize>,
     /// Cached cost of the current state.
     cost: f64,
     /// Best (lowest-cost) state seen so far.
@@ -100,18 +140,11 @@ pub struct Placer {
 impl Placer {
     #[must_use]
     pub fn new(input: PlacementInput, opts: PlacerOptions) -> Self {
-        let ref_idx: HashMap<String, usize> = input
-            .footprints
-            .iter()
-            .enumerate()
-            .map(|(i, fp)| (fp.reference.clone(), i))
-            .collect();
         let positions: Vec<Point> = input.footprints.iter().map(|fp| fp.position).collect();
         let mut placer = Self {
             input,
             opts,
             iteration: 0,
-            ref_idx,
             cost: 0.0,
             best_positions: positions,
             best_cost: f64::INFINITY,
@@ -192,8 +225,10 @@ impl Placer {
 
         let move_kind_roll = self.rand_unit();
         let old_pos_a = self.input.footprints[idx].position;
+        let old_rot_a = self.input.footprints[idx].rotation;
         let mut old_pos_b: Option<(usize, Point)> = None;
 
+        let rotate_thresh = self.opts.swap_prob + self.opts.rotate_prob;
         if move_kind_roll < self.opts.swap_prob {
             // Swap-move: exchange positions with another unlocked.
             let mut other = self.rand_index(n);
@@ -210,6 +245,14 @@ impl Placer {
             self.input.footprints[idx].position = pos_b;
             self.input.footprints[other].position = old_pos_a;
             old_pos_b = Some((other, pos_b));
+        } else if move_kind_roll < rotate_thresh {
+            // Rotate-move: spin the footprint by ±90°.
+            let delta = if self.rand_unit() < 0.5 { 90.0 } else { -90.0 };
+            self.input.footprints[idx].rotation =
+                (old_rot_a + delta).rem_euclid(360.0);
+            // Re-clamp in case the rotated bbox now pokes past the edge.
+            let p = self.input.footprints[idx].position;
+            self.input.footprints[idx].position = self.clamp_one(idx, p);
         } else {
             // Jitter-move: gaussian step scaled by current temperature.
             let scale = self.opts.jitter_scale_mm * (t / self.opts.t_initial).sqrt();
@@ -235,6 +278,7 @@ impl Placer {
         } else {
             // Revert.
             self.input.footprints[idx].position = old_pos_a;
+            self.input.footprints[idx].rotation = old_rot_a;
             if let Some((other, pos_b)) = old_pos_b {
                 self.input.footprints[other].position = pos_b;
             }
@@ -242,29 +286,39 @@ impl Placer {
     }
 
     fn compute_cost(&self) -> f64 {
+        // HPWL based on actual pad world-centres (rotation-aware), not
+        // footprint centroids. This is what makes rotation useful: a
+        // 90° spin of a 2-pad resistor moves its pads closer to or
+        // further from the net's neighbours, changing the cost and
+        // letting SA accept the rotation when it shortens wires.
+        let mut net_pads: HashMap<&str, Vec<(f64, f64)>> = HashMap::new();
+        for pf in &self.input.footprints {
+            for pad in &pf.footprint.pads {
+                if let Some(net) = pad.net.as_deref() {
+                    let c = pf.pad_world_center(pad);
+                    net_pads
+                        .entry(net)
+                        .or_default()
+                        .push((c.x.to_mm(), c.y.to_mm()));
+                }
+            }
+        }
         let mut hpwl = 0.0;
-        for net in &self.input.nets {
-            if net.len() < 2 {
+        for pads in net_pads.values() {
+            if pads.len() < 2 {
                 continue;
             }
             let mut min_x = f64::INFINITY;
             let mut max_x = f64::NEG_INFINITY;
             let mut min_y = f64::INFINITY;
             let mut max_y = f64::NEG_INFINITY;
-            for r in net {
-                if let Some(&idx) = self.ref_idx.get(r) {
-                    let p = self.input.footprints[idx].position;
-                    let x = p.x.to_mm();
-                    let y = p.y.to_mm();
-                    min_x = min_x.min(x);
-                    max_x = max_x.max(x);
-                    min_y = min_y.min(y);
-                    max_y = max_y.max(y);
-                }
+            for &(x, y) in pads {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
             }
-            if min_x.is_finite() {
-                hpwl += (max_x - min_x) + (max_y - min_y);
-            }
+            hpwl += (max_x - min_x) + (max_y - min_y);
         }
         let mut overlap = 0.0;
         let n = self.input.footprints.len();
@@ -272,10 +326,12 @@ impl Placer {
             for j in (i + 1)..n {
                 let a = &self.input.footprints[i];
                 let b = &self.input.footprints[j];
+                let (aw, ah) = a.rotated_bbox();
+                let (bw, bh) = b.rotated_bbox();
                 let dx = (a.position.x.to_mm() - b.position.x.to_mm()).abs();
                 let dy = (a.position.y.to_mm() - b.position.y.to_mm()).abs();
-                let half_w = (a.bbox_w.to_mm() + b.bbox_w.to_mm()) / 2.0 + 1.5; // pad
-                let half_h = (a.bbox_h.to_mm() + b.bbox_h.to_mm()) / 2.0 + 1.5;
+                let half_w = (aw.to_mm() + bw.to_mm()) / 2.0 + 1.5;
+                let half_h = (ah.to_mm() + bh.to_mm()) / 2.0 + 1.5;
                 let ox = (half_w - dx).max(0.0);
                 let oy = (half_h - dy).max(0.0);
                 overlap += ox * oy;
@@ -300,9 +356,12 @@ impl Placer {
             return p;
         };
         let fp = &self.input.footprints[idx];
-        let edge_clearance = Length::from_mm(1.0);
-        let half_w = fp.bbox_w / 2;
-        let half_h = fp.bbox_h / 2;
+        // 2 mm of breathing room from the edge: enough that the body
+        // box (pads + 0.4 mm silkscreen ring) doesn't touch the outline.
+        let edge_clearance = Length::from_mm(2.0);
+        let (rw, rh) = fp.rotated_bbox();
+        let half_w = rw / 2;
+        let half_h = rh / 2;
         let min_x = bounds.min.x + half_w + edge_clearance;
         let max_x = bounds.max.x - half_w - edge_clearance;
         let min_y = bounds.min.y + half_h + edge_clearance;
@@ -355,12 +414,10 @@ impl Placer {
                     let ay = self.input.footprints[i].position.y.to_mm();
                     let bx = self.input.footprints[j].position.x.to_mm();
                     let by = self.input.footprints[j].position.y.to_mm();
-                    let half_w = (self.input.footprints[i].bbox_w.to_mm()
-                        + self.input.footprints[j].bbox_w.to_mm()) / 2.0
-                        + pad;
-                    let half_h = (self.input.footprints[i].bbox_h.to_mm()
-                        + self.input.footprints[j].bbox_h.to_mm()) / 2.0
-                        + pad;
+                    let (aw, ah) = self.input.footprints[i].rotated_bbox();
+                    let (bw, bh) = self.input.footprints[j].rotated_bbox();
+                    let half_w = (aw.to_mm() + bw.to_mm()) / 2.0 + pad;
+                    let half_h = (ah.to_mm() + bh.to_mm()) / 2.0 + pad;
                     let mut dx = ax - bx;
                     let mut dy = ay - by;
                     let overlap_x = half_w - dx.abs();
