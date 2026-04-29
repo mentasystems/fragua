@@ -107,4 +107,15 @@ impl Rect {
             max: self.max.translate(margin, margin),
         }
     }
+
+    /// True if the two rectangles share any interior area. Touching
+    /// edges (zero-area overlap) counts as non-intersecting so a tight
+    /// edge-to-edge layout passes the check.
+    #[must_use]
+    pub fn intersects(&self, other: &Self) -> bool {
+        self.min.x.0 < other.max.x.0
+            && self.max.x.0 > other.min.x.0
+            && self.min.y.0 < other.max.y.0
+            && self.max.y.0 > other.min.y.0
+    }
 }

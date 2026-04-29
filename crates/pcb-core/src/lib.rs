@@ -10,6 +10,7 @@
 pub mod board;
 pub mod event;
 pub mod geometry;
+pub mod library;
 pub mod project;
 pub mod schematic;
 pub mod units;
@@ -17,6 +18,7 @@ pub mod units;
 pub use board::{Board, CopperLayer, Footprint, Id, Pad, Trace, Via};
 pub use event::{ActivityLevel, Event, EventBus};
 pub use geometry::{Point, Rect};
+pub use library::{Attachment, Library, LibraryEntry, LibraryPad};
 pub use project::{Project, ProjectSnapshot};
 pub use schematic::{Net, NetConnection, PinSide, SchPin, Schematic, Symbol, SymbolKind};
 pub use units::{Length, MIL, MM, NM, UM};

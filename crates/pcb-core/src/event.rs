@@ -39,6 +39,10 @@ pub enum Event {
     /// modified. Includes the current count so the UI can show a
     /// "N components remaining" hint.
     PaletteChanged { count: usize },
+    /// The component library (user-driven, persisted to disk) was
+    /// modified. Carries the new entry count so the UI can refresh
+    /// without an extra fetch.
+    LibraryChanged { count: usize },
     /// Free-form activity log line for the UI's activity panel.
     Activity { level: ActivityLevel, message: String },
 }

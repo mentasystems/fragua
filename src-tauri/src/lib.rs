@@ -47,7 +47,11 @@ struct OutlinePayload {
 
 #[tauri::command]
 fn project_state(state: State<'_, AppState>) -> ProjectStatePayload {
-    let snap = state.project.read();
+    // Render the VISIBLE mirror (lags `live` by the animation cadence)
+    // — that's what the user sees on the canvas. The agent's own
+    // read-tools (`view.snapshot`, `view.summary`) read live for an
+    // accurate, instant view of state after a script runs.
+    let snap = state.project.read_visible();
     let palette: Vec<PalettePayload> = snap
         .palette()
         .iter()
@@ -85,6 +89,81 @@ fn reset_project(state: State<'_, AppState>) {
     state
         .project
         .log(pcb_core::ActivityLevel::Info, "project.reset (UI button)");
+}
+
+/// Send every placed footprint back to the palette and drop routing.
+/// Schematic — symbols and nets — survives so the next auto-place can
+/// rebuild the layout from the same component set.
+#[tauri::command]
+fn reset_placement(state: State<'_, AppState>) {
+    state.project.reset_board();
+    state
+        .project
+        .log(pcb_core::ActivityLevel::Info, "placement reset (UI button)");
+}
+
+/// Drop every trace and via on the board. Footprints stay where they are.
+#[tauri::command]
+fn reset_route(state: State<'_, AppState>) {
+    state.project.clear_routing();
+    state
+        .project
+        .log(pcb_core::ActivityLevel::Info, "route reset (UI button)");
+}
+
+/// List every entry in the user's component library — same shape as the
+/// MCP `library.list` tool but routed through Tauri so the UI panel can
+/// reuse the data without going via the MCP TCP socket.
+#[tauri::command]
+fn library_state(state: State<'_, AppState>) -> serde_json::Value {
+    let entries = state.project.library().list();
+    let items: Vec<serde_json::Value> = entries.iter().map(|e| serde_json::json!({
+        "key": e.key,
+        "description": e.description,
+        "default_value": e.default_value,
+        "default_rotation_deg": e.default_rotation_deg,
+        "edge_mounted": e.edge_mounted,
+        "pad_count": e.pads.len(),
+        "attachments": e.attachments.iter().map(|a| serde_json::json!({
+            "id": a.id,
+            "kind": a.kind,
+            "filename": a.filename,
+            "mime": a.mime,
+            "added_at": a.added_at,
+        })).collect::<Vec<_>>(),
+        "created_at": e.created_at,
+    })).collect();
+    serde_json::json!({ "entries": items })
+}
+
+/// Read one library attachment as a base64-encoded data URI so the
+/// webview's <img> can render it directly. Files large enough that
+/// base64-ing 33% blows past the IPC limit get rejected; in practice
+/// component photos are <2 MB.
+#[tauri::command]
+fn library_attachment_data_uri(
+    state: State<'_, AppState>,
+    key: String,
+    attachment_id: String,
+) -> Result<String, String> {
+    use base64::Engine;
+    let entry = state
+        .project
+        .library()
+        .find(&key)
+        .ok_or_else(|| format!("no library entry with key {key}"))?;
+    let att = entry
+        .attachments
+        .iter()
+        .find(|a| a.id == attachment_id)
+        .ok_or_else(|| format!("no attachment {attachment_id} on {key}"))?;
+    let bytes = state
+        .project
+        .library()
+        .read_attachment(att)
+        .map_err(|e| e.to_string())?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{};base64,{}", att.mime, b64))
 }
 
 /// Set the rectangular Edge.Cuts outline of the board.
@@ -287,186 +366,6 @@ fn export_fab_pack(state: State<'_, AppState>) -> Result<String, String> {
     Ok(dir.to_string_lossy().into_owned())
 }
 
-/// Run the simulated-annealing placer on every palette item plus any
-/// footprint currently outside the board outline (so dragging a
-/// footprint past the edge and pressing auto-place repositions it).
-/// Footprints fully inside the board are treated as locked obstacles.
-#[tauri::command]
-async fn run_auto_placement(state: State<'_, AppState>) -> Result<(), String> {
-    // Pull stragglers back into the palette before the simulation.
-    let _ = state.project.unplace_out_of_bounds();
-    use pcb_core::Footprint;
-
-    let project = state.project.clone();
-    let bounds = project
-        .read()
-        .board()
-        .outline
-        .ok_or_else(|| "set the board outline first".to_string())?;
-
-    // Build placer input from the live state. Same shape as the MCP
-    // tool — code is intentionally duplicated here so the UI doesn't
-    // round-trip through MCP for its own button.
-    struct Item {
-        reference: String,
-        bbox_w: pcb_core::Length,
-        bbox_h: pcb_core::Length,
-        position: pcb_core::Point,
-        locked: bool,
-        footprint: Footprint,
-        is_palette: bool,
-    }
-    let mut items: Vec<Item> = Vec::new();
-    {
-        let snap = project.read();
-        for fp in snap.board().footprints_in_order() {
-            let r = fp.bounds().unwrap_or_else(|| {
-                pcb_core::Rect::from_corners(fp.position, fp.position)
-            });
-            items.push(Item {
-                reference: fp.reference.clone(),
-                bbox_w: r.width(),
-                bbox_h: r.height(),
-                position: fp.position,
-                locked: true,
-                footprint: fp.clone(),
-                is_palette: false,
-            });
-        }
-        for fp in snap.palette() {
-            let r = fp.bounds().unwrap_or_else(|| {
-                pcb_core::Rect::from_corners(fp.position, fp.position)
-            });
-            items.push(Item {
-                reference: fp.reference.clone(),
-                bbox_w: r.width(),
-                bbox_h: r.height(),
-                position: fp.position,
-                locked: false,
-                footprint: fp.clone(),
-                is_palette: true,
-            });
-        }
-    }
-    let palette_count = items.iter().filter(|i| i.is_palette).count();
-    if palette_count == 0 {
-        return Ok(());
-    }
-
-    // Sprinkle palette items inside the bounds.
-    {
-        let n = palette_count as f64;
-        let cols = (n.sqrt().ceil()).max(1.0);
-        let bx = bounds.min.x.to_mm();
-        let by = bounds.min.y.to_mm();
-        let bw = (bounds.max.x - bounds.min.x).to_mm();
-        let bh = (bounds.max.y - bounds.min.y).to_mm();
-        let dx = bw / (cols + 1.0);
-        let dy = bh / (cols + 1.0);
-        let mut pi = 0_f64;
-        for item in items.iter_mut().filter(|i| i.is_palette) {
-            let row = (pi / cols).floor();
-            let col = pi - row * cols;
-            item.position = pcb_core::Point::new(
-                pcb_core::Length::from_mm(bx + dx * (col + 1.0)),
-                pcb_core::Length::from_mm(by + dy * (row + 1.0)),
-            );
-            item.footprint.position = item.position;
-            pi += 1.0;
-        }
-    }
-
-    let placeable: Vec<pcb_placer::PlaceableFootprint> = items
-        .iter()
-        .map(|i| pcb_placer::PlaceableFootprint {
-            reference: i.reference.clone(),
-            bbox_w: i.bbox_w,
-            bbox_h: i.bbox_h,
-            position: i.position,
-            rotation: i.footprint.rotation,
-            locked: i.locked,
-            footprint: i.footprint.clone(),
-        })
-        .collect();
-    let palette_refs: std::collections::HashSet<String> = items
-        .iter()
-        .filter(|i| i.is_palette)
-        .map(|i| i.reference.clone())
-        .collect();
-
-    let nets: Vec<Vec<String>> = {
-        let snap = project.read();
-        let sch = snap.schematic();
-        sch.nets
-            .values()
-            .map(|n| {
-                let mut refs: Vec<String> = n
-                    .connections
-                    .iter()
-                    .filter_map(|c| sch.symbols.get(&c.symbol_id).map(|s| s.reference.clone()))
-                    .collect();
-                refs.sort();
-                refs.dedup();
-                refs
-            })
-            .filter(|v| v.len() >= 2)
-            .collect()
-    };
-
-    let mut placer = pcb_placer::Placer::new(
-        pcb_placer::PlacementInput {
-            footprints: placeable,
-            nets,
-            bounds: Some(bounds),
-        },
-        pcb_placer::PlacerOptions {
-            total_steps: 200,
-            ..Default::default()
-        },
-    );
-
-    for reference in &palette_refs {
-        let item = items
-            .iter()
-            .find(|i| &i.reference == reference)
-            .expect("palette ref present");
-        let _ = project.place_from_palette(reference, item.position);
-    }
-    project.clear_routing();
-
-    const ITERATIONS: u32 = 200;
-    const FRAME_EVERY: u32 = 4;
-    const FRAME_DELAY_MS: u64 = 100;
-    for i in 0..ITERATIONS {
-        let frame = placer.step();
-        if i % FRAME_EVERY == 0 || i == ITERATIONS - 1 {
-            for (reference, position) in &frame.positions {
-                if !palette_refs.contains(reference) {
-                    continue;
-                }
-                let _ = project.move_footprint_to(reference, *position);
-            }
-            project
-                .events()
-                .publish(pcb_core::Event::PlacementProgress {
-                    iteration: frame.iteration,
-                });
-            tokio::time::sleep(std::time::Duration::from_millis(FRAME_DELAY_MS)).await;
-        }
-    }
-    placer.finalise();
-    for fp in placer.current() {
-        if palette_refs.contains(&fp.reference) {
-            let _ = project.move_footprint_to(&fp.reference, fp.position);
-            let _ = project.rotate_footprint(&fp.reference, fp.rotation);
-        }
-    }
-    project.log(
-        pcb_core::ActivityLevel::Info,
-        format!("placement.auto: settled after {ITERATIONS} iterations (UI button)"),
-    );
-    Ok(())
-}
 
 #[tauri::command]
 fn add_demo_resistor(state: State<'_, AppState>) {
@@ -497,13 +396,19 @@ fn add_demo_resistor(state: State<'_, AppState>) {
                 net: None,
             },
         ],
+        key: String::new(),
+        description: String::new(),
+        edge_mounted: false,
     };
     state.project.add_footprint(footprint);
 }
 
 /// Entry point used by the binary in `main.rs`.
 pub fn run() {
-    let project = Project::new("untitled");
+    // Restore the most recent state if `~/.pcb-projects/untitled/current.json`
+    // exists; otherwise start fresh. The auto-save loop below will keep
+    // the file updated as the agent works.
+    let project = Project::load_default("untitled").unwrap_or_else(|| Project::new("untitled"));
     let mcp_addr = std::env::var("PCB_MCP_ADDR").unwrap_or_else(|_| MCP_DEFAULT_ADDR.to_string());
 
     let state = AppState {
@@ -516,6 +421,8 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             spawn_event_pump(handle, project.clone());
+            spawn_animation_pump(project.clone());
+            spawn_autosave(project.clone());
             spawn_mcp_server(project, mcp_addr.clone());
             Ok(())
         })
@@ -523,14 +430,17 @@ pub fn run() {
             project_state,
             add_demo_resistor,
             reset_project,
+            reset_placement,
+            reset_route,
             set_board_outline,
             place_from_palette,
             move_footprint,
             rotate_footprint,
-            run_auto_placement,
             run_router,
             run_drc,
-            export_fab_pack
+            export_fab_pack,
+            library_state,
+            library_attachment_data_uri
         ])
         .run(tauri::generate_context!())
         .expect("tauri runtime");
@@ -539,6 +449,25 @@ pub fn run() {
 /// Subscribe to the project event bus and forward every event into the
 /// webview as `pcb://event`. Errors (lagged subscriber, send failure)
 /// are non-fatal — the next event will catch up.
+/// Drive the project's animation mirror: every `ANIMATION_TICK_MS`,
+/// pop one Mutation from the pending queue, apply it to `visible`,
+/// and emit the corresponding Event. The agent never blocks on this
+/// — mutations land in `live` instantly; only the UI's view (which
+/// reads `visible`) catches up frame-by-frame.
+fn spawn_animation_pump(project: Project) {
+    use std::time::Duration;
+    const TICK: Duration = Duration::from_millis(150);
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(TICK).await;
+            // Drain whatever is pending — but only one per tick so the
+            // animation paces. If the agent has queued up a long burst,
+            // the queue catches up gradually.
+            project.tick();
+        }
+    });
+}
+
 fn spawn_event_pump(handle: tauri::AppHandle, project: Project) {
     let mut rx = project.events().subscribe();
     tauri::async_runtime::spawn(async move {
@@ -552,6 +481,83 @@ fn spawn_event_pump(handle: tauri::AppHandle, project: Project) {
             }
         }
     });
+}
+
+/// Subscribe to the project event bus, debounce mutations, and write
+/// `~/.pcb-projects/<name>/current.json` after each idle window. Every
+/// `HISTORY_EVERY_N_SAVES` saves we also drop a copy into the history
+/// dir so the user can roll back if a session goes wrong.
+///
+/// Activity / PlacementProgress / LibraryChanged are NOT mutations of
+/// the project file (activity is logging; library is its own store), so
+/// they don't trigger a save.
+fn spawn_autosave(project: Project) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    const DEBOUNCE: Duration = Duration::from_millis(500);
+    const HISTORY_EVERY_N_SAVES: u64 = 10;
+
+    let mut rx = project.events().subscribe();
+    let save_counter = std::sync::Arc::new(AtomicU64::new(0));
+    tauri::async_runtime::spawn(async move {
+        loop {
+            // Block until the first mutation in a burst arrives.
+            let first = match rx.recv().await {
+                Ok(ev) => ev,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
+            if !is_persistable(&first) {
+                continue;
+            }
+            // Drain the rest of the burst with a debounce timer; each
+            // new persistable event resets the timer.
+            loop {
+                match tokio::time::timeout(DEBOUNCE, rx.recv()).await {
+                    Ok(Ok(ev)) => {
+                        if is_persistable(&ev) {
+                            // keep waiting — burst still arriving
+                            continue;
+                        }
+                    }
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return,
+                    Err(_) => break, // debounce window expired — flush
+                }
+            }
+            // Quiet period reached: write current.json, possibly snapshot.
+            match project.save_to_default() {
+                Ok(_) => {
+                    let n = save_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n % HISTORY_EVERY_N_SAVES == 0 {
+                        if let Err(e) = project.snapshot_history() {
+                            project.log(
+                                pcb_core::ActivityLevel::Warn,
+                                format!("autosave: history snapshot failed: {e}"),
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    project.log(
+                        pcb_core::ActivityLevel::Error,
+                        format!("autosave: {e}"),
+                    );
+                }
+            }
+        }
+    });
+}
+
+fn is_persistable(ev: &pcb_core::Event) -> bool {
+    use pcb_core::Event;
+    !matches!(
+        ev,
+        Event::Activity { .. }
+            | Event::PlacementProgress { .. }
+            | Event::LibraryChanged { .. }
+    )
 }
 
 fn spawn_mcp_server(project: Project, addr: String) {

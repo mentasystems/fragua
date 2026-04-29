@@ -2126,11 +2126,11 @@ dependencies = [
 name = "pcb-app"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "pcb-core",
  "pcb-drc",
  "pcb-gerber",
  "pcb-mcp",
- "pcb-placer",
  "pcb-render",
  "pcb-router",
  "serde",
@@ -2145,6 +2145,7 @@ name = "pcb-core"
 version = "0.0.0"
 dependencies = [
  "serde",
+ "serde_json",
  "tokio",
  "uuid",
 ]
@@ -2168,22 +2169,15 @@ dependencies = [
 name = "pcb-mcp"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "pcb-core",
  "pcb-drc",
  "pcb-gerber",
- "pcb-placer",
  "pcb-render",
  "pcb-router",
  "serde",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "pcb-placer"
-version = "0.0.0"
-dependencies = [
- "pcb-core",
 ]
 
 [[package]]

@@ -22,12 +22,12 @@ html, body, #app {
 
 #app {
   display: grid;
-  grid-template-columns: 1fr 320px;
+  grid-template-columns: 240px 1fr 320px;
   grid-template-rows: 36px auto 1fr;
   grid-template-areas:
-    "topbar topbar"
-    "palette activity"
-    "canvas activity";
+    "topbar topbar topbar"
+    "library palette activity"
+    "library canvas  activity";
 }
 
 .topbar {
@@ -201,3 +201,133 @@ html, body, #app {
 .activity-log .entry.warn  .level { color: #d29922; }
 .activity-log .entry.error .level { color: #f85149; }
 .activity-log .entry .msg { color: var(--text); word-break: break-word; }
+
+@keyframes pcb-spawn {
+  0%   { filter: drop-shadow(0 0 8px #ffd166) brightness(2.0); opacity: 0.55; }
+  35%  { filter: drop-shadow(0 0 4px #ffd166) brightness(1.5); opacity: 1; }
+  100% { filter: none; opacity: 1; }
+}
+[data-board-ref].spawn { animation: pcb-spawn 600ms ease-out; transform-box: fill-box; transform-origin: center; }
+
+/* Brush-stroke trace draw: pathLength="1" normalises every line so a
+   single dasharray/dashoffset rule paints the trace from start to end. */
+@keyframes trace-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+line[data-trace-id].trace-spawn {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: trace-draw 150ms linear forwards;
+}
+
+@keyframes via-pop {
+  0%   { transform: scale(0.2); opacity: 0; }
+  60%  { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+g[data-via-id].via-spawn {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: via-pop 150ms ease-out;
+}
+
+.activity-log .entry { animation: log-fade-in 300ms ease-out; }
+@keyframes log-fade-in {
+  0%   { opacity: 0; transform: translateX(-4px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
+
+.library-pane {
+  grid-area: library;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  overflow: hidden;
+}
+.library-pane h2 {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.library-pane h2 .value { color: var(--accent, #d6905b); font-weight: 500; }
+.library-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.library-empty {
+  padding: 16px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+  text-align: center;
+}
+.library-card {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(255,255,255,0.02);
+  transition: border-color 120ms ease;
+}
+.library-card:hover { border-color: #d6905b; background: rgba(214,144,91,0.05); }
+.library-thumb {
+  width: 56px;
+  height: 56px;
+  border-radius: 3px;
+  background: #0e1116 center / cover no-repeat;
+  border: 1px solid #1a1f27;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: ui-monospace, monospace;
+  font-size: 14px;
+  color: #5b6470;
+  letter-spacing: 0.05em;
+}
+.library-thumb-empty { background-image: none; }
+.library-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.library-key {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.library-value {
+  font-size: 11px;
+  color: #d6905b;
+}
+.library-meta {
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+.library-desc {
+  font-size: 10px;
+  color: #8b949e;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 2px;
+}

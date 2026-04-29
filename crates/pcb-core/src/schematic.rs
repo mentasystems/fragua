@@ -88,6 +88,20 @@ pub struct Symbol {
     pub kind: SymbolKind,
     pub position: Point,
     pub rotation: f32,
+    /// Optional library key the agent picked for this symbol — e.g.
+    /// "esp32_s3_zero", "lora_xl1262", "screw_term_2p_5.08mm". When set,
+    /// `palette.add_from_library` can spin up the matching footprint
+    /// without the agent having to spell every pad geometry by hand.
+    /// Always lowercase snake_case so lookups are deterministic.
+    #[serde(default)]
+    pub key: String,
+    /// Free-form intent the agent records when creating the symbol —
+    /// e.g. "ESP32-S3-Zero module; USB-C is on the short edge near
+    /// pin 1, cable exits perpendicular to the pin rows". Persists in
+    /// snapshots so the agent's future calls can recover its own
+    /// reasoning without re-deriving it from the raw geometry.
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

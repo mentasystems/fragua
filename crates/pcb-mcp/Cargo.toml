@@ -10,10 +10,10 @@ pcb-core = { path = "../pcb-core" }
 pcb-gerber = { path = "../pcb-gerber" }
 pcb-render = { path = "../pcb-render" }
 pcb-router = { path = "../pcb-router" }
-pcb-placer = { path = "../pcb-placer" }
 pcb-drc = { path = "../pcb-drc" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 tokio = { version = "1", features = ["io-util", "io-std", "rt-multi-thread", "macros", "sync", "net", "time"] }
 
 [[bin]]

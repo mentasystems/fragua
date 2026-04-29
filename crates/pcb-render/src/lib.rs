@@ -49,10 +49,18 @@ pub fn render_svg(board: &Board) -> String {
         h = view_h_mm,
     );
 
+    // Millimetre grid: drawn under everything so the agent can read
+    // coordinates straight off the board.
+    write_mm_grid(&mut svg, view);
+
     if let Some(outline) = board.outline {
         write_rect_stroke(&mut svg, outline, "#d6905b", 0.4);
+        write_outline_dimensions(&mut svg, outline);
         write_outline_handles(&mut svg, outline);
     }
+
+    // Origin marker so (0,0) is always identifiable.
+    write_origin_marker(&mut svg);
 
     // Bottom traces first so top traces visually win at crossings.
     for trace in board.traces.iter().filter(|t| t.layer == CopperLayer::Bottom) {
@@ -72,6 +80,100 @@ pub fn render_svg(board: &Board) -> String {
 
     svg.push_str("</g></svg>");
     svg
+}
+
+/// Subtle millimetre grid: a faint line every mm, a brighter line every
+/// 5 mm with a numeric label. The labels live in flipped-Y space so the
+/// outer scale(1,-1) doesn't mirror them.
+fn write_mm_grid(svg: &mut String, view: Rect) {
+    let vx = view.min.x.to_mm();
+    let vy = view.min.y.to_mm();
+    let vw = view.width().to_mm();
+    let vh = view.height().to_mm();
+    // Skip the grid for very wide views so we don't blow up the SVG.
+    if vw > 400.0 || vh > 400.0 {
+        return;
+    }
+    let _ = write!(
+        svg,
+        r##"<g pointer-events="none" stroke="#1a1f27" stroke-width="0.03" fill="none">"##
+    );
+    let mut x = (vx).floor();
+    while x <= vx + vw {
+        let major = (x.round() as i32) % 5 == 0;
+        let stroke = if major { "#222a35" } else { "#161b22" };
+        let _ = write!(
+            svg,
+            r##"<line x1="{x:.3}" y1="{y1:.3}" x2="{x:.3}" y2="{y2:.3}" stroke="{stroke}"/>"##,
+            y1 = vy,
+            y2 = vy + vh,
+        );
+        x += 1.0;
+    }
+    let mut y = (vy).floor();
+    while y <= vy + vh {
+        let major = (y.round() as i32) % 5 == 0;
+        let stroke = if major { "#222a35" } else { "#161b22" };
+        let _ = write!(
+            svg,
+            r##"<line x1="{x1:.3}" y1="{y:.3}" x2="{x2:.3}" y2="{y:.3}" stroke="{stroke}"/>"##,
+            x1 = vx,
+            x2 = vx + vw,
+        );
+        y += 1.0;
+    }
+    svg.push_str("</g>");
+    // Major gridline labels along the bottom and left edges.
+    let mut x = (vx / 5.0).ceil() * 5.0;
+    while x <= vx + vw {
+        let _ = write!(
+            svg,
+            r##"<g transform="translate({x:.3},{y:.3}) scale(1,-1)"><text x="0" y="0" font-family="ui-monospace, monospace" font-size="0.9" fill="#3a4452" pointer-events="none">{lab}</text></g>"##,
+            y = vy + 0.4,
+            lab = x as i32,
+        );
+        x += 5.0;
+    }
+    let mut y = (vy / 5.0).ceil() * 5.0;
+    while y <= vy + vh {
+        let _ = write!(
+            svg,
+            r##"<g transform="translate({x:.3},{y:.3}) scale(1,-1)"><text x="0" y="0" font-family="ui-monospace, monospace" font-size="0.9" fill="#3a4452" pointer-events="none">{lab}</text></g>"##,
+            x = vx + 0.3,
+            lab = y as i32,
+        );
+        y += 5.0;
+    }
+}
+
+/// Crosshair + "0,0" label at the world origin so the agent can
+/// reorient quickly.
+fn write_origin_marker(svg: &mut String) {
+    let _ = write!(
+        svg,
+        r##"<g pointer-events="none" stroke="#d6905b" stroke-width="0.08" opacity="0.6"><line x1="-1.5" y1="0" x2="1.5" y2="0"/><line x1="0" y1="-1.5" x2="0" y2="1.5"/></g><g transform="translate(0.4,0.4) scale(1,-1)"><text x="0" y="0" font-family="ui-monospace, monospace" font-size="0.9" fill="#d6905b" opacity="0.7" pointer-events="none">0,0</text></g>"##,
+    );
+}
+
+/// Width × height labels around the board outline so the agent doesn't
+/// have to compute it from min/max corners.
+fn write_outline_dimensions(svg: &mut String, outline: Rect) {
+    let w = outline.width().to_mm();
+    let h = outline.height().to_mm();
+    let cx = (outline.min.x.to_mm() + outline.max.x.to_mm()) / 2.0;
+    let cy = (outline.min.y.to_mm() + outline.max.y.to_mm()) / 2.0;
+    // Width label hovering above the top edge.
+    let _ = write!(
+        svg,
+        r##"<g transform="translate({cx:.3},{y:.3}) scale(1,-1)"><text x="0" y="0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="1.4" fill="#d6905b" pointer-events="none">{w:.1} mm</text></g>"##,
+        y = outline.max.y.to_mm() + 1.8,
+    );
+    // Height label to the left, rotated 90°.
+    let _ = write!(
+        svg,
+        r##"<g transform="translate({x:.3},{cy:.3}) scale(1,-1) rotate(-90)"><text x="0" y="0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="1.4" fill="#d6905b" pointer-events="none">{h:.1} mm</text></g>"##,
+        x = outline.min.x.to_mm() - 1.8,
+    );
 }
 
 fn view_rect(board: &Board) -> Rect {
@@ -133,15 +235,56 @@ fn write_footprint(svg: &mut String, fp: &Footprint) {
     for pad in &fp.pads {
         write_pad(svg, pad);
     }
-    // Label uses scale(1,-1) inside the rotated frame so it isn't
-    // mirrored by the outer Y-flip; pointer-events:none lets clicks
-    // fall through to the body rect.
+    // Reference + value label, plus pad numbers when the pad is large
+    // enough to fit one. All labels live inside an inner scale(1,-1) so
+    // the outer Y-flip doesn't mirror them, and use pointer-events:none
+    // so clicks fall through to the body hitbox.
+    let body = body_rect(fp);
+    let label_y = body
+        .map(|r| r.min.y.to_mm() - 0.6)
+        .unwrap_or(-0.6);
     let _ = write!(
         svg,
-        r##"<g transform="scale(1,-1)"><text x="0" y="0" text-anchor="middle" dominant-baseline="middle" font-family="ui-monospace, monospace" font-size="0.8" fill="#e6edf3" pointer-events="none">{r}</text></g>"##,
+        r##"<g transform="scale(1,-1)" pointer-events="none">"##,
+    );
+    // REF on top of the body.
+    let _ = write!(
+        svg,
+        r##"<text x="0" y="{y:.3}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="0.9" fill="#e6edf3">{r}</text>"##,
+        y = -label_y,
         r = escape(&fp.reference),
     );
-    svg.push_str("</g>");
+    // Value below the body, slimmer.
+    if !fp.value.is_empty() {
+        let val_y = body
+            .map(|r| r.max.y.to_mm() + 1.2)
+            .unwrap_or(1.2);
+        let _ = write!(
+            svg,
+            r##"<text x="0" y="{y:.3}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="0.7" fill="#8b949e">{v}</text>"##,
+            y = -val_y,
+            v = escape(&fp.value),
+        );
+    }
+    // Pad numbers — only when the pad is at least 0.8 mm in both axes
+    // so the digits don't bleed outside the copper.
+    for pad in &fp.pads {
+        let pw = pad.size.0.to_mm();
+        let ph = pad.size.1.to_mm();
+        if pw < 0.8 || ph < 0.8 {
+            continue;
+        }
+        let size = (pw.min(ph) * 0.55).clamp(0.35, 1.2);
+        let _ = write!(
+            svg,
+            r##"<text x="{x:.3}" y="{y:.3}" text-anchor="middle" dominant-baseline="middle" font-family="ui-monospace, monospace" font-size="{sz:.2}" fill="#0e1116">{n}</text>"##,
+            x = pad.offset.x.to_mm(),
+            y = -pad.offset.y.to_mm(),
+            sz = size,
+            n = escape(&pad.number),
+        );
+    }
+    svg.push_str("</g></g>");
 }
 
 fn body_rect(fp: &Footprint) -> Option<Rect> {
@@ -161,6 +304,10 @@ fn write_pad(svg: &mut String, pad: &Pad) {
     let cy = pad.offset.y.to_mm();
     let w = pad.size.0.to_mm();
     let h = pad.size.1.to_mm();
+    // Pads use saturated copper tones; traces use a clearly different
+    // hue (gold for top, cyan for bottom) so the agent and the human
+    // can tell at a glance whether a piece of copper is a landing pad
+    // or a routed segment.
     let fill = match pad.layer {
         CopperLayer::Top => "#c97a2b",
         CopperLayer::Bottom => "#2b6cc9",
@@ -217,9 +364,13 @@ fn write_ratsnest(svg: &mut String, board: &Board) {
 }
 
 fn write_trace(svg: &mut String, trace: &Trace) {
+    // Traces use a different hue than pads on the same layer so the
+    // eye can separate "where copper lands on a component" from "where
+    // copper carries a signal". Top: gold against the orange pads;
+    // bottom: cyan against the blue pads.
     let stroke = match trace.layer {
-        CopperLayer::Top => "#c97a2b",
-        CopperLayer::Bottom => "#2b6cc9",
+        CopperLayer::Top => "#ffd166",
+        CopperLayer::Bottom => "#4ec9ff",
     };
     let layer_label = match trace.layer {
         CopperLayer::Top => "top",
@@ -227,7 +378,8 @@ fn write_trace(svg: &mut String, trace: &Trace) {
     };
     let _ = write!(
         svg,
-        r##"<line x1="{x1:.3}" y1="{y1:.3}" x2="{x2:.3}" y2="{y2:.3}" stroke="{stroke}" stroke-width="{w:.3}" stroke-linecap="round"><title>{net} ({layer_label})</title></line>"##,
+        r##"<line data-trace-id="{id}" pathLength="1" x1="{x1:.3}" y1="{y1:.3}" x2="{x2:.3}" y2="{y2:.3}" stroke="{stroke}" stroke-width="{w:.3}" stroke-linecap="round"><title>{net} ({layer_label})</title></line>"##,
+        id = trace.id.0,
         x1 = trace.start.x.to_mm(),
         y1 = trace.start.y.to_mm(),
         x2 = trace.end.x.to_mm(),
@@ -244,7 +396,8 @@ fn write_via(svg: &mut String, via: &Via) {
     let inner = via.drill.to_mm() / 2.0;
     let _ = write!(
         svg,
-        r##"<g><title>{net} (via)</title><circle cx="{cx:.3}" cy="{cy:.3}" r="{outer:.3}" fill="#7d8590"/><circle cx="{cx:.3}" cy="{cy:.3}" r="{inner:.3}" fill="#0e1116"/></g>"##,
+        r##"<g data-via-id="{id}"><title>{net} (via)</title><circle cx="{cx:.3}" cy="{cy:.3}" r="{outer:.3}" fill="#7d8590"/><circle cx="{cx:.3}" cy="{cy:.3}" r="{inner:.3}" fill="#0e1116"/></g>"##,
+        id = via.id.0,
         net = escape(&via.net),
     );
 }

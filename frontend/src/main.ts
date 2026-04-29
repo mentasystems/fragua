@@ -33,15 +33,35 @@ type ActivityEvent = {
 type AnyEvent =
   | ActivityEvent
   | { kind: "ProjectChanged" }
-  | { kind: "FootprintAdded" }
+  | { kind: "FootprintAdded"; reference: string }
   | { kind: "FootprintMoved" }
   | { kind: "FootprintRemoved" }
   | { kind: "OutlineChanged" }
-  | { kind: "SymbolAdded" }
+  | { kind: "SymbolAdded"; reference: string }
   | { kind: "NetChanged" }
   | { kind: "RoutingChanged" }
   | { kind: "PlacementProgress" }
-  | { kind: "PaletteChanged" };
+  | { kind: "PaletteChanged" }
+  | { kind: "LibraryChanged"; count: number };
+
+type LibraryAttachment = {
+  id: string;
+  kind: string;
+  filename: string;
+  mime: string;
+  added_at: number;
+};
+
+type LibraryEntry = {
+  key: string;
+  description: string;
+  default_value: string;
+  default_rotation_deg: number;
+  edge_mounted: boolean;
+  pad_count: number;
+  attachments: LibraryAttachment[];
+  created_at: number;
+};
 
 type View = "board" | "schematic";
 
@@ -52,22 +72,16 @@ root.innerHTML = `
   <div class="topbar">
     <span class="label">project</span><span class="value" id="proj-name">—</span>
     <span class="tabs">
-      <button class="tab" data-view="schematic" id="tab-sch">schematic <span id="proj-symbols">0</span>/<span id="proj-nets">0</span></button>
-      <button class="tab" data-view="board" id="tab-board">board <span id="proj-footprints">0</span></button>
+      <span class="tab" data-view="schematic" id="tab-sch">schematic <span id="proj-symbols">0</span>/<span id="proj-nets">0</span></span>
+      <span class="tab" data-view="board" id="tab-board">board <span id="proj-footprints">0</span></span>
     </span>
     <span class="board-size">
       <span class="label">size</span>
-      <input type="number" id="board-w" min="1" step="1" value="50" />
+      <span class="value" id="board-w">—</span>
       <span class="label">×</span>
-      <input type="number" id="board-h" min="1" step="1" value="40" />
+      <span class="value" id="board-h">—</span>
       <span class="label">mm</span>
-      <button class="action" id="board-set" title="Set the board outline">set</button>
     </span>
-    <button class="action" id="auto-place-btn" title="Run simulated-annealing placement on every palette item">auto-place</button>
-    <button class="action" id="route-btn" title="Auto-route every net">route</button>
-    <button class="action" id="drc-btn" title="Run design-rule checker">drc</button>
-    <button class="action" id="export-btn" title="Write Gerbers + drill + BOM + pick-and-place to ~/Downloads">export…</button>
-    <button class="action danger" id="reset-btn" title="Wipe schematic, palette, and board">reset</button>
     <span class="spacer"></span>
     <span class="label">mcp</span><span class="value accent" id="proj-mcp">—</span>
   </div>
@@ -76,6 +90,10 @@ root.innerHTML = `
   <div class="activity-pane">
     <h2>activity</h2>
     <div class="activity-log" id="activity-log"></div>
+  </div>
+  <div class="library-pane" id="library-pane">
+    <h2>library <span id="library-count" class="value">0</span></h2>
+    <div class="library-list" id="library-list"></div>
   </div>
 `;
 
@@ -87,17 +105,13 @@ const els = {
   mcp: document.getElementById("proj-mcp")!,
   canvas: document.getElementById("canvas-pane")!,
   log: document.getElementById("activity-log")!,
+  library: document.getElementById("library-list")!,
+  libraryCount: document.getElementById("library-count")!,
   tabBoard: document.getElementById("tab-board")!,
   tabSch: document.getElementById("tab-sch")!,
   palette: document.getElementById("palette-strip")!,
-  autoPlace: document.getElementById("auto-place-btn")! as HTMLButtonElement,
-  route: document.getElementById("route-btn")! as HTMLButtonElement,
-  drc: document.getElementById("drc-btn")! as HTMLButtonElement,
-  export: document.getElementById("export-btn")! as HTMLButtonElement,
-  reset: document.getElementById("reset-btn")! as HTMLButtonElement,
-  boardW: document.getElementById("board-w")! as HTMLInputElement,
-  boardH: document.getElementById("board-h")! as HTMLInputElement,
-  boardSet: document.getElementById("board-set")! as HTMLButtonElement,
+  boardW: document.getElementById("board-w")!,
+  boardH: document.getElementById("board-h")!,
 };
 
 type DrcViolation = {
@@ -107,11 +121,6 @@ type DrcViolation = {
   x_mm: number;
   y_mm: number;
   involved: string[];
-};
-type DrcReport = {
-  error_count: number;
-  warning_count: number;
-  violations: DrcViolation[];
 };
 
 let view: View = "board";
@@ -127,99 +136,12 @@ function setView(v: View) {
   if (lastState) paintCanvas(lastState);
 }
 
+// All control surface lives behind the agent now. Tabs stay clickable
+// so the human can flip between the board and the schematic to watch,
+// but every action (place, move, route, DRC, export, reset) goes
+// through MCP — no UI buttons.
 els.tabBoard.addEventListener("click", () => setView("board"));
 els.tabSch.addEventListener("click", () => setView("schematic"));
-
-els.boardSet.addEventListener("click", async () => {
-  const w = Number(els.boardW.value);
-  const h = Number(els.boardH.value);
-  if (!Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1) {
-    appendActivity("error", "size must be ≥1 mm");
-    return;
-  }
-  try {
-    setView("board");
-    await invoke("set_board_outline", { wMm: w, hMm: h });
-  } catch (err) {
-    appendActivity("error", String(err));
-  }
-});
-
-els.autoPlace.addEventListener("click", async () => {
-  els.autoPlace.disabled = true;
-  try {
-    setView("board");
-    await invoke("run_auto_placement");
-  } catch (err) {
-    appendActivity("error", String(err));
-  } finally {
-    els.autoPlace.disabled = false;
-  }
-});
-
-els.route.addEventListener("click", async () => {
-  els.route.disabled = true;
-  try {
-    setView("board");
-    const summary = await invoke<string>("run_router");
-    appendActivity("info", summary);
-    // Routing changes the geometry; clear stale DRC markers.
-    drcViolations = [];
-    if (lastState) paintCanvas(lastState);
-  } catch (err) {
-    appendActivity("error", String(err));
-  } finally {
-    els.route.disabled = false;
-  }
-});
-
-els.drc.addEventListener("click", async () => {
-  els.drc.disabled = true;
-  try {
-    setView("board");
-    const report = await invoke<DrcReport>("run_drc");
-    drcViolations = report.violations;
-    appendActivity(
-      report.error_count > 0 ? "error" : "info",
-      `DRC: ${report.error_count} error(s), ${report.warning_count} warning(s)`,
-    );
-    for (const v of report.violations.slice(0, 10)) {
-      appendActivity(v.severity === "error" ? "error" : "warn", `  ${v.message}`);
-    }
-    if (report.violations.length > 10) {
-      appendActivity("info", `  …and ${report.violations.length - 10} more`);
-    }
-    if (lastState) paintCanvas(lastState);
-  } catch (err) {
-    appendActivity("error", String(err));
-  } finally {
-    els.drc.disabled = false;
-  }
-});
-
-els.export.addEventListener("click", async () => {
-  els.export.disabled = true;
-  try {
-    const dir = await invoke<string>("export_fab_pack");
-    appendActivity("info", `exported to ${dir}`);
-  } catch (err) {
-    appendActivity("error", String(err));
-  } finally {
-    els.export.disabled = false;
-  }
-});
-
-els.reset.addEventListener("click", async () => {
-  // No confirm() here — Tauri's webview swallows JS dialogs and the
-  // button used to silently no-op. The activity log line afterward
-  // is the receipt.
-  try {
-    await invoke("reset_project");
-    appendActivity("info", "project reset (UI button)");
-  } catch (err) {
-    appendActivity("error", String(err));
-  }
-});
 
 function appendActivity(level: string, message: string) {
   const entry = document.createElement("div");
@@ -494,40 +416,179 @@ async function refresh() {
   els.footprints.textContent = String(state.footprint_count);
   els.mcp.textContent = state.mcp_addr;
   if (state.outline) {
-    els.boardW.value = String(Math.round(state.outline.w_mm));
-    els.boardH.value = String(Math.round(state.outline.h_mm));
+    els.boardW.textContent = String(Math.round(state.outline.w_mm));
+    els.boardH.textContent = String(Math.round(state.outline.h_mm));
+  } else {
+    els.boardW.textContent = "—";
+    els.boardH.textContent = "—";
   }
   paintPalette(state);
   paintCanvas(state);
+}
+
+let libraryThumbCache = new Map<string, string>(); // attachment_id → data URI
+
+async function refreshLibrary() {
+  const data = await invoke<{ entries: LibraryEntry[] }>("library_state");
+  els.libraryCount.textContent = String(data.entries.length);
+  els.library.innerHTML = "";
+  if (data.entries.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "library-empty";
+    empty.textContent = "no components yet — your agent will save parts here as you design";
+    els.library.appendChild(empty);
+    return;
+  }
+  for (const entry of data.entries) {
+    const card = document.createElement("div");
+    card.className = "library-card";
+    card.dataset.key = entry.key;
+
+    // Thumbnail = first photo attachment, if any.
+    const thumb = document.createElement("div");
+    thumb.className = "library-thumb";
+    const photo = entry.attachments.find((a) =>
+      a.mime.startsWith("image/")
+    );
+    if (photo) {
+      const cached = libraryThumbCache.get(photo.id);
+      if (cached) {
+        thumb.style.backgroundImage = `url(${cached})`;
+      } else {
+        invoke<string>("library_attachment_data_uri", {
+          key: entry.key,
+          attachmentId: photo.id,
+        })
+          .then((uri) => {
+            libraryThumbCache.set(photo.id, uri);
+            thumb.style.backgroundImage = `url(${uri})`;
+          })
+          .catch(() => {});
+      }
+    } else {
+      thumb.classList.add("library-thumb-empty");
+      thumb.textContent = entry.key.slice(0, 2).toUpperCase();
+    }
+    card.appendChild(thumb);
+
+    const body = document.createElement("div");
+    body.className = "library-body";
+    const title = document.createElement("div");
+    title.className = "library-key";
+    title.textContent = entry.key;
+    body.appendChild(title);
+    if (entry.default_value) {
+      const val = document.createElement("div");
+      val.className = "library-value";
+      val.textContent = entry.default_value;
+      body.appendChild(val);
+    }
+    const meta = document.createElement("div");
+    meta.className = "library-meta";
+    const parts = [`${entry.pad_count} pads`];
+    if (entry.edge_mounted) parts.push("edge");
+    if (entry.attachments.length > 0)
+      parts.push(`${entry.attachments.length} attached`);
+    meta.textContent = parts.join(" · ");
+    body.appendChild(meta);
+    if (entry.description) {
+      const desc = document.createElement("div");
+      desc.className = "library-desc";
+      desc.textContent = entry.description;
+      body.appendChild(desc);
+    }
+    card.appendChild(body);
+    els.library.appendChild(card);
+  }
+}
+
+// Animation pacing now lives on the BACKEND — it advances the visible
+// state mirror one mutation per `ANIMATION_TICK_MS` and emits the
+// matching event each time. The frontend just paints whatever arrives;
+// no queueing here. Activity / Library / Project events come straight
+// through the bus (not through the mirror) since they don't change the
+// canvas, so they show up instantly which is fine.
+async function playEvent(data: AnyEvent) {
+  if (data.kind === "Activity") {
+    appendActivity(data.level, data.message);
+    return;
+  }
+  if (data.kind === "LibraryChanged") {
+    // Library updates are independent of the board canvas; refresh
+    // only the side panel so the view doesn't jump to "board".
+    await refreshLibrary();
+    return;
+  }
+  const isBoardEvent =
+    data.kind === "PlacementProgress" ||
+    data.kind === "RoutingChanged" ||
+    data.kind === "FootprintAdded" ||
+    data.kind === "FootprintMoved" ||
+    data.kind === "FootprintRemoved" ||
+    data.kind === "OutlineChanged";
+  const isSchematicEvent =
+    data.kind === "SymbolAdded" || data.kind === "NetChanged";
+  if (isBoardEvent && view !== "board") setView("board");
+  else if (isSchematicEvent && view !== "schematic") setView("schematic");
+  await refresh();
+  // Spawn flash on the footprint that just appeared. The DOM is fresh
+  // after refresh() — find the matching <g data-board-ref> and tag it.
+  if (data.kind === "FootprintAdded" && data.reference) {
+    flashSpawn(`[data-board-ref="${cssEscape(data.reference)}"]`);
+  }
+  // Animate brand-new traces and vias: the render emits stable
+  // `data-trace-id` / `data-via-id` attributes; anything we haven't
+  // seen yet gets the spawn class so the trace draws in like a brush
+  // stroke and the via fades/scales in.
+  if (data.kind === "RoutingChanged") animateNewCopper();
+  if (data.kind === "ProjectChanged") {
+    seenTraceIds.clear();
+    seenViaIds.clear();
+  }
+}
+
+const seenTraceIds = new Set<string>();
+const seenViaIds = new Set<string>();
+
+function animateNewCopper() {
+  document.querySelectorAll<SVGLineElement>("line[data-trace-id]").forEach((el) => {
+    const id = el.getAttribute("data-trace-id");
+    if (!id || seenTraceIds.has(id)) return;
+    seenTraceIds.add(id);
+    el.classList.add("trace-spawn");
+  });
+  document.querySelectorAll<SVGGElement>("g[data-via-id]").forEach((el) => {
+    const id = el.getAttribute("data-via-id");
+    if (!id || seenViaIds.has(id)) return;
+    seenViaIds.add(id);
+    el.classList.add("via-spawn");
+  });
+}
+
+function flashSpawn(selector: string) {
+  const node = document.querySelector(selector);
+  if (!node) return;
+  node.classList.remove("spawn"); // restart if already running
+  // Force reflow so the next add triggers the keyframes again.
+  void (node as HTMLElement).getBoundingClientRect();
+  node.classList.add("spawn");
+}
+
+function cssEscape(s: string): string {
+  // Just enough escaping for the references we generate (alphanum + a
+  // few symbols); good enough so we don't pull in CSS.escape polyfills.
+  return s.replace(/(["\\])/g, "\\$1");
 }
 
 async function start() {
   setView("board");
   appendActivity("info", "ui boot");
   await refresh();
+  await refreshLibrary();
   appendActivity("info", "ui ready");
 
-  await listen<AnyEvent>("pcb://event", async (ev) => {
-    try {
-      const data = ev.payload;
-      if (data.kind === "Activity") {
-        appendActivity(data.level, data.message);
-        return;
-      }
-      if (
-        data.kind === "PlacementProgress" ||
-        data.kind === "RoutingChanged" ||
-        data.kind === "FootprintAdded" ||
-        data.kind === "FootprintMoved" ||
-        data.kind === "FootprintRemoved" ||
-        data.kind === "OutlineChanged"
-      ) {
-        if (view !== "board") setView("board");
-      }
-      await refresh();
-    } catch (err) {
-      reportFatal(err);
-    }
+  await listen<AnyEvent>("pcb://event", (ev) => {
+    playEvent(ev.payload).catch(reportFatal);
   });
 }
 

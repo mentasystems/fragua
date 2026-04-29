@@ -61,12 +61,16 @@ pub struct AStarResult {
 /// terrible-looking zigzag.
 const BEND_COST: u32 = 6;
 
+// `via_safe_radius`: in cells, ceil((via_diameter/2 + clearance) / cell).
+// A via flip is rejected if any foreign-net cell sits within this radius
+// on either layer. Pass 0 to disable the check.
 pub fn search(
     grid: &Grid,
     start: GridPoint,
     target_net: u32,
     via_cost: u32,
     target: GridPoint,
+    via_safe_radius: i32,
 ) -> Option<AStarResult> {
     let h = |p: GridPoint| -> u32 {
         let dc = (p.col - target.col).unsigned_abs();
@@ -111,6 +115,18 @@ pub fn search(
             if !walkable {
                 continue;
             }
+            // Vias have a finite copper diameter and need clearance to
+            // every other net's copper on *both* layers (since the via
+            // punches through). A via at the edge of our own pad's
+            // expanded clearance box can otherwise sit too close to the
+            // adjacent foreign pad. Reject via flips that would land
+            // within `via_safe_radius` of any foreign-net cell.
+            if move_dir == Dir::Via
+                && via_safe_radius > 0
+                && !via_safe(grid, next_p, target_net, via_safe_radius)
+            {
+                continue;
+            }
             let mut step_cost = if move_dir == Dir::Via { via_cost } else { 1 };
             // Bend penalty: same-layer turn that doesn't extend the
             // current run. After a via or from the start node we don't
@@ -136,6 +152,34 @@ pub fn search(
         }
     }
     None
+}
+
+/// True if a via at `p` (which is on one layer) would have foreign-net
+/// copper within `radius` cells on either layer. Foreign-net = anything
+/// that is not Free, not Trace/NetPad of `target_net`. The check looks
+/// at both layers because a via punches through both.
+fn via_safe(grid: &Grid, p: GridPoint, target_net: u32, radius: i32) -> bool {
+    let r2 = radius * radius;
+    for layer in 0..2u8 {
+        for dr in -radius..=radius {
+            for dc in -radius..=radius {
+                if dr * dr + dc * dc > r2 {
+                    continue;
+                }
+                let np = GridPoint {
+                    layer,
+                    col: p.col + dc,
+                    row: p.row + dr,
+                };
+                match grid.get(np) {
+                    Cell::Obstacle => return false,
+                    Cell::NetPad(n) | Cell::Trace(n) if n != target_net => return false,
+                    _ => {}
+                }
+            }
+        }
+    }
+    true
 }
 
 fn neighbours(p: GridPoint) -> [(GridPoint, Dir); 5] {

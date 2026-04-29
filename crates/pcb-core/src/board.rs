@@ -77,6 +77,21 @@ pub struct Footprint {
     pub rotation: f32,
     pub layer: CopperLayer,
     pub pads: Vec<Pad>,
+    /// Library key copied from the schematic symbol when this footprint
+    /// was placed (snake_case, e.g. "esp32_s3_zero"). Empty string if
+    /// the symbol had no key. Lets `view.snapshot` and the UI cross-
+    /// reference back to the library entry.
+    #[serde(default)]
+    pub key: String,
+    /// Free-form description copied from the schematic symbol — kept on
+    /// the footprint so the agent's intent survives even after the
+    /// schematic side is reset.
+    #[serde(default)]
+    pub description: String,
+    /// Whether this footprint must touch a board edge (USB-C cables,
+    /// screw terminals, antennas). Honoured by `placement` checks.
+    #[serde(default)]
+    pub edge_mounted: bool,
 }
 
 impl Footprint {
@@ -223,5 +238,35 @@ impl Board {
     pub fn clear_routing(&mut self) {
         self.traces.clear();
         self.vias.clear();
+    }
+
+    /// Pairs of footprint references whose pad-derived bounding boxes
+    /// intersect on the board. Used as a hard postcondition after the
+    /// placer settles: any non-empty result means the layout is invalid
+    /// and the user must intervene (rotate, resize the board, drop
+    /// components). References are returned sorted within each pair so
+    /// the caller can format stable error strings.
+    #[must_use]
+    pub fn footprint_overlaps(&self) -> Vec<(String, String)> {
+        let with_bounds: Vec<(&Footprint, Rect)> = self
+            .footprints_in_order()
+            .filter_map(|fp| fp.bounds().map(|r| (fp, r)))
+            .collect();
+        let mut out = Vec::new();
+        for i in 0..with_bounds.len() {
+            for j in (i + 1)..with_bounds.len() {
+                let (a, ar) = with_bounds[i];
+                let (b, br) = with_bounds[j];
+                if ar.intersects(&br) {
+                    let (lo, hi) = if a.reference <= b.reference {
+                        (a.reference.clone(), b.reference.clone())
+                    } else {
+                        (b.reference.clone(), a.reference.clone())
+                    };
+                    out.push((lo, hi));
+                }
+            }
+        }
+        out
     }
 }

@@ -78,14 +78,27 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
         .map(|(i, n)| (n.clone(), i as u32))
         .collect();
 
-    // Routing region = content bounding box + a margin so the router
-    // has slack around the pads.
-    let region = match board.content_bounds() {
-        Some(r) => r.expand(Length::from_mm(5.0)),
-        None => Rect::from_corners(
-            Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
-            Point::new(Length::from_mm(50.0), Length::from_mm(50.0)),
+    // Routing region. If the board has an outline, the router stays
+    // *inside* it with an inset that keeps the centre of the widest
+    // copper feature (a via) far enough from Edge.Cuts to satisfy the
+    // DRC's edge clearance check (default 0.3 mm). Without an outline
+    // we fall back to the content bbox expanded by 5 mm so the router
+    // still has slack to find paths.
+    let edge_clearance = Length::from_mm(0.3);
+    let half_widest = Length(opts.trace_width.0.max(opts.via_diameter.0) / 2);
+    let outline_inset = edge_clearance + half_widest;
+    let region = match board.outline {
+        Some(r) => Rect::from_corners(
+            Point::new(r.min.x + outline_inset, r.min.y + outline_inset),
+            Point::new(r.max.x - outline_inset, r.max.y - outline_inset),
         ),
+        None => match board.content_bounds() {
+            Some(r) => r.expand(Length::from_mm(5.0)),
+            None => Rect::from_corners(
+                Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+                Point::new(Length::from_mm(50.0), Length::from_mm(50.0)),
+            ),
+        },
     };
 
     let mut grid = Grid::new(region, opts.cell);
@@ -96,6 +109,14 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     // cell of breathing room.
     let halo_cells = {
         let raw = (opts.clearance.0 + opts.cell.0 - 1) / opts.cell.0;
+        i32::try_from(raw).unwrap_or(1).max(1)
+    };
+    // Via-safety radius: a via's copper extends `via_diameter/2` from
+    // its centre and must keep `clearance` to every other net's copper
+    // on both layers. The A* check rejects via flips landing inside
+    // this radius of foreign cells.
+    let via_safe_radius = {
+        let raw = (opts.via_diameter.0 / 2 + opts.clearance.0 + opts.cell.0 - 1) / opts.cell.0;
         i32::try_from(raw).unwrap_or(1).max(1)
     };
 
@@ -118,21 +139,67 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
             ));
             continue;
         }
-        // Star route: pad[0] is the hub, every other pad is connected
-        // to it through A*. Quick and good enough for tutorial-grade
-        // boards; full Steiner-tree improvement is future work.
-        let hub = pad_points[0];
-        let hub_grid = grid.snap(hub.0, hub.1);
+        // Pick the geographically central pad as hub: minimum sum of
+        // Manhattan distances to every other pad on the net. Short
+        // spokes are easier to route, and since the FIRST failed spoke
+        // takes the whole net down, a central hub keeps the failure
+        // probability low. Star routing is still tutorial-grade — full
+        // Steiner improvement is future work.
+        let hub_idx = (0..pad_points.len())
+            .min_by_key(|&i| {
+                pad_points
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, q)| {
+                        let p = pad_points[i].center;
+                        let q = q.center;
+                        (p.x.0 - q.x.0).unsigned_abs() + (p.y.0 - q.y.0).unsigned_abs()
+                    })
+                    .sum::<u64>()
+            })
+            .unwrap_or(0);
+        let hub = pad_points[hub_idx].clone();
+        let hub_grid = grid.snap(hub.center, hub.layer);
 
         let mut net_segments = 0usize;
         let mut net_vias = 0usize;
         let mut failed = false;
-        for spoke in &pad_points[1..] {
-            let spoke_grid = grid.snap(spoke.0, spoke.1);
-            let Some(result) = search(&grid, hub_grid, net_id, opts.via_cost, spoke_grid) else {
+        // Spokes ordered by distance to hub (closest first). Once the
+        // first spokes lay copper near the hub, subsequent (farther)
+        // spokes can join the existing trace anywhere along its run
+        // instead of having to fight back to the hub pad itself.
+        let mut spokes_sorted: Vec<NetPadInfo> = pad_points
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != hub_idx)
+            .map(|(_, p)| p.clone())
+            .collect();
+        spokes_sorted.sort_by_key(|q| {
+            (hub.center.x.0 - q.center.x.0).unsigned_abs()
+                + (hub.center.y.0 - q.center.y.0).unsigned_abs()
+        });
+        for spoke in spokes_sorted {
+            let spoke_grid = grid.snap(spoke.center, spoke.layer);
+            let Some(result) = search(
+                &grid,
+                hub_grid,
+                net_id,
+                opts.via_cost,
+                spoke_grid,
+                via_safe_radius,
+            ) else {
                 per_net.push((
                     net_name.clone(),
-                    Outcome::Failed { reason: format!("no path to pad at {:?}", spoke.0) },
+                    Outcome::Failed {
+                        reason: format!(
+                            "no path from hub {} to pad {} at ({:.2}, {:.2}) mm",
+                            hub.pad_ref,
+                            spoke.pad_ref,
+                            spoke.center.x.to_mm(),
+                            spoke.center.y.to_mm(),
+                        ),
+                    },
                 ));
                 failed = true;
                 break;
@@ -272,16 +339,30 @@ fn emit_trace(
     board.add_trace(trace);
 }
 
+/// One pad to be routed: its world-coord centre, copper layer, and
+/// the human-friendly reference (e.g. "U3.2") so failures can name
+/// the offender instead of dumping nm coordinates.
+#[derive(Debug, Clone)]
+pub struct NetPadInfo {
+    pub center: Point,
+    pub layer: CopperLayer,
+    pub pad_ref: String,
+}
+
 /// For every footprint pad with a net assignment, record the pad's
-/// world-coord center (rotation-aware) and copper layer under that
-/// net's name.
-fn collect_nets(board: &Board) -> BTreeMap<String, Vec<(Point, CopperLayer)>> {
-    let mut nets: BTreeMap<String, Vec<(Point, CopperLayer)>> = BTreeMap::new();
+/// world-coord center (rotation-aware), copper layer, and "Ref.Pin"
+/// label under that net's name.
+fn collect_nets(board: &Board) -> BTreeMap<String, Vec<NetPadInfo>> {
+    let mut nets: BTreeMap<String, Vec<NetPadInfo>> = BTreeMap::new();
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
             if let Some(net) = &pad.net {
                 let center = fp.pad_world_center(pad);
-                nets.entry(net.clone()).or_default().push((center, pad.layer));
+                nets.entry(net.clone()).or_default().push(NetPadInfo {
+                    center,
+                    layer: pad.layer,
+                    pad_ref: format!("{}.{}", fp.reference, pad.number),
+                });
             }
         }
     }

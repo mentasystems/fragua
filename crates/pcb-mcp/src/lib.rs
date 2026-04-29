@@ -11,6 +11,7 @@
 //! ARCHITECTURE.md phases).
 
 pub mod protocol;
+pub mod script;
 pub mod server;
 pub mod tools;
 
