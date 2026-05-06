@@ -6,7 +6,7 @@
 //!
 //! The renderer never moves symbols — it draws what the agent placed.
 //! Auto-placement (when the agent omits a position) happens in
-//! `pcb-mcp` before the symbol enters the model.
+//! `pcb-script` before the symbol enters the model.
 
 use std::fmt::Write;
 

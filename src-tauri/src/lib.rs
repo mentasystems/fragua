@@ -1,18 +1,46 @@
-//! Tauri host. Owns the canonical `Project`, runs the MCP server on
-//! `127.0.0.1:7878`, exposes commands to the webview, and re-emits
-//! project events into the frontend's event bus.
+//! Tauri host. Owns the canonical `Project`, serves a tiny stateless
+//! HTTP API on `127.0.0.1:7878` so an external agent can drive the
+//! board, exposes commands to the webview, and re-emits project events
+//! into the frontend's event bus.
 
 use pcb_core::Project;
-use pcb_mcp::McpServer;
 use serde::Serialize;
 use tauri::{Emitter, State};
 
-const MCP_DEFAULT_ADDR: &str = "127.0.0.1:7878";
+const API_DEFAULT_ADDR: &str = "127.0.0.1:7878";
+
+/// Printed to stdout on launch and served at `GET /` so a fresh agent
+/// can curl one URL and learn how to drive Fragua.
+const USAGE: &str = "\
+Fragua — AI-native PCB design tool.
+
+USAGE
+  fragua                 open with no project loaded (in-memory only)
+  fragua <file.json>     load that file; autosave to it on every edit
+
+LOCAL API
+  Stateless HTTP on http://127.0.0.1:7878 (override: FRAGUA_API_ADDR).
+
+  GET  /                 this usage text + the script reference
+  POST /script           run a multi-line script
+                         body: {\"script\": \"...\"}
+                         reply: {\"results\": [...] } per line
+  GET  /health           {\"ok\": true}
+
+  Example:
+    curl -s http://127.0.0.1:7878/script \\
+      -H 'content-type: application/json' \\
+      -d '{\"script\": \"outline 80 30\\nstatus\"}'
+
+  The script language is the only surface — every action (lib, sym, net,
+  palette, place, route, drc, export, ...) is a line in the script.
+  Send `GET /` for the full reference.
+";
 
 /// Wrapper kept in Tauri state so commands can read project + addr.
 struct AppState {
     project: Project,
-    mcp_addr: String,
+    api_addr: String,
 }
 
 #[derive(Serialize)]
@@ -23,7 +51,7 @@ struct ProjectStatePayload {
     net_count: usize,
     palette_count: usize,
     palette: Vec<PalettePayload>,
-    mcp_addr: String,
+    api_addr: String,
     board_svg: String,
     schematic_svg: String,
     outline: Option<OutlinePayload>,
@@ -75,7 +103,7 @@ fn project_state(state: State<'_, AppState>) -> ProjectStatePayload {
         net_count: snap.schematic().nets.len(),
         palette_count: palette.len(),
         palette,
-        mcp_addr: state.mcp_addr.clone(),
+        api_addr: state.api_addr.clone(),
         board_svg: pcb_render::render_svg(snap.board()),
         schematic_svg: pcb_render::render_schematic_svg(snap.schematic()),
         outline,
@@ -496,15 +524,29 @@ fn add_demo_resistor(state: State<'_, AppState>) {
 
 /// Entry point used by the binary in `main.rs`.
 pub fn run() {
-    // Restore the most recent state if `~/.pcb-projects/untitled/current.json`
-    // exists; otherwise start fresh. The auto-save loop below will keep
-    // the file updated as the agent works.
-    let project = Project::load_default("untitled").unwrap_or_else(|| Project::new("untitled"));
-    let mcp_addr = std::env::var("PCB_MCP_ADDR").unwrap_or_else(|_| MCP_DEFAULT_ADDR.to_string());
+    // First thing on launch — print the usage so the operator (or the
+    // agent that just spawned the process) sees how to drive Fragua
+    // without grepping the source.
+    print!("{USAGE}");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    // CLI: `fragua` (no args) → empty in-memory project, no autosave.
+    // `fragua <file.json>` → load that file (or start empty if missing
+    // / unreadable) and autosave back to it on every quiet edit window.
+    let cli_path = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    let (project, save_path) = match cli_path {
+        Some(path) => {
+            let project = Project::load_from_path(&path)
+                .unwrap_or_else(|| Project::new(name_from_path(&path)));
+            (project, Some(path))
+        }
+        None => (Project::new(""), None),
+    };
+    let api_addr = std::env::var("FRAGUA_API_ADDR").unwrap_or_else(|_| API_DEFAULT_ADDR.to_string());
 
     let state = AppState {
         project: project.clone(),
-        mcp_addr: mcp_addr.clone(),
+        api_addr: api_addr.clone(),
     };
 
     tauri::Builder::default()
@@ -513,8 +555,8 @@ pub fn run() {
             let handle = app.handle().clone();
             spawn_event_pump(handle, project.clone());
             spawn_animation_pump(project.clone());
-            spawn_autosave(project.clone());
-            spawn_mcp_server(project, mcp_addr.clone());
+            spawn_autosave(project.clone(), save_path);
+            spawn_http_api(project, api_addr.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -583,15 +625,23 @@ fn spawn_event_pump(handle: tauri::AppHandle, project: Project) {
 /// Activity / PlacementProgress / LibraryChanged are NOT mutations of
 /// the project file (activity is logging; library is its own store), so
 /// they don't trigger a save.
-fn spawn_autosave(project: Project) {
-    use std::sync::atomic::{AtomicU64, Ordering};
+fn name_from_path(path: &std::path::Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| "untitled".to_string())
+}
+
+fn spawn_autosave(project: Project, save_path: Option<std::path::PathBuf>) {
+    // No CLI path → user opened with no project. Don't persist anything;
+    // edits live in memory until they pass `fragua <file.json>` next time.
+    let Some(save_path) = save_path else { return; };
+
     use std::time::Duration;
 
     const DEBOUNCE: Duration = Duration::from_millis(500);
-    const HISTORY_EVERY_N_SAVES: u64 = 10;
 
     let mut rx = project.events().subscribe();
-    let save_counter = std::sync::Arc::new(AtomicU64::new(0));
     tauri::async_runtime::spawn(async move {
         loop {
             // Block until the first mutation in a burst arrives.
@@ -618,25 +668,12 @@ fn spawn_autosave(project: Project) {
                     Err(_) => break, // debounce window expired — flush
                 }
             }
-            // Quiet period reached: write current.json, possibly snapshot.
-            match project.save_to_default() {
-                Ok(_) => {
-                    let n = save_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                    if n % HISTORY_EVERY_N_SAVES == 0 {
-                        if let Err(e) = project.snapshot_history() {
-                            project.log(
-                                pcb_core::ActivityLevel::Warn,
-                                format!("autosave: history snapshot failed: {e}"),
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    project.log(
-                        pcb_core::ActivityLevel::Error,
-                        format!("autosave: {e}"),
-                    );
-                }
+            // Quiet period reached: write the user's file.
+            if let Err(e) = project.save_to_path(&save_path) {
+                project.log(
+                    pcb_core::ActivityLevel::Error,
+                    format!("autosave: {e}"),
+                );
             }
         }
     });
@@ -652,18 +689,176 @@ fn is_persistable(ev: &pcb_core::Event) -> bool {
     )
 }
 
-fn spawn_mcp_server(project: Project, addr: String) {
-    let server = McpServer::new(project.clone());
-    let project_for_log = project;
+/// Local HTTP API. Stateless — every request is independent, so the
+/// agent never has to re-establish a session. Three endpoints:
+///   GET  /         → `USAGE` + the script reference (text/plain)
+///   GET  /health   → `{"ok": true}`
+///   POST /script   → run a script; body `{"script": "..."}`, reply
+///                    is whatever `tools::dispatch` returned.
+///
+/// Implementation is a hand-rolled HTTP/1.1 reader rather than pulling
+/// in axum/hyper — the surface is three routes and we already have
+/// tokio::net.
+fn spawn_http_api(project: Project, addr: String) {
+    use tokio::net::TcpListener;
+    let project_for_log = project.clone();
     tauri::async_runtime::spawn(async move {
-        match server.run_tcp(&addr).await {
-            Ok(()) => {}
+        let listener = match TcpListener::bind(&addr).await {
+            Ok(l) => l,
             Err(e) => {
                 project_for_log.log(
                     pcb_core::ActivityLevel::Error,
-                    format!("mcp server: {e}"),
+                    format!("api: bind {addr}: {e}"),
                 );
+                return;
             }
+        };
+        loop {
+            let (sock, _peer) = match listener.accept().await {
+                Ok(t) => t,
+                Err(e) => {
+                    project_for_log.log(
+                        pcb_core::ActivityLevel::Warn,
+                        format!("api: accept: {e}"),
+                    );
+                    continue;
+                }
+            };
+            let project_for_conn = project.clone();
+            tokio::spawn(async move {
+                let _ = http::serve_one(sock, project_for_conn).await;
+            });
         }
     });
+}
+
+mod http {
+    //! Minimal HTTP/1.1 handler for the local API. Single connection =
+    //! single request (Connection: close); good enough for `curl` from
+    //! the agent and the local UI's debug panel. Not a general-purpose
+    //! server — don't expose it past loopback.
+
+    use pcb_core::Project;
+    use serde_json::{json, Value};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    use crate::USAGE;
+
+    pub async fn serve_one(mut sock: TcpStream, project: Project) -> std::io::Result<()> {
+        let (head, body_start) = match read_head(&mut sock).await? {
+            Some(parts) => parts,
+            None => return write_status(&mut sock, 400, "Bad Request", "text/plain", b"bad request").await,
+        };
+        let mut lines = head.split("\r\n");
+        let request_line = lines.next().unwrap_or_default();
+        let mut parts = request_line.split_ascii_whitespace();
+        let method = parts.next().unwrap_or_default();
+        let path = parts.next().unwrap_or_default();
+
+        let mut content_length: usize = 0;
+        for h in lines {
+            if let Some(rest) = h.strip_prefix("Content-Length:").or_else(|| h.strip_prefix("content-length:")) {
+                if let Ok(n) = rest.trim().parse::<usize>() {
+                    content_length = n;
+                }
+            }
+        }
+
+        // Drain the body up to Content-Length.
+        let mut body = body_start;
+        if body.len() < content_length {
+            let mut rest = vec![0u8; content_length - body.len()];
+            sock.read_exact(&mut rest).await?;
+            body.extend_from_slice(&rest);
+        }
+        body.truncate(content_length);
+
+        match (method, path) {
+            ("GET", "/") => {
+                let reference = pcb_script::tools::script_reference();
+                let mut out = String::new();
+                out.push_str(USAGE);
+                out.push_str("\n--- SCRIPT REFERENCE ---\n");
+                out.push_str(reference);
+                write_status(&mut sock, 200, "OK", "text/plain; charset=utf-8", out.as_bytes()).await
+            }
+            ("GET", "/health") => {
+                let body = serde_json::to_vec(&json!({"ok": true})).unwrap_or_default();
+                write_status(&mut sock, 200, "OK", "application/json", &body).await
+            }
+            ("POST", "/script") => handle_script(&mut sock, &project, &body).await,
+            _ => {
+                write_status(&mut sock, 404, "Not Found", "text/plain", b"unknown route\n").await
+            }
+        }
+    }
+
+    async fn handle_script(sock: &mut TcpStream, project: &Project, body: &[u8]) -> std::io::Result<()> {
+        let args: Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(e) => {
+                let msg = format!("invalid json body: {e}\n");
+                return write_status(sock, 400, "Bad Request", "text/plain", msg.as_bytes()).await;
+            }
+        };
+        match pcb_script::tools::dispatch(project, "script", &args).await {
+            Ok(value) => {
+                let body = serde_json::to_vec(&value).unwrap_or_default();
+                write_status(sock, 200, "OK", "application/json", &body).await
+            }
+            Err(err) => {
+                let body = serde_json::to_vec(
+                    &json!({"error": {"code": err.code, "message": err.message}}),
+                )
+                .unwrap_or_default();
+                write_status(sock, 400, "Bad Request", "application/json", &body).await
+            }
+        }
+    }
+
+    async fn read_head(sock: &mut TcpStream) -> std::io::Result<Option<(String, Vec<u8>)>> {
+        // Read until "\r\n\r\n" — cap at 16 KB so a stuck client can't
+        // exhaust memory. Body bytes that arrived in the same read get
+        // returned alongside the head.
+        const MAX_HEAD: usize = 16 * 1024;
+        let mut buf = Vec::with_capacity(1024);
+        let mut tmp = [0u8; 1024];
+        loop {
+            let n = sock.read(&mut tmp).await?;
+            if n == 0 {
+                return Ok(None);
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if buf.len() > MAX_HEAD {
+                return Ok(None);
+            }
+            if let Some(idx) = find_double_crlf(&buf) {
+                let head = String::from_utf8_lossy(&buf[..idx]).to_string();
+                let body_start = buf[idx + 4..].to_vec();
+                return Ok(Some((head, body_start)));
+            }
+        }
+    }
+
+    fn find_double_crlf(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|w| w == b"\r\n\r\n")
+    }
+
+    async fn write_status(
+        sock: &mut TcpStream,
+        code: u16,
+        reason: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> std::io::Result<()> {
+        let header = format!(
+            "HTTP/1.1 {code} {reason}\r\nContent-Type: {ct}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
+            ct = content_type,
+            len = body.len(),
+        );
+        sock.write_all(header.as_bytes()).await?;
+        sock.write_all(body).await?;
+        sock.flush().await
+    }
 }

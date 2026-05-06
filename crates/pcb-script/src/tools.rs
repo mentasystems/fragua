@@ -1,4 +1,4 @@
-//! Tool surface — what the MCP client (the AI agent) can call.
+//! Tool surface — what the agent calls (over the local HTTP API).
 //!
 //! Each tool is intentionally thin: parse the input, call into
 //! `pcb-core` to mutate the project, return the result. The agent owns
@@ -9,7 +9,15 @@ use pcb_core::{ActivityLevel, CopperLayer, Footprint, Length, Pad, Point, Pour, 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::protocol::error_code::INVALID_PARAMS;
+// Internal error markers (kept compatible with JSON-RPC numeric codes
+// so callers that already understood them keep working).
+pub mod error_code {
+    pub const METHOD_NOT_FOUND: i64 = -32601;
+    pub const INVALID_PARAMS: i64 = -32602;
+    pub const INTERNAL_ERROR: i64 = -32603;
+}
+
+use error_code::INVALID_PARAMS;
 
 pub struct ToolError {
     pub code: i64,
@@ -25,21 +33,14 @@ impl ToolError {
     }
 }
 
-/// Static catalog returned by `tools/list` — exposes ONLY the `script`
-/// tool. Every internal action stays callable via `dispatch` (the
-/// script runner uses it), but the agent only loads one schema and one
-/// description, keeping context lean.
-#[must_use]
-pub fn catalog() -> Value {
-    json!([
-        {
-            "name": "script",
-            "description": "Run a multi-line PCB design script — the ONLY tool you need. \
+/// Reference for the `script` action language — every verb the agent
+/// can put on a line. Served verbatim at `GET /` of the local API.
+pub const SCRIPT_REFERENCE: &str = "Run a multi-line PCB design script — the ONLY surface you need. \
 The script is plain text, one action per line; multi-line blocks (`sym`, `lib`) \
 take indented sub-lines (`pin`, `pad`). Strings with spaces use double quotes; \
 trailing key=value pairs override defaults; `#` starts a comment.\n\
 \n\
-=== EXAMPLE ===\n\
+=== EXAMPLE ===\
 reset\n\
 outline 90 30\n\
 \n\
@@ -153,21 +154,12 @@ Workflow when warnings appear:\n\
 \n\
 Hand-routing (`trace`, `via`) only works for short bridges in known-empty\n\
 zones; on a populated board you will almost always hit `trace_trace_clearance`\n\
-errors. Re-place first, route second."
-,
-            "inputSchema": {
-                "type": "object",
-                "required": ["script"],
-                "properties": {
-                    "script": {
-                        "type": "string",
-                        "description": "multi-line PCB design script (see tool description for syntax + every action)"
-                    }
-                },
-                "additionalProperties": false
-            }
-        }
-    ])
+errors. Re-place first, route second.
+";
+
+#[must_use]
+pub fn script_reference() -> &'static str {
+    SCRIPT_REFERENCE
 }
 
 /// Dispatch a `tools/call` to the right handler.
@@ -212,7 +204,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "drc.run" => tool_drc_run(project, args),
         "output.fab_pack" => tool_output_fab_pack(project, args),
         _ => Err(ToolError {
-            code: crate::protocol::error_code::METHOD_NOT_FOUND,
+            code: error_code::METHOD_NOT_FOUND,
             message: format!("unknown tool: {name}"),
         }),
     }
@@ -1880,7 +1872,7 @@ fn tool_output_fab_pack(project: &Project, args: &Value) -> Result<Value, ToolEr
     let out_dir = std::path::PathBuf::from(&input.out_dir);
 
     let paths = pcb_gerber::write_fab_pack(snap.board(), &stem, &out_dir).map_err(|e| ToolError {
-        code: crate::protocol::error_code::INTERNAL_ERROR,
+        code: error_code::INTERNAL_ERROR,
         message: format!("write_fab_pack: {e}"),
     })?;
 

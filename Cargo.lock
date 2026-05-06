@@ -817,9 +817,9 @@ dependencies = [
  "pcb-core",
  "pcb-drc",
  "pcb-gerber",
- "pcb-mcp",
  "pcb-render",
  "pcb-router",
+ "pcb-script",
  "serde",
  "serde_json",
  "tauri",
@@ -2166,21 +2166,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pcb-mcp"
-version = "0.0.0"
-dependencies = [
- "base64 0.22.1",
- "pcb-core",
- "pcb-drc",
- "pcb-gerber",
- "pcb-render",
- "pcb-router",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "pcb-render"
 version = "0.0.0"
 dependencies = [
@@ -2192,6 +2177,20 @@ name = "pcb-router"
 version = "0.0.0"
 dependencies = [
  "pcb-core",
+]
+
+[[package]]
+name = "pcb-script"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "pcb-core",
+ "pcb-drc",
+ "pcb-gerber",
+ "pcb-render",
+ "pcb-router",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

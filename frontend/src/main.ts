@@ -18,7 +18,7 @@ type ProjectState = {
   net_count: number;
   palette_count: number;
   palette: PaletteItem[];
-  mcp_addr: string;
+  api_addr: string;
   board_svg: string;
   schematic_svg: string;
   outline: Outline | null;
@@ -83,7 +83,7 @@ root.innerHTML = `
       <span class="label">mm</span>
     </span>
     <span class="spacer"></span>
-    <span class="label">mcp</span><span class="value accent" id="proj-mcp">—</span>
+    <span class="label">api</span><span class="value accent" id="proj-api">—</span>
   </div>
   <div class="palette-strip" id="palette-strip"></div>
   <div class="canvas-pane" id="canvas-pane"></div>
@@ -105,7 +105,7 @@ const els = {
   symbols: document.getElementById("proj-symbols")!,
   nets: document.getElementById("proj-nets")!,
   footprints: document.getElementById("proj-footprints")!,
-  mcp: document.getElementById("proj-mcp")!,
+  api: document.getElementById("proj-api")!,
   canvas: document.getElementById("canvas-pane")!,
   log: document.getElementById("activity-log")!,
   library: document.getElementById("library-list")!,
@@ -495,7 +495,7 @@ async function refresh() {
   els.symbols.textContent = String(state.symbol_count);
   els.nets.textContent = String(state.net_count);
   els.footprints.textContent = String(state.footprint_count);
-  els.mcp.textContent = state.mcp_addr;
+  els.api.textContent = state.api_addr;
   if (state.outline) {
     els.boardW.textContent = String(Math.round(state.outline.w_mm));
     els.boardH.textContent = String(Math.round(state.outline.h_mm));

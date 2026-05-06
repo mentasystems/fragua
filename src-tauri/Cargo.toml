@@ -19,7 +19,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 pcb-core = { path = "../crates/pcb-core" }
 pcb-render = { path = "../crates/pcb-render" }
-pcb-mcp = { path = "../crates/pcb-mcp" }
+pcb-script = { path = "../crates/pcb-script" }
 pcb-router = { path = "../crates/pcb-router" }
 pcb-gerber = { path = "../crates/pcb-gerber" }
 pcb-drc = { path = "../crates/pcb-drc" }

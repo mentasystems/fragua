@@ -840,6 +840,62 @@ impl Project {
         Some(proj)
     }
 
+    /// Load a project from an arbitrary JSON file (the file path the
+    /// user passed on the CLI). Returns `None` if the file is missing
+    /// or can't be parsed.
+    #[must_use]
+    pub fn load_from_path(path: &Path) -> Option<Self> {
+        let bytes = fs::read(path).ok()?;
+        let file: ProjectFile = serde_json::from_slice(&bytes).ok()?;
+        let library = match crate::library::Library::open_default() {
+            Ok(lib) => lib,
+            Err(_) => crate::library::Library::open_at(std::env::temp_dir().join("pcb-library"))
+                .ok()?,
+        };
+        let make_inner = || ProjectInner {
+            name: file.name.clone(),
+            board: file.board.clone(),
+            schematic: file.schematic.clone(),
+            palette: file.palette.clone(),
+        };
+        let proj = Self {
+            inner: Arc::new(RwLock::new(make_inner())),
+            visible: Arc::new(RwLock::new(make_inner())),
+            pending: Arc::new(Mutex::new(VecDeque::new())),
+            bus: EventBus::new(),
+            library: Arc::new(library),
+        };
+        proj.bus.publish(Event::ProjectChanged);
+        Some(proj)
+    }
+
+    /// Write the current state to an arbitrary path (used when the app
+    /// was opened with a CLI file argument). Atomic via tmp+rename.
+    pub fn save_to_path(&self, path: &Path) -> Result<PathBuf, String> {
+        let inner = self.inner.read().expect("project lock poisoned");
+        let file = ProjectFile {
+            name: inner.name.clone(),
+            board: inner.board.clone(),
+            schematic: inner.schematic.clone(),
+            palette: inner.palette.clone(),
+        };
+        drop(inner);
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("project: mkdir {}: {e}", parent.display()))?;
+            }
+        }
+        let tmp = path.with_extension("json.tmp");
+        let bytes = serde_json::to_vec_pretty(&file)
+            .map_err(|e| format!("project: serialise: {e}"))?;
+        fs::write(&tmp, &bytes)
+            .map_err(|e| format!("project: write {}: {e}", tmp.display()))?;
+        fs::rename(&tmp, path)
+            .map_err(|e| format!("project: rename {}: {e}", path.display()))?;
+        Ok(path.to_path_buf())
+    }
+
     /// Write the current state to `~/.pcb-projects/<name>/current.json`.
     /// Atomic via tmp+rename so a crash mid-write can't corrupt the file.
     pub fn save_to_default(&self) -> Result<PathBuf, String> {
