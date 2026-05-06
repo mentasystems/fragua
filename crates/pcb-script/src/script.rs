@@ -183,6 +183,9 @@ struct Block {
     tokens: Vec<String>,
     pins: Vec<Value>,
     pads: Vec<Value>,
+    /// Library silk lines/texts accumulated from `silk-line` /
+    /// `silk-text` indented continuations under a `lib` block.
+    silk: Vec<Value>,
 }
 
 impl Block {
@@ -193,6 +196,7 @@ impl Block {
             tokens,
             pins: Vec::new(),
             pads: Vec::new(),
+            silk: Vec::new(),
         })
     }
 
@@ -222,6 +226,46 @@ impl Block {
                     pin.as_object_mut().unwrap().insert("name".into(), Value::String(name));
                 }
                 self.pins.push(pin);
+                Ok(())
+            }
+            ("lib", "silk-line") => {
+                // Library-frame silk segment in footprint-local mm.
+                // Reuses the same token shape as the top-level
+                // verb so the agent doesn't have to learn two
+                // syntaxes.
+                let args = parse_silk_line(line, tokens)?;
+                let layer_str = args.get("layer").and_then(Value::as_str).unwrap_or("top").to_string();
+                let mut entry = json!({
+                    "kind": "line",
+                    "layer": layer_str,
+                    "x1_mm": args["x1_mm"],
+                    "y1_mm": args["y1_mm"],
+                    "x2_mm": args["x2_mm"],
+                    "y2_mm": args["y2_mm"],
+                    "width_mm": args["width_mm"],
+                });
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.remove("rotation"); // not relevant for lines
+                }
+                self.silk.push(entry);
+                Ok(())
+            }
+            ("lib", "silk-text") => {
+                let args = parse_silk_text(line, tokens)?;
+                let layer_str = args.get("layer").and_then(Value::as_str).unwrap_or("top").to_string();
+                let anchor_str = args.get("anchor").and_then(Value::as_str).unwrap_or("middle").to_string();
+                let entry = json!({
+                    "kind": "text",
+                    "layer": layer_str,
+                    "x_mm": args["x_mm"],
+                    "y_mm": args["y_mm"],
+                    "text": args["text"],
+                    "size_mm": args["size_mm"],
+                    "rotation_deg": args["rotation"],
+                    "anchor": anchor_str,
+                    "width_mm": args.get("width_mm").cloned().unwrap_or(Value::Null),
+                });
+                self.silk.push(entry);
                 Ok(())
             }
             ("lib", "pad") => {
@@ -304,7 +348,7 @@ impl Block {
                         format!("lib {key} needs at least one indented `pad ...` line"),
                     ));
                 }
-                let mut args = json!({"key": key, "pads": self.pads});
+                let mut args = json!({"key": key, "pads": self.pads, "silk": self.silk});
                 apply_kv(&mut args, &tokens[2..], line, &[
                     ("value", AttrType::StrInto("default_value")),
                     ("default_value", AttrType::Str),
@@ -361,6 +405,15 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
             need_args(line, tokens, 2, "clear-pour NET LAYER")?;
             Ok(Cmd { line, tool: "pour.remove".into(),
                 args: json!({"net": tokens[1], "layer": tokens[2]}) })
+        }
+
+        "silk-line" => {
+            let args = parse_silk_line(line, tokens)?;
+            Ok(Cmd { line, tool: "silk.add_line".into(), args })
+        }
+        "silk-text" => {
+            let args = parse_silk_text(line, tokens)?;
+            Ok(Cmd { line, tool: "silk.add_text".into(), args })
         }
 
         "outline" => {
@@ -556,6 +609,48 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
     }
 }
 
+// ─── Silk-line / silk-text token parsers ─────────────────────────────
+// Shared by both the top-level verbs (board-level silk) and the
+// `lib` block continuations (library-authored, footprint-local silk).
+
+fn parse_silk_line(line: usize, tokens: &[String]) -> Result<Value, ParseError> {
+    // silk-line LAYER X1 Y1 X2 Y2 [width=0.15]
+    need_args(line, tokens, 5, "silk-line LAYER X1 Y1 X2 Y2 [width=...]")?;
+    let mut args = json!({
+        "layer": tokens[1],
+        "x1_mm": parse_num(&tokens[2], line, "X1")?,
+        "y1_mm": parse_num(&tokens[3], line, "Y1")?,
+        "x2_mm": parse_num(&tokens[4], line, "X2")?,
+        "y2_mm": parse_num(&tokens[5], line, "Y2")?,
+        "width_mm": 0.15,
+    });
+    apply_kv(&mut args, &tokens[6..], line, &[
+        ("width", AttrType::NumInto("width_mm")),
+    ])?;
+    Ok(args)
+}
+
+fn parse_silk_text(line: usize, tokens: &[String]) -> Result<Value, ParseError> {
+    // silk-text LAYER X Y "TEXT" [size=1.2] [rot=0] [anchor=middle] [width=...]
+    need_args(line, tokens, 4, "silk-text LAYER X Y TEXT [size=...] [rot=...] [anchor=start|middle|end] [width=...]")?;
+    let mut args = json!({
+        "layer": tokens[1],
+        "x_mm": parse_num(&tokens[2], line, "X")?,
+        "y_mm": parse_num(&tokens[3], line, "Y")?,
+        "text": tokens[4],
+        "size_mm": 1.2,
+        "rotation": 0.0,
+        "anchor": "middle",
+    });
+    apply_kv(&mut args, &tokens[5..], line, &[
+        ("size",   AttrType::NumInto("size_mm")),
+        ("rot",    AttrType::NumInto("rotation")),
+        ("anchor", AttrType::Str),
+        ("width",  AttrType::NumInto("width_mm")),
+    ])?;
+    Ok(args)
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────
 
 fn need_args(line: usize, tokens: &[String], min_after_verb: usize, usage: &str)
@@ -679,4 +774,37 @@ fn parse_bool(s: &str, line: usize, k: &str) -> Result<bool, ParseError> {
         "false" | "0" | "no"  => false,
         other => return Err(ParseError::at(line, format!("{k}: expected true/false, got `{other}`"))),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lib_block_with_silk_lines_and_text_emits_silk_array() {
+        let script = "lib test_dip\n  pad 1 -2.5 0 1.0 1.5\n  pad 2 2.5 0 1.0 1.5\n  silk-line top -3 -2 3 -2\n  silk-line top 3 -2 3 2\n  silk-text top 0 0 \"{REF}\" size=1.0 anchor=middle\n";
+        let cmds = parse(script).expect("parse");
+        assert_eq!(cmds.len(), 1);
+        let cmd = &cmds[0];
+        assert_eq!(cmd.tool, "library.create");
+        let silk = cmd.args.get("silk").expect("silk array").as_array().expect("array");
+        assert_eq!(silk.len(), 3, "expected two lines + one text, got {silk:?}");
+        // Two lines first.
+        assert_eq!(silk[0]["kind"], "line");
+        assert_eq!(silk[0]["layer"], "top");
+        assert!((silk[0]["x1_mm"].as_f64().unwrap() - -3.0).abs() < 1e-6);
+        // Text last, with the {REF} placeholder preserved.
+        assert_eq!(silk[2]["kind"], "text");
+        assert_eq!(silk[2]["text"], "{REF}");
+        assert_eq!(silk[2]["anchor"], "middle");
+        assert!((silk[2]["size_mm"].as_f64().unwrap() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lib_block_without_silk_keeps_empty_array() {
+        let script = "lib plain\n  pad 1 0 0 1 1\n";
+        let cmds = parse(script).expect("parse");
+        let silk = cmds[0].args.get("silk").unwrap().as_array().unwrap();
+        assert!(silk.is_empty());
+    }
 }

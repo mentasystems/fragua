@@ -27,6 +27,43 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::board::{SilkAnchor, SilkLayer};
+
+/// Silk primitive authored by a library entry. Coordinates are in
+/// footprint-local millimetres (no rotation has been applied yet) and
+/// angles in degrees CCW. Library data stays in plain f64/`String`
+/// rather than the canonical `Length` type so `index.json` reads as
+/// human-friendly mm — only the runtime `Footprint::silk` projection
+/// converts it into the nanometre-fixed-point board model.
+///
+/// `Text` placeholders (`{REF}` / `{VAL}`) are resolved at render and
+/// Gerber time by the host footprint, so a single library line can
+/// produce a per-instance label.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LibrarySilk {
+    Line {
+        layer: SilkLayer,
+        x1_mm: f64,
+        y1_mm: f64,
+        x2_mm: f64,
+        y2_mm: f64,
+        width_mm: f64,
+    },
+    Text {
+        layer: SilkLayer,
+        x_mm: f64,
+        y_mm: f64,
+        text: String,
+        size_mm: f64,
+        #[serde(default)]
+        rotation_deg: f32,
+        #[serde(default)]
+        anchor: SilkAnchor,
+        width_mm: f64,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LibraryPad {
     pub number: String,
@@ -72,6 +109,13 @@ pub struct LibraryEntry {
     #[serde(default)]
     pub edge_mounted: bool,
     pub pads: Vec<LibraryPad>,
+    /// Library-authored silkscreen — body outlines, polarity dots,
+    /// `{REF}`/`{VAL}` templates. Empty for legacy entries; the
+    /// renderer falls back to a synthesised reference label in that
+    /// case (`Footprint::silk` is what the spawn pipeline pushes
+    /// these into).
+    #[serde(default)]
+    pub silk: Vec<LibrarySilk>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
     /// Unix seconds at creation.

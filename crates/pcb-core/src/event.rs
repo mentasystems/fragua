@@ -35,6 +35,9 @@ pub enum Event {
     /// A copper pour was added or removed. Carries the resulting pour
     /// count so the UI can re-fetch and re-render.
     PoursChanged { count: usize },
+    /// Silkscreen content was added or removed. Carries totals so the
+    /// UI can refresh without a follow-up fetch.
+    SilkChanged { line_count: usize, text_count: usize },
     /// One frame of an in-progress auto-placement. Streamed several
     /// times per second so the UI can animate components settling.
     PlacementProgress { iteration: u32 },

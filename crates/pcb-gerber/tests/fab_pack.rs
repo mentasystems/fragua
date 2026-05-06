@@ -6,7 +6,7 @@
 use std::fs;
 
 use pcb_core::{
-    Board, CopperLayer, Footprint, Id, Length, Pad, Point, Rect,
+    Board, CopperLayer, Footprint, Id, Length, Pad, Point, Rect, SilkAnchor, SilkLayer, SilkText,
 };
 use pcb_gerber::write_fab_pack;
 
@@ -37,6 +37,10 @@ fn footprint(reference: &str, value: &str, x_mm: f64, y_mm: f64) -> Footprint {
                 net: None,
             },
         ],
+        key: String::new(),
+        description: String::new(),
+        edge_mounted: false,
+        silk: Vec::new(),
     }
 }
 
@@ -49,6 +53,18 @@ fn build_board() -> Board {
     board.add_footprint(footprint("R1", "10k", 10.0, 15.0));
     board.add_footprint(footprint("R2", "10k", 16.0, 15.0));
     board.add_footprint(footprint("R3", "1k", 22.0, 15.0));
+    // Board-level silk text so the silk Gerber test below has
+    // something concrete to verify beyond the synthesised footprint
+    // labels.
+    board.add_silk_text(SilkText {
+        layer: SilkLayer::Top,
+        position: Point::new(Length::from_mm(20.0), Length::from_mm(3.0)),
+        text: "PCB".into(),
+        size: Length::from_mm(2.0),
+        rotation: 0.0,
+        anchor: SilkAnchor::Middle,
+        width: SilkText::default_stroke(Length::from_mm(2.0)),
+    });
     board
 }
 
@@ -69,6 +85,8 @@ fn fab_pack_writes_every_expected_file_and_each_is_well_formed() {
             "demo-B_Cu.gbr",
             "demo-F_Mask.gbr",
             "demo-B_Mask.gbr",
+            "demo-F_SilkS.gbr",
+            "demo-B_SilkS.gbr",
             "demo-Edge_Cuts.gbr",
             "demo-PTH.drl",
             "demo-NPTH.drl",
@@ -83,6 +101,8 @@ fn fab_pack_writes_every_expected_file_and_each_is_well_formed() {
         "demo-B_Cu.gbr",
         "demo-F_Mask.gbr",
         "demo-B_Mask.gbr",
+        "demo-F_SilkS.gbr",
+        "demo-B_SilkS.gbr",
         "demo-Edge_Cuts.gbr",
     ] {
         let body = fs::read_to_string(dir.join(name)).unwrap();
@@ -106,6 +126,18 @@ fn fab_pack_writes_every_expected_file_and_each_is_well_formed() {
         f_mask.contains("R,1.100000X1.300000"),
         "expected expanded mask aperture, got:\n{f_mask}"
     );
+
+    // F.SilkS must contain at least one D02 (move) and one D01
+    // (interpolation): the synthesised `R1` footprint label and the
+    // explicit "PCB" board-level text both turn into Hershey
+    // segments. B.SilkS has no items here but still must contain
+    // valid header + footer.
+    let f_silk = fs::read_to_string(dir.join("demo-F_SilkS.gbr")).unwrap();
+    assert!(f_silk.contains("Legend,Top"), "expected X2 Legend,Top attribute");
+    assert!(f_silk.matches("D01*").count() > 0, "F.SilkS missing D01 lines: {f_silk}");
+    assert!(f_silk.matches("D02*").count() > 0, "F.SilkS missing D02 lines: {f_silk}");
+    let b_silk = fs::read_to_string(dir.join("demo-B_SilkS.gbr")).unwrap();
+    assert!(b_silk.contains("Legend,Bot"));
 
     // Edge cuts traces the 40x30 outline, four interpolations.
     let edge = fs::read_to_string(dir.join("demo-Edge_Cuts.gbr")).unwrap();

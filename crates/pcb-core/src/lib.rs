@@ -10,15 +10,20 @@
 pub mod board;
 pub mod event;
 pub mod geometry;
+pub mod hershey;
 pub mod library;
 pub mod project;
 pub mod schematic;
+pub mod silk_clip;
 pub mod units;
 
-pub use board::{Board, CopperLayer, Footprint, Id, Pad, Pour, Trace, Via};
+pub use board::{
+    Board, CopperLayer, Footprint, FootprintSilk, Id, Pad, Pour, SilkAnchor, SilkLayer, SilkLine,
+    SilkText, Trace, Via,
+};
 pub use event::{ActivityLevel, Event, EventBus};
 pub use geometry::{Point, Rect};
-pub use library::{Attachment, Library, LibraryEntry, LibraryPad};
+pub use library::{Attachment, Library, LibraryEntry, LibraryPad, LibrarySilk};
 pub use project::{Project, ProjectSnapshot};
 pub use schematic::{Net, NetConnection, PinSide, SchPin, Schematic, Symbol, SymbolKind};
 pub use units::{Length, MIL, MM, NM, UM};

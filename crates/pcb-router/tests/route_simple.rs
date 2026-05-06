@@ -25,6 +25,10 @@ fn footprint(reference: &str, x_mm: f64, y_mm: f64, pads: Vec<Pad>) -> Footprint
         rotation: 0.0,
         layer: CopperLayer::Top,
         pads,
+        key: String::new(),
+        description: String::new(),
+        edge_mounted: false,
+        silk: Vec::new(),
     }
 }
 

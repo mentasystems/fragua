@@ -5,7 +5,10 @@
 //! all the design reasoning; tools are pure data primitives.
 
 use pcb_core::schematic::{Net, NetConnection, PinSide, SchPin, Symbol, SymbolKind};
-use pcb_core::{ActivityLevel, CopperLayer, Footprint, Length, Pad, Point, Pour, Project, Trace, Via};
+use pcb_core::{
+    ActivityLevel, CopperLayer, Footprint, FootprintSilk, Length, LibrarySilk, Pad, Point, Pour,
+    Project, SilkAnchor, SilkLayer, SilkLine, SilkText, Trace, Via,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -84,11 +87,31 @@ BOARD:\n\
 LIBRARY (build first, reuse forever):\n\
   lib KEY [value=V] [rot=N] [edge=true|false] [desc=\"...\"]\n\
     pad NUMBER X Y W H [name=NAME]             — repeat for every pad\n\
+    silk-line LAYER X1 Y1 X2 Y2 [width=N]      — body outline / pin-1 marker, in footprint-local mm.\n\
+                                                 Same syntax as the top-level verb, but coords are\n\
+                                                 relative to the footprint origin and follow it when\n\
+                                                 placed/rotated.\n\
+    silk-text LAYER X Y \"TEXT\" [size=N] [rot=N] [anchor=start|middle|end] [width=N]\n\
+                                               — footprint-local text. Use \"{REF}\" / \"{VAL}\" to\n\
+                                                 emit the placed instance's reference / value\n\
+                                                 (e.g. one library entry can ship `silk-text top 0 3 \"{REF}\"`\n\
+                                                 and every spawn renders \"U1\", \"U2\", ...).\n\
   attach KEY KIND PATH                         — file from disk; mime auto-detected\n\
                                                  KIND is free text: photo / datasheet / note / ...\n\
   detach KEY ATTACHMENT_ID\n\
   delete-lib KEY\n\
-  find-lib KEY                                 — full record + pads\n\
+  find-lib KEY                                 — full record + pads + silk\n\
+  # Library example with body outline + pin 1 dot + auto-ref label:\n\
+  #   lib so8 desc=\"SO-8 IC\"\n\
+  #     pad 1 -1.905 1.27 1.55 0.6\n\
+  #     pad 2 -1.905 0    1.55 0.6\n\
+  #     ...\n\
+  #     silk-line top -2.5 -2.5  2.5 -2.5\n\
+  #     silk-line top  2.5 -2.5  2.5  2.5\n\
+  #     silk-line top  2.5  2.5 -2.5  2.5\n\
+  #     silk-line top -2.5  2.5 -2.5 -2.5\n\
+  #     silk-text top -2.0  2.0 \"*\" size=0.6   # pin-1 dot\n\
+  #     silk-text top  0    3.5 \"{REF}\" size=1.0\n\
 \n\
 SCHEMATIC:\n\
   sym REF KIND [key=K] [value=V] [rot=N] [x=N] [y=N] [desc=\"...\"]\n\
@@ -124,6 +147,19 @@ ROUTING:\n\
                                                  Drop a `pour GND bottom` early on dense boards so\n\
                                                  the router does not have to thread GND everywhere.\n\
   clear-pour NET top|bottom                    — remove a pour\n\
+\n\
+SILK:\n\
+  Two scopes: BOARD-level silk lives directly on the board (frames,\n\
+  version markings, logos, fiducial labels) — use the top-level verbs\n\
+  below. FOOTPRINT-level silk lives on a library entry and follows the\n\
+  spawned footprint when it moves/rotates — author it under a `lib`\n\
+  block (see LIBRARY above).\n\
+  silk-line LAYER X1 Y1 X2 Y2 [width=N]        — silkscreen segment in mm; LAYER = top|bottom;\n\
+                                                 default width 0.15 mm.\n\
+  silk-text LAYER X Y \"TEXT\" [size=1.2] [rot=0] [anchor=start|middle|end] [width=...]\n\
+                                               — silkscreen text vectorised through the built-in\n\
+                                                 stroke font. ASCII printable only; default size\n\
+                                                 1.2 mm cap height, default stroke ~size/8.\n\
 \n\
 DRC / EXPORT:\n\
   drc [clearance=N] [edge=N] [trace_width=N] [drill=N]\n\
@@ -206,6 +242,8 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "route.run" => tool_route_run(project, args),
         "pour.add" => tool_pour_add(project, args),
         "pour.remove" => tool_pour_remove(project, args),
+        "silk.add_line" => tool_silk_add_line(project, args),
+        "silk.add_text" => tool_silk_add_text(project, args),
         "drc.run" => tool_drc_run(project, args),
         "output.fab_pack" => tool_output_fab_pack(project, args),
         _ => Err(ToolError {
@@ -465,6 +503,37 @@ impl From<LayerInput> for CopperLayer {
     }
 }
 
+impl From<LayerInput> for SilkLayer {
+    fn from(value: LayerInput) -> Self {
+        match value {
+            LayerInput::Top => Self::Top,
+            LayerInput::Bottom => Self::Bottom,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum AnchorInput {
+    Start,
+    Middle,
+    End,
+}
+
+impl From<AnchorInput> for SilkAnchor {
+    fn from(value: AnchorInput) -> Self {
+        match value {
+            AnchorInput::Start => Self::Start,
+            AnchorInput::Middle => Self::Middle,
+            AnchorInput::End => Self::End,
+        }
+    }
+}
+
+fn default_anchor_middle() -> AnchorInput {
+    AnchorInput::Middle
+}
+
 fn default_layer() -> LayerInput {
     LayerInput::Top
 }
@@ -498,6 +567,7 @@ fn tool_placement_add(project: &Project, args: &Value) -> Result<Value, ToolErro
         key: String::new(),
         description: String::new(),
         edge_mounted: false,
+        silk: Vec::new(),
     };
 
     let id = project.add_footprint(footprint);
@@ -1090,6 +1160,7 @@ fn tool_palette_add(project: &Project, args: &Value) -> Result<Value, ToolError>
             key,
             description,
             edge_mounted: plan.edge_mounted.unwrap_or(false),
+            silk: Vec::new(),
         };
         project
             .palette_add(footprint)
@@ -1185,10 +1256,68 @@ fn library_entry_full(e: &pcb_core::LibraryEntry) -> Value {
         "w_mm": p.w_mm,
         "h_mm": p.h_mm,
     })).collect();
+    let silk: Vec<Value> = e.silk.iter().map(|s| match s {
+        LibrarySilk::Line { layer, x1_mm, y1_mm, x2_mm, y2_mm, width_mm } => json!({
+            "kind": "line",
+            "layer": layer_to_str_silk(*layer),
+            "x1_mm": x1_mm, "y1_mm": y1_mm, "x2_mm": x2_mm, "y2_mm": y2_mm,
+            "width_mm": width_mm,
+        }),
+        LibrarySilk::Text { layer, x_mm, y_mm, text, size_mm, rotation_deg, anchor, width_mm } => json!({
+            "kind": "text",
+            "layer": layer_to_str_silk(*layer),
+            "x_mm": x_mm, "y_mm": y_mm,
+            "text": text, "size_mm": size_mm,
+            "rotation_deg": rotation_deg,
+            "anchor": anchor_to_str(*anchor),
+            "width_mm": width_mm,
+        }),
+    }).collect();
     if let Some(obj) = v.as_object_mut() {
         obj.insert("pads".into(), Value::Array(pads));
+        obj.insert("silk".into(), Value::Array(silk));
     }
     v
+}
+
+fn anchor_to_str(a: SilkAnchor) -> &'static str {
+    match a {
+        SilkAnchor::Start => "start",
+        SilkAnchor::Middle => "middle",
+        SilkAnchor::End => "end",
+    }
+}
+
+/// Convert a library-frame silk item into the runtime
+/// footprint-local `FootprintSilk` representation. Library coords are
+/// already footprint-local mm; we just rebox into nanometre `Length`.
+fn library_silk_to_footprint(s: &LibrarySilk) -> FootprintSilk {
+    match s {
+        LibrarySilk::Line { layer, x1_mm, y1_mm, x2_mm, y2_mm, width_mm } => FootprintSilk::Line {
+            layer: *layer,
+            start: Point::new(Length::from_mm(*x1_mm), Length::from_mm(*y1_mm)),
+            end: Point::new(Length::from_mm(*x2_mm), Length::from_mm(*y2_mm)),
+            width: Length::from_mm(*width_mm),
+        },
+        LibrarySilk::Text {
+            layer,
+            x_mm,
+            y_mm,
+            text,
+            size_mm,
+            rotation_deg,
+            anchor,
+            width_mm,
+        } => FootprintSilk::Text {
+            layer: *layer,
+            position: Point::new(Length::from_mm(*x_mm), Length::from_mm(*y_mm)),
+            text: text.clone(),
+            size: Length::from_mm(*size_mm),
+            rotation: *rotation_deg,
+            anchor: *anchor,
+            width: Length::from_mm(*width_mm),
+        },
+    }
 }
 
 fn tool_library_list(project: &Project) -> Result<Value, ToolError> {
@@ -1235,6 +1364,80 @@ struct LibraryCreateInput {
     #[serde(default)]
     edge_mounted: bool,
     pads: Vec<LibraryCreatePadInput>,
+    /// Library-authored silk strokes. Coordinates are in
+    /// footprint-local mm; the spawn step converts them into
+    /// world-aware `FootprintSilk` items.
+    #[serde(default)]
+    silk: Vec<LibrarySilkInput>,
+}
+
+/// Wire-format mirror of `pcb_core::LibrarySilk` — kept separate from
+/// the core type so we can accept the looser `Option<f64>` for an
+/// auto-derived stroke width without touching the on-disk schema.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LibrarySilkInput {
+    Line {
+        #[serde(default = "default_layer")]
+        layer: LayerInput,
+        x1_mm: f64,
+        y1_mm: f64,
+        x2_mm: f64,
+        y2_mm: f64,
+        #[serde(default = "default_silk_width")]
+        width_mm: f64,
+    },
+    Text {
+        #[serde(default = "default_layer")]
+        layer: LayerInput,
+        x_mm: f64,
+        y_mm: f64,
+        text: String,
+        #[serde(default = "default_silk_size")]
+        size_mm: f64,
+        #[serde(default)]
+        rotation_deg: f32,
+        #[serde(default = "default_anchor_middle")]
+        anchor: AnchorInput,
+        #[serde(default)]
+        width_mm: Option<f64>,
+    },
+}
+
+impl From<LibrarySilkInput> for LibrarySilk {
+    fn from(v: LibrarySilkInput) -> Self {
+        match v {
+            LibrarySilkInput::Line { layer, x1_mm, y1_mm, x2_mm, y2_mm, width_mm } => {
+                LibrarySilk::Line {
+                    layer: layer.into(),
+                    x1_mm,
+                    y1_mm,
+                    x2_mm,
+                    y2_mm,
+                    width_mm,
+                }
+            }
+            LibrarySilkInput::Text {
+                layer,
+                x_mm,
+                y_mm,
+                text,
+                size_mm,
+                rotation_deg,
+                anchor,
+                width_mm,
+            } => LibrarySilk::Text {
+                layer: layer.into(),
+                x_mm,
+                y_mm,
+                text,
+                size_mm,
+                rotation_deg,
+                anchor: anchor.into(),
+                width_mm: width_mm.unwrap_or(size_mm / 8.0),
+            },
+        }
+    }
 }
 
 fn tool_library_create(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -1248,6 +1451,7 @@ fn tool_library_create(project: &Project, args: &Value) -> Result<Value, ToolErr
         w_mm: p.w_mm,
         h_mm: p.h_mm,
     }).collect();
+    let silk: Vec<LibrarySilk> = input.silk.into_iter().map(Into::into).collect();
     let entry = pcb_core::LibraryEntry {
         key: input.key.clone(),
         description: input.description,
@@ -1255,6 +1459,7 @@ fn tool_library_create(project: &Project, args: &Value) -> Result<Value, ToolErr
         default_rotation_deg: input.default_rotation_deg,
         edge_mounted: input.edge_mounted,
         pads,
+        silk,
         attachments: Vec::new(),
         created_at: 0,
     };
@@ -1419,6 +1624,7 @@ fn tool_palette_add_from_library(project: &Project, args: &Value) -> Result<Valu
         (value, key_field, description_field, pads, entry.edge_mounted)
     };
 
+    let silk: Vec<FootprintSilk> = entry.silk.iter().map(library_silk_to_footprint).collect();
     let footprint = Footprint {
         id: pcb_core::Id::new(),
         reference: input.reference.clone(),
@@ -1431,6 +1637,7 @@ fn tool_palette_add_from_library(project: &Project, args: &Value) -> Result<Valu
         key: key_field,
         description: description_field,
         edge_mounted: edge_from_schematic,
+        silk,
     };
     project.palette_add(footprint).map_err(ToolError::invalid_params)?;
     project.log(
@@ -1729,6 +1936,94 @@ fn tool_pour_remove(project: &Project, args: &Value) -> Result<Value, ToolError>
         format!("No pour for net={} layer={:?}", input.net, layer)
     })
     .with_data(json!({"removed": removed})))
+}
+
+#[derive(Debug, Deserialize)]
+struct SilkLineInput {
+    layer: LayerInput,
+    x1_mm: f64,
+    y1_mm: f64,
+    x2_mm: f64,
+    y2_mm: f64,
+    #[serde(default = "default_silk_width")]
+    width_mm: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SilkTextInput {
+    layer: LayerInput,
+    x_mm: f64,
+    y_mm: f64,
+    text: String,
+    #[serde(default = "default_silk_size")]
+    size_mm: f64,
+    #[serde(default)]
+    rotation: f32,
+    #[serde(default = "default_anchor_middle")]
+    anchor: AnchorInput,
+    #[serde(default)]
+    width_mm: Option<f64>,
+}
+
+fn default_silk_width() -> f64 { 0.15 }
+fn default_silk_size() -> f64 { 1.2 }
+
+fn tool_silk_add_line(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: SilkLineInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("silk.add_line: {e}")))?;
+    let layer: SilkLayer = input.layer.into();
+    let line = SilkLine {
+        layer,
+        start: Point::new(Length::from_mm(input.x1_mm), Length::from_mm(input.y1_mm)),
+        end: Point::new(Length::from_mm(input.x2_mm), Length::from_mm(input.y2_mm)),
+        width: Length::from_mm(input.width_mm),
+    };
+    project.add_silk_line(line);
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "silk.add_line {:?} ({:.2},{:.2})→({:.2},{:.2})",
+            layer, input.x1_mm, input.y1_mm, input.x2_mm, input.y2_mm
+        ),
+    );
+    Ok(text_result("Silk line added").with_data(json!({
+        "layer": layer_to_str_silk(layer),
+    })))
+}
+
+fn tool_silk_add_text(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: SilkTextInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("silk.add_text: {e}")))?;
+    let layer: SilkLayer = input.layer.into();
+    let size = Length::from_mm(input.size_mm);
+    let text = SilkText {
+        layer,
+        position: Point::new(Length::from_mm(input.x_mm), Length::from_mm(input.y_mm)),
+        text: input.text.clone(),
+        size,
+        rotation: input.rotation,
+        anchor: input.anchor.into(),
+        width: input
+            .width_mm
+            .map(Length::from_mm)
+            .unwrap_or_else(|| SilkText::default_stroke(size)),
+    };
+    project.add_silk_text(text);
+    project.log(
+        ActivityLevel::Info,
+        format!("silk.add_text {:?} \"{}\"", layer, input.text),
+    );
+    Ok(text_result(format!("Silk text added: \"{}\"", input.text)).with_data(json!({
+        "layer": layer_to_str_silk(layer),
+        "text": input.text,
+    })))
+}
+
+fn layer_to_str_silk(layer: SilkLayer) -> &'static str {
+    match layer {
+        SilkLayer::Top => "top",
+        SilkLayer::Bottom => "bottom",
+    }
 }
 
 fn layer_to_str(layer: CopperLayer) -> &'static str {

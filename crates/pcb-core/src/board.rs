@@ -48,6 +48,108 @@ pub enum CopperLayer {
     Bottom,
 }
 
+/// Silkscreen side. Mirrors `CopperLayer` but lives in its own enum
+/// so the model can't conflate "copper top" with "silk top" (they
+/// share a side but are emitted as different Gerber files and
+/// rendered with different visual treatments).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
+)]
+pub enum SilkLayer {
+    Top,
+    Bottom,
+}
+
+/// Horizontal anchor for a silk text run. Identical semantics to
+/// SVG's `text-anchor`: where on the rendered glyph ribbon the
+/// `position` point lands.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
+)]
+pub enum SilkAnchor {
+    Start,
+    Middle,
+    End,
+}
+
+impl Default for SilkAnchor {
+    fn default() -> Self {
+        Self::Middle
+    }
+}
+
+/// A straight silkscreen line segment in board coordinates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SilkLine {
+    pub layer: SilkLayer,
+    pub start: Point,
+    pub end: Point,
+    pub width: Length,
+}
+
+/// A silkscreen text run in board coordinates.
+///
+/// Stored as a logical text + anchor + size triple so the renderer
+/// (and the Gerber writer) can vectorise it through the Hershey
+/// stroke font on the fly. Storing the strokes pre-baked would lock
+/// the font choice at edit time and bloat the project file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SilkText {
+    pub layer: SilkLayer,
+    /// Anchor point of the text in board coords (or footprint-local
+    /// when this lives inside a `Footprint`).
+    pub position: Point,
+    pub text: String,
+    /// Glyph cap height.
+    pub size: Length,
+    /// CCW rotation in degrees.
+    #[serde(default)]
+    pub rotation: f32,
+    #[serde(default)]
+    pub anchor: SilkAnchor,
+    /// Stroke width — defaults to ~size/8 when constructed via
+    /// `SilkText::new`.
+    pub width: Length,
+}
+
+impl SilkText {
+    /// Default stroke width for a given cap height — roughly 12.5%
+    /// of the cap height, matching the KiCad default.
+    #[must_use]
+    pub fn default_stroke(size: Length) -> Length {
+        Length(size.0 / 8)
+    }
+}
+
+/// Footprint-local silk primitive. Coordinates are in the
+/// footprint's own frame; the renderer transforms them by the
+/// footprint's `position` and `rotation`.
+///
+/// `Text` placeholders `{REF}` and `{VAL}` resolve to the
+/// footprint's `reference` / `value` at render time, so a library
+/// entry can ship a single `Text` that reads "R1 / 10k" once placed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FootprintSilk {
+    Line {
+        layer: SilkLayer,
+        start: Point,
+        end: Point,
+        width: Length,
+    },
+    Text {
+        layer: SilkLayer,
+        position: Point,
+        text: String,
+        size: Length,
+        #[serde(default)]
+        rotation: f32,
+        #[serde(default)]
+        anchor: SilkAnchor,
+        width: Length,
+    },
+}
+
 /// A pad on a footprint. Phase 1: rectangular SMD pads only — round
 /// pads, ovals, and through-hole follow when we start consuming a real
 /// component library.
@@ -98,6 +200,12 @@ pub struct Footprint {
     /// screw terminals, antennas). Honoured by `placement` checks.
     #[serde(default)]
     pub edge_mounted: bool,
+    /// Silkscreen primitives drawn relative to this footprint's
+    /// origin. Empty for now — library-authored silk is V2; the
+    /// field exists so the renderer can decide whether to
+    /// synthesise a default `{REF}` label or honour the library.
+    #[serde(default)]
+    pub silk: Vec<FootprintSilk>,
 }
 
 impl Footprint {
@@ -144,6 +252,33 @@ impl Footprint {
         } else {
             (pad.size.0, pad.size.1)
         }
+    }
+
+    /// Transform a footprint-local point into world (board) coords
+    /// using the footprint's position + rotation. Same maths as
+    /// `pad_world_center`, factored out so silk transforms can share
+    /// it without smuggling a fake `Pad`.
+    #[must_use]
+    pub fn local_to_world(&self, p: Point) -> Point {
+        let theta = f64::from(self.rotation).to_radians();
+        let (sin, cos) = (theta.sin(), theta.cos());
+        let lx = p.x.to_mm();
+        let ly = p.y.to_mm();
+        let rx = lx * cos - ly * sin;
+        let ry = lx * sin + ly * cos;
+        Point::new(
+            crate::units::Length::from_mm(self.position.x.to_mm() + rx),
+            crate::units::Length::from_mm(self.position.y.to_mm() + ry),
+        )
+    }
+
+    /// Resolve `{REF}` / `{VAL}` placeholders in a silk text body.
+    /// Library-authored silk uses these so a single template line
+    /// reads correctly once the agent fills in `reference` / `value`.
+    #[must_use]
+    pub fn resolve_silk_text(&self, raw: &str) -> String {
+        raw.replace("{REF}", &self.reference)
+            .replace("{VAL}", &self.value)
     }
 }
 
@@ -203,6 +338,16 @@ pub struct Board {
     /// rendering precedence — last one drawn wins.
     #[serde(default)]
     pub pours: Vec<Pour>,
+    /// Board-level silk strokes (frame lines, fiducial labels,
+    /// company logo outlines, ...). Footprint-attached silk lives on
+    /// each `Footprint::silk` so it follows the footprint when
+    /// moved/rotated.
+    #[serde(default)]
+    pub silk_lines: Vec<SilkLine>,
+    /// Board-level silk text. See `silk_lines` for why this is
+    /// separate from footprint-attached silk.
+    #[serde(default)]
+    pub silk_texts: Vec<SilkText>,
 }
 
 impl Board {
@@ -265,6 +410,16 @@ impl Board {
     pub fn clear_routing(&mut self) {
         self.traces.clear();
         self.vias.clear();
+    }
+
+    /// Append a silk line to the board.
+    pub fn add_silk_line(&mut self, line: SilkLine) {
+        self.silk_lines.push(line);
+    }
+
+    /// Append a silk text item to the board.
+    pub fn add_silk_text(&mut self, text: SilkText) {
+        self.silk_texts.push(text);
     }
 
     /// Add a pour, replacing any existing pour with the same (net, layer).
@@ -426,5 +581,66 @@ impl Board {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::Point;
+    use crate::units::Length;
+
+    #[test]
+    fn silk_round_trips_through_serde() {
+        let mut b = Board::new();
+        b.add_silk_line(SilkLine {
+            layer: SilkLayer::Top,
+            start: Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            end: Point::new(Length::from_mm(10.0), Length::from_mm(5.0)),
+            width: Length::from_mm(0.15),
+        });
+        b.add_silk_text(SilkText {
+            layer: SilkLayer::Bottom,
+            position: Point::new(Length::from_mm(3.0), Length::from_mm(7.0)),
+            text: "PCB v1".into(),
+            size: Length::from_mm(1.5),
+            rotation: 90.0,
+            anchor: SilkAnchor::Middle,
+            width: SilkText::default_stroke(Length::from_mm(1.5)),
+        });
+        let json = serde_json::to_string(&b).expect("serialize");
+        let back: Board = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.silk_lines.len(), 1);
+        assert_eq!(back.silk_texts.len(), 1);
+        assert_eq!(back.silk_texts[0].text, "PCB v1");
+        assert_eq!(back.silk_lines[0].layer, SilkLayer::Top);
+        assert_eq!(back.silk_texts[0].layer, SilkLayer::Bottom);
+    }
+
+    #[test]
+    fn footprint_silk_field_roundtrips() {
+        let mut fp = Footprint {
+            id: Id::new(),
+            reference: "R1".into(),
+            value: "10k".into(),
+            library: "lib".into(),
+            position: Point::ORIGIN,
+            rotation: 0.0,
+            layer: CopperLayer::Top,
+            pads: vec![],
+            key: String::new(),
+            description: String::new(),
+            edge_mounted: false,
+            silk: vec![FootprintSilk::Line {
+                layer: SilkLayer::Top,
+                start: Point::ORIGIN,
+                end: Point::new(Length::from_mm(1.0), Length::from_mm(0.0)),
+                width: Length::from_mm(0.15),
+            }],
+        };
+        fp.value = "22k".into();
+        let s = serde_json::to_string(&fp).unwrap();
+        let back: Footprint = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.silk.len(), 1);
     }
 }

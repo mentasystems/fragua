@@ -9,7 +9,10 @@ pub use schematic::render_schematic_svg;
 
 use std::fmt::Write;
 
-use pcb_core::{Board, CopperLayer, Footprint, Pad, Rect, Trace, Via};
+use pcb_core::{
+    hershey, silk_clip, Board, CopperLayer, Footprint, FootprintSilk, Pad, Point, Rect, SilkAnchor,
+    SilkLayer, SilkText, Trace, Via,
+};
 
 /// Margin (in board nm) added around the content bounding box when no
 /// explicit outline is set, so footprints aren't flush against the edge.
@@ -102,8 +105,182 @@ pub fn render_svg(board: &Board) -> String {
         write_via(&mut svg, via);
     }
 
+    // Silkscreen sits on top of copper / pads (the fab applies it last
+    // in the stackup) but BELOW any DRC overlay the frontend may add
+    // on its own. Top silk is full opacity; bottom silk is dimmed —
+    // mirroring how bottom copper is dimmed cyan vs orange top.
+    write_silk_layer(&mut svg, board, SilkLayer::Top);
+    write_silk_layer(&mut svg, board, SilkLayer::Bottom);
+
     svg.push_str("</g></svg>");
     svg
+}
+
+/// Silkscreen colour. Off-white because silkscreen on a real PCB is a
+/// thin epoxy ink — pure white reads as too aggressive against the
+/// dark substrate fill we use for the canvas.
+const SILK_COLOR: &str = "#e6edf3";
+/// Bottom-side dim factor — same idea as the bottom-copper cyan being
+/// dimmer than the top-copper orange.
+const SILK_BOTTOM_OPACITY: f64 = 0.55;
+
+/// Emit every silk stroke for the given side: board-level lines/texts
+/// followed by every footprint's silk (transformed to world coords).
+/// Footprints with no explicit silk get a default `{REF}` label
+/// synthesised here — keeping the hand-tuned visual that previously
+/// lived as an SVG `<text>` inside `write_footprint`, but now via the
+/// Hershey font so it ships into the silk Gerber as well.
+fn write_silk_layer(svg: &mut String, board: &Board, side: SilkLayer) {
+    let opacity = match side {
+        SilkLayer::Top => 1.0,
+        SilkLayer::Bottom => SILK_BOTTOM_OPACITY,
+    };
+    let _ = write!(
+        svg,
+        r##"<g pointer-events="none" stroke="{SILK_COLOR}" stroke-linecap="round" fill="none" opacity="{opacity}">"##,
+    );
+    for line in board.silk_lines.iter().filter(|l| l.layer == side) {
+        write_silk_segment(svg, line.start, line.end, line.width.to_mm());
+    }
+    for txt in board.silk_texts.iter().filter(|t| t.layer == side) {
+        write_silk_text(svg, txt, /*owner_pads=*/ &[]);
+    }
+    for fp in board.footprints_in_order() {
+        write_footprint_silk(svg, fp, side);
+    }
+    svg.push_str("</g>");
+}
+
+/// Walk a footprint's silk (or the synthesised default) and draw
+/// every stroke that targets `side`. Silk segments whose midpoint
+/// falls inside any same-footprint pad bbox are skipped — fab houses
+/// mask silk over solder pads, and the rendering should reflect that.
+fn write_footprint_silk(svg: &mut String, fp: &Footprint, side: SilkLayer) {
+    // World-space pad rects for the pad-overlap suppression check.
+    let pad_rects: Vec<Rect> = fp
+        .pads
+        .iter()
+        .map(|pad| {
+            let c = fp.pad_world_center(pad);
+            let (pw, ph) = fp.pad_world_size(pad);
+            Rect::from_center(c, pw, ph)
+        })
+        .collect();
+
+    if fp.silk.is_empty() {
+        // Default: a single `{REF}` label above the footprint body
+        // bbox on TOP silk. Bottom-mounted footprints get the label on
+        // bottom silk so it stays readable from the right side.
+        let default_side = match fp.layer {
+            CopperLayer::Top => SilkLayer::Top,
+            CopperLayer::Bottom => SilkLayer::Bottom,
+        };
+        if default_side != side {
+            return;
+        }
+        let primary = if fp.key.is_empty() {
+            fp.reference.as_str()
+        } else {
+            fp.key.as_str()
+        };
+        if primary.is_empty() {
+            return;
+        }
+        if let Some(body) = body_rect(fp) {
+            // Anchor sits 0.6 mm above the body bbox — same offset the
+            // pre-silk SVG `<text>` used, so the visual change is small.
+            let local_anchor = Point::new(
+                pcb_core::Length::ZERO,
+                body.max.y + pcb_core::Length::from_mm(0.6),
+            );
+            let world = fp.local_to_world(local_anchor);
+            let size = pcb_core::Length::from_mm(0.9);
+            let text = SilkText {
+                layer: default_side,
+                position: world,
+                text: primary.to_string(),
+                size,
+                rotation: fp.rotation,
+                anchor: SilkAnchor::Middle,
+                width: SilkText::default_stroke(size),
+            };
+            write_silk_text(svg, &text, &pad_rects);
+        }
+        return;
+    }
+
+    for item in &fp.silk {
+        match *item {
+            FootprintSilk::Line {
+                layer,
+                start,
+                end,
+                width,
+            } => {
+                if layer != side {
+                    continue;
+                }
+                let s = fp.local_to_world(start);
+                let e = fp.local_to_world(end);
+                for (a, b) in silk_clip::clip_segment(s, e, &pad_rects) {
+                    write_silk_segment(svg, a, b, width.to_mm());
+                }
+            }
+            FootprintSilk::Text {
+                layer,
+                position,
+                ref text,
+                size,
+                rotation,
+                anchor,
+                width,
+            } => {
+                if layer != side {
+                    continue;
+                }
+                let world = fp.local_to_world(position);
+                let resolved = fp.resolve_silk_text(text);
+                let st = SilkText {
+                    layer,
+                    position: world,
+                    text: resolved,
+                    size,
+                    rotation: rotation + fp.rotation,
+                    anchor,
+                    width,
+                };
+                write_silk_text(svg, &st, &pad_rects);
+            }
+        }
+    }
+}
+
+fn write_silk_segment(svg: &mut String, a: Point, b: Point, width_mm: f64) {
+    let _ = write!(
+        svg,
+        r##"<line x1="{x1:.3}" y1="{y1:.3}" x2="{x2:.3}" y2="{y2:.3}" stroke-width="{w:.3}"/>"##,
+        x1 = a.x.to_mm(),
+        y1 = a.y.to_mm(),
+        x2 = b.x.to_mm(),
+        y2 = b.y.to_mm(),
+        w = width_mm,
+    );
+}
+
+fn write_silk_text(svg: &mut String, txt: &SilkText, suppress_in: &[Rect]) {
+    let segments = hershey::text_segments(
+        &txt.text,
+        txt.position,
+        txt.size,
+        txt.rotation,
+        txt.anchor,
+    );
+    let w = txt.width.to_mm();
+    for (a, b) in segments {
+        for (s, e) in silk_clip::clip_segment(a, b, suppress_in) {
+            write_silk_segment(svg, s, e, w);
+        }
+    }
 }
 
 /// Subtle millimetre grid: a faint line every mm, a brighter line every
@@ -263,28 +440,17 @@ fn write_footprint(svg: &mut String, fp: &Footprint, pours: &[pcb_core::Pour]) {
     for pad in &fp.pads {
         write_pad(svg, pad, pours);
     }
-    // Reference + value label, plus pad numbers when the pad is large
-    // enough to fit one. All labels live inside an inner scale(1,-1) so
-    // the outer Y-flip doesn't mirror them, and use pointer-events:none
-    // so clicks fall through to the body hitbox.
+    // Pad number labels and the secondary `ref · value` line. The
+    // PRIMARY footprint label moved to silkscreen — see
+    // `write_footprint_silk` — so the same string ends up in both the
+    // SVG render and the F.SilkS Gerber. The secondary line stays as
+    // SVG `<text>` because it is metadata (run-time only) and the
+    // Hershey vectorisation hurts readability at the small font size
+    // we use for it.
     let body = body_rect(fp);
-    let label_y = body
-        .map(|r| r.min.y.to_mm() - 0.6)
-        .unwrap_or(-0.6);
     let _ = write!(
         svg,
         r##"<g transform="scale(1,-1)" pointer-events="none">"##,
-    );
-    // Primary label is the library KEY (e.g. "buck_mp1584") so the
-    // board reads as "what this part IS" instead of an auto-counter
-    // reference. Falls back to the reference for legacy footprints
-    // that have no key.
-    let primary = if fp.key.is_empty() { fp.reference.as_str() } else { fp.key.as_str() };
-    let _ = write!(
-        svg,
-        r##"<text x="0" y="{y:.3}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="0.9" fill="#e6edf3">{r}</text>"##,
-        y = -label_y,
-        r = escape(primary),
     );
     // Below the body: reference + value (e.g. "BK1 · 9V→5V"). Lets
     // multiple instances of the same library part be told apart.

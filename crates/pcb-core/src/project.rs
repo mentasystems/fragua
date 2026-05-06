@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 
 use serde::{Deserialize, Serialize};
 
-use crate::board::{Board, CopperLayer, Footprint, Id, Pour, Trace, Via};
+use crate::board::{Board, CopperLayer, Footprint, Id, Pour, SilkLine, SilkText, Trace, Via};
 use crate::event::{ActivityLevel, Event, EventBus};
 use crate::geometry::{Point, Rect};
 use crate::units::Length;
@@ -38,6 +38,8 @@ enum Mutation {
     RemoveVia(Id),
     AddPour(Pour),
     RemovePour { net: String, layer: CopperLayer },
+    AddSilkLine(SilkLine),
+    AddSilkText(SilkText),
     ClearRouting,
     ClearNetRouting { net: String },
     AddSymbol(Symbol),
@@ -215,6 +217,20 @@ impl Project {
                 let count = visible.board.pours.len();
                 drop(visible);
                 self.bus.publish(Event::PoursChanged { count });
+            }
+            Mutation::AddSilkLine(line) => {
+                visible.board.add_silk_line(line);
+                let line_count = visible.board.silk_lines.len();
+                let text_count = visible.board.silk_texts.len();
+                drop(visible);
+                self.bus.publish(Event::SilkChanged { line_count, text_count });
+            }
+            Mutation::AddSilkText(text) => {
+                visible.board.add_silk_text(text);
+                let line_count = visible.board.silk_lines.len();
+                let text_count = visible.board.silk_texts.len();
+                drop(visible);
+                self.bus.publish(Event::SilkChanged { line_count, text_count });
             }
             Mutation::ClearRouting => {
                 visible.board.clear_routing();
@@ -403,6 +419,24 @@ impl Project {
             inner.board.add_pour(pour.clone());
         }
         self.queue(Mutation::AddPour(pour));
+    }
+
+    /// Append a silk line to the board.
+    pub fn add_silk_line(&self, line: SilkLine) {
+        {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.board.add_silk_line(line.clone());
+        }
+        self.queue(Mutation::AddSilkLine(line));
+    }
+
+    /// Append a silk text item to the board.
+    pub fn add_silk_text(&self, text: SilkText) {
+        {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.board.add_silk_text(text.clone());
+        }
+        self.queue(Mutation::AddSilkText(text));
     }
 
     /// Remove a pour by `(net, layer)`. Returns true if one was removed.

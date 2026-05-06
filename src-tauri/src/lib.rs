@@ -533,6 +533,7 @@ fn add_demo_resistor(state: State<'_, AppState>) {
         key: String::new(),
         description: String::new(),
         edge_mounted: false,
+        silk: Vec::new(),
     };
     state.project.add_footprint(footprint);
 }

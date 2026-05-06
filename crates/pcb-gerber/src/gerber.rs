@@ -9,7 +9,10 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 
-use pcb_core::{Board, CopperLayer, Length, Point};
+use pcb_core::{
+    hershey, silk_clip, Board, CopperLayer, FootprintSilk, Length, Point, Rect, SilkAnchor,
+    SilkLayer,
+};
 
 /// Mask clearance applied per side when expanding pad apertures into
 /// solder-mask openings. 0.05 mm is the JLC/KiCad default.
@@ -46,10 +49,22 @@ impl Side {
             Self::Bottom => "B.Mask",
         }
     }
+    fn silk_label(self) -> &'static str {
+        match self {
+            Self::Top => "F.SilkS",
+            Self::Bottom => "B.SilkS",
+        }
+    }
     fn copper_layer(self) -> CopperLayer {
         match self {
             Self::Top => CopperLayer::Top,
             Self::Bottom => CopperLayer::Bottom,
+        }
+    }
+    fn silk_layer(self) -> SilkLayer {
+        match self {
+            Self::Top => SilkLayer::Top,
+            Self::Bottom => SilkLayer::Bottom,
         }
     }
 }
@@ -92,6 +107,8 @@ fn write_header(w: &mut impl Write, label: &str) -> io::Result<()> {
         "B.Cu" => Some("Copper,L2,Bot"),
         "F.Mask" => Some("Soldermask,Top"),
         "B.Mask" => Some("Soldermask,Bot"),
+        "F.SilkS" => Some("Legend,Top"),
+        "B.SilkS" => Some("Legend,Bot"),
         "Edge.Cuts" => Some("Profile,NP"),
         _ => None,
     };
@@ -378,4 +395,258 @@ pub fn write_edge_cuts(board: &Board, w: &mut impl Write) -> io::Result<()> {
     line_to(w, p01)?;
     line_to(w, p00)?;
     footer(w)
+}
+
+/// Default silk text stroke width when none is provided. Roughly
+/// matches the KiCad default of size/8.
+fn default_silk_stroke(size: Length) -> Length {
+    Length(size.0 / 8)
+}
+
+/// Write the silkscreen layer for `side`. Every line — board-level
+/// strokes, board-level text (vectorised via Hershey), and every
+/// footprint's silk transformed to world coords — is emitted as a
+/// `D01` interpolation under a circular aperture matching the
+/// stroke width. Multiple stroke widths are coalesced through the
+/// regular aperture-table machinery so the file stays compact.
+pub fn write_silk(board: &Board, side: Side, w: &mut impl Write) -> io::Result<()> {
+    write_header(w, side.silk_label())?;
+    let layer = side.silk_layer();
+    let mut table = Table::default();
+    // Each emitted item is one stroke under aperture `id`. A polyline
+    // groups two or more points so the writer can fold them into a
+    // single `D02 ... D01 ...; D01 ...; ...` run, instead of
+    // re-issuing `D02` between every pair. Bare segments stay in the
+    // single-line form for clarity.
+    enum Stroke {
+        Seg(Point, Point),
+        Poly(Vec<Point>),
+    }
+    let mut draws: Vec<(u32, Stroke)> = Vec::new();
+
+    // Board-level lines.
+    for line in board.silk_lines.iter().filter(|l| l.layer == layer) {
+        let id = table.intern(Aperture::Round { d: line.width });
+        draws.push((id, Stroke::Seg(line.start, line.end)));
+    }
+    // Board-level text → polyline strokes (one polyline per glyph
+    // stroke). Board-level text never overlaps a pad — pads belong to
+    // footprints — so no clipping is needed.
+    for txt in board.silk_texts.iter().filter(|t| t.layer == layer) {
+        let polys = hershey::text_polylines(
+            &txt.text,
+            txt.position,
+            txt.size,
+            txt.rotation,
+            txt.anchor,
+        );
+        let stroke_w = if txt.width.0 > 0 {
+            txt.width
+        } else {
+            default_silk_stroke(txt.size)
+        };
+        let id = table.intern(Aperture::Round { d: stroke_w });
+        for poly in polys {
+            draws.push((id, Stroke::Poly(poly)));
+        }
+    }
+    // Footprint-attached silk (or the synthesised default).
+    for fp in board.footprints_in_order() {
+        // World-space pad rects for clipping. Same approach as the
+        // renderer — pads on the same footprint mask out silk that
+        // would land on copper.
+        let pad_rects: Vec<Rect> = fp
+            .pads
+            .iter()
+            .map(|pad| {
+                let c = fp.pad_world_center(pad);
+                let (pw, ph) = fp.pad_world_size(pad);
+                Rect::from_center(c, pw, ph)
+            })
+            .collect();
+
+        if fp.silk.is_empty() {
+            // Default `{REF}` label, matching the renderer.
+            let default_layer = match fp.layer {
+                CopperLayer::Top => SilkLayer::Top,
+                CopperLayer::Bottom => SilkLayer::Bottom,
+            };
+            if default_layer != layer {
+                continue;
+            }
+            let primary = if fp.key.is_empty() {
+                fp.reference.as_str()
+            } else {
+                fp.key.as_str()
+            };
+            if primary.is_empty() {
+                continue;
+            }
+            // Anchor 0.6 mm above the body bbox (same as renderer).
+            let Some(body) = footprint_body_local(fp) else {
+                continue;
+            };
+            let anchor_local = Point::new(Length::ZERO, body.1 + Length::from_mm(0.6));
+            let pos = fp.local_to_world(anchor_local);
+            let size = Length::from_mm(0.9);
+            let stroke_w = default_silk_stroke(size);
+            let id = table.intern(Aperture::Round { d: stroke_w });
+            // Default label sits above the body, so it never crosses
+            // a pad — emit polylines straight through.
+            let polys = hershey::text_polylines(primary, pos, size, fp.rotation, SilkAnchor::Middle);
+            for poly in polys {
+                draws.push((id, Stroke::Poly(poly)));
+            }
+        } else {
+            for item in &fp.silk {
+                match *item {
+                    FootprintSilk::Line {
+                        layer: l,
+                        start,
+                        end,
+                        width,
+                    } => {
+                        if l != layer {
+                            continue;
+                        }
+                        let s = fp.local_to_world(start);
+                        let e = fp.local_to_world(end);
+                        let id = table.intern(Aperture::Round { d: width });
+                        for (a, b) in silk_clip::clip_segment(s, e, &pad_rects) {
+                            draws.push((id, Stroke::Seg(a, b)));
+                        }
+                    }
+                    FootprintSilk::Text {
+                        layer: l,
+                        position,
+                        ref text,
+                        size,
+                        rotation,
+                        anchor,
+                        width,
+                    } => {
+                        if l != layer {
+                            continue;
+                        }
+                        let pos = fp.local_to_world(position);
+                        let resolved = fp.resolve_silk_text(text);
+                        let stroke_w = if width.0 > 0 {
+                            width
+                        } else {
+                            default_silk_stroke(size)
+                        };
+                        let id = table.intern(Aperture::Round { d: stroke_w });
+                        let polys = hershey::text_polylines(
+                            &resolved,
+                            pos,
+                            size,
+                            rotation + fp.rotation,
+                            anchor,
+                        );
+                        for poly in polys {
+                            // Clip each segment of the polyline; the
+                            // result may break the polyline into
+                            // shorter runs. We re-emit the original
+                            // polyline if every segment survived
+                            // (the common case — most glyph strokes
+                            // miss every pad), otherwise fall back to
+                            // per-segment emission. This keeps the
+                            // optimisation while staying correct.
+                            if pad_rects.is_empty() || polyline_misses_all(&poly, &pad_rects) {
+                                draws.push((id, Stroke::Poly(poly)));
+                            } else {
+                                for pair in poly.windows(2) {
+                                    for (a, b) in silk_clip::clip_segment(pair[0], pair[1], &pad_rects) {
+                                        draws.push((id, Stroke::Seg(a, b)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    write_apertures(w, &table)?;
+    let mut current = 0u32;
+    for (id, stroke) in draws {
+        if id != current {
+            select(w, id)?;
+            current = id;
+        }
+        match stroke {
+            Stroke::Seg(a, b) => {
+                move_to(w, a)?;
+                line_to(w, b)?;
+            }
+            Stroke::Poly(points) => {
+                let mut iter = points.into_iter();
+                let Some(first) = iter.next() else { continue };
+                move_to(w, first)?;
+                for p in iter {
+                    line_to(w, p)?;
+                }
+            }
+        }
+    }
+    footer(w)
+}
+
+/// Cheap pre-check: every vertex of the polyline lies outside every
+/// rect, AND no segment endpoint pair brackets any rect. We use a
+/// quick "all vertices outside + no bbox overlap" test which is
+/// conservative — when it returns true the polyline is guaranteed
+/// not to cross any pad and the writer can keep the polyline as one
+/// run. False means "fall back to per-segment clip".
+fn polyline_misses_all(poly: &[Point], rects: &[Rect]) -> bool {
+    if poly.is_empty() {
+        return true;
+    }
+    // 1. No vertex inside any rect.
+    for p in poly {
+        for r in rects {
+            if p.x >= r.min.x && p.x <= r.max.x && p.y >= r.min.y && p.y <= r.max.y {
+                return false;
+            }
+        }
+    }
+    // 2. No segment bbox overlaps any rect (would-be crossing
+    //    even though both endpoints sit outside).
+    for pair in poly.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let xmin = a.x.min(b.x);
+        let xmax = a.x.max(b.x);
+        let ymin = a.y.min(b.y);
+        let ymax = a.y.max(b.y);
+        for r in rects {
+            if xmax >= r.min.x && xmin <= r.max.x && ymax >= r.min.y && ymin <= r.max.y {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Local-coord (max_y, ...) of the bounding box of `fp`'s pads —
+/// in footprint-local frame, ignoring rotation. Used by the silk
+/// writer to anchor the default `{REF}` label without round-tripping
+/// through `Footprint::bounds` (which gives world-space coords).
+/// Returns `(min_y, max_y)`.
+fn footprint_body_local(fp: &pcb_core::Footprint) -> Option<(Length, Length)> {
+    let mut iter = fp.pads.iter().map(|pad| {
+        let half_h = pad.size.1 / 2;
+        (pad.offset.y - half_h, pad.offset.y + half_h)
+    });
+    let (mut lo, mut hi) = iter.next()?;
+    for (a, b) in iter {
+        if a < lo {
+            lo = a;
+        }
+        if b > hi {
+            hi = b;
+        }
+    }
+    // Mimic the 0.4 mm body expand the renderer uses.
+    Some((lo - Length::from_mm(0.4), hi + Length::from_mm(0.4)))
 }

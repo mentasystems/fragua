@@ -35,6 +35,12 @@ pub fn write_fab_pack(
     paths.push(write_to(out_dir, &format!("{stem}-B_Mask.gbr"), |w| {
         gerber::write_mask(board, Side::Bottom, w)
     })?);
+    paths.push(write_to(out_dir, &format!("{stem}-F_SilkS.gbr"), |w| {
+        gerber::write_silk(board, Side::Top, w)
+    })?);
+    paths.push(write_to(out_dir, &format!("{stem}-B_SilkS.gbr"), |w| {
+        gerber::write_silk(board, Side::Bottom, w)
+    })?);
     paths.push(write_to(out_dir, &format!("{stem}-Edge_Cuts.gbr"), |w| {
         gerber::write_edge_cuts(board, w)
     })?);
