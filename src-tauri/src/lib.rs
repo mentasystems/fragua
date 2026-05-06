@@ -25,16 +25,25 @@ LOCAL API
   POST /script           run a multi-line script
                          body: {\"script\": \"...\"}
                          reply: {\"results\": [...] } per line
+  POST /save             write the current project to disk (atomic)
+                         body: {\"path\": \"/abs/or/rel/file.json\"}
+                         reply: {\"path\": \"/abs/.../file.json\"}
   GET  /health           {\"ok\": true}
 
-  Example:
+  Examples:
     curl -s http://127.0.0.1:7878/script \\
       -H 'content-type: application/json' \\
       -d '{\"script\": \"outline 80 30\\nstatus\"}'
 
-  The script language is the only surface — every action (lib, sym, net,
-  palette, place, route, drc, export, ...) is a line in the script.
-  Send `GET /` for the full reference.
+    curl -s http://127.0.0.1:7878/save \\
+      -H 'content-type: application/json' \\
+      -d '{\"path\": \"/tmp/board.json\"}'
+
+  The script language is the surface for every design action (lib, sym,
+  net, palette, place, route, drc, export, ...). `POST /save` is the
+  one operational endpoint outside the script — useful when fragua was
+  launched without a file argument (no autosave) and you still want to
+  persist. Send `GET /` for the full script reference.
 ";
 
 /// Wrapper kept in Tauri state so commands can read project + addr.
@@ -535,15 +544,17 @@ pub fn run() {
 
     // CLI: `fragua` (no args) → empty in-memory project, no autosave.
     // `fragua <file.json>` → load that file (or start empty if missing
-    // / unreadable) and autosave back to it on every quiet edit window.
+    // / unreadable) and autosave back to it. The autosave target lives
+    // on the project itself, so a later `POST /save` (or `save PATH`
+    // verb) rebinds it without restart.
     let cli_path = std::env::args_os().nth(1).map(std::path::PathBuf::from);
-    let (project, save_path) = match cli_path {
-        Some(path) => {
-            let project = Project::load_from_path(&path)
-                .unwrap_or_else(|| Project::new(name_from_path(&path)));
-            (project, Some(path))
-        }
-        None => (Project::new(""), None),
+    let project = match cli_path {
+        Some(path) => Project::load_from_path(&path).unwrap_or_else(|| {
+            let p = Project::new(name_from_path(&path));
+            p.set_save_path(Some(path.clone()));
+            p
+        }),
+        None => Project::new(""),
     };
     let api_addr = std::env::var("FRAGUA_API_ADDR").unwrap_or_else(|_| API_DEFAULT_ADDR.to_string());
 
@@ -558,7 +569,7 @@ pub fn run() {
             let handle = app.handle().clone();
             spawn_event_pump(handle, project.clone());
             spawn_animation_pump(project.clone());
-            spawn_autosave(project.clone(), save_path);
+            spawn_autosave(project.clone());
             spawn_http_api(project, api_addr.clone());
             Ok(())
         })
@@ -635,10 +646,11 @@ fn name_from_path(path: &std::path::Path) -> String {
         .unwrap_or_else(|| "untitled".to_string())
 }
 
-fn spawn_autosave(project: Project, save_path: Option<std::path::PathBuf>) {
-    // No CLI path → user opened with no project. Don't persist anything;
-    // edits live in memory until they pass `fragua <file.json>` next time.
-    let Some(save_path) = save_path else { return; };
+fn spawn_autosave(project: Project) {
+    // The autosave target lives on `project.save_path()`. We always run
+    // the loop, but only write when the project has a path bound:
+    // this way a later `/save` call (or `save PATH` script verb) on a
+    // memory-only session promotes it to autosaving without a restart.
 
     use std::time::Duration;
 
@@ -671,8 +683,9 @@ fn spawn_autosave(project: Project, save_path: Option<std::path::PathBuf>) {
                     Err(_) => break, // debounce window expired — flush
                 }
             }
-            // Quiet period reached: write the user's file.
-            if let Err(e) = project.save_to_path(&save_path) {
+            // Quiet period reached: write the user's file (if any).
+            let Some(target) = project.save_path() else { continue };
+            if let Err(e) = project.save_to_path(&target) {
                 project.log(
                     pcb_core::ActivityLevel::Error,
                     format!("autosave: {e}"),
@@ -791,8 +804,40 @@ mod http {
                 write_status(&mut sock, 200, "OK", "application/json", &body).await
             }
             ("POST", "/script") => handle_script(&mut sock, &project, &body).await,
+            ("POST", "/save") => handle_save(&mut sock, &project, &body).await,
             _ => {
                 write_status(&mut sock, 404, "Not Found", "text/plain", b"unknown route\n").await
+            }
+        }
+    }
+
+    async fn handle_save(sock: &mut TcpStream, project: &Project, body: &[u8]) -> std::io::Result<()> {
+        let parsed: Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(e) => {
+                let msg = format!("invalid json body: {e}\n");
+                return write_status(sock, 400, "Bad Request", "text/plain", msg.as_bytes()).await;
+            }
+        };
+        let path = match parsed.get("path").and_then(Value::as_str) {
+            Some(p) if !p.trim().is_empty() => p.to_string(),
+            _ => {
+                let msg = b"missing or empty `path`\n";
+                return write_status(sock, 400, "Bad Request", "text/plain", msg).await;
+            }
+        };
+        match project.save_to_path(std::path::Path::new(&path)) {
+            Ok(written) => {
+                project.log(
+                    pcb_core::ActivityLevel::Info,
+                    format!("api.save: wrote {}", written.display()),
+                );
+                let body = serde_json::to_vec(&json!({"path": written})).unwrap_or_default();
+                write_status(sock, 200, "OK", "application/json", &body).await
+            }
+            Err(e) => {
+                let body = serde_json::to_vec(&json!({"error": e})).unwrap_or_default();
+                write_status(sock, 400, "Bad Request", "application/json", &body).await
             }
         }
     }

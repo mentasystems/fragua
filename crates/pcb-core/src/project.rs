@@ -8,7 +8,6 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -76,6 +75,10 @@ pub struct Project {
     /// Shared across every `Project` clone so the same in-memory state
     /// (and disk file) backs them all.
     library: Arc<crate::library::Library>,
+    /// Where the autosave loop writes. `None` means "no autosave"
+    /// (memory-only session). `save_to_path` updates this so a manual
+    /// save also rebinds the autosave target.
+    save_path: Arc<RwLock<Option<PathBuf>>>,
 }
 
 #[derive(Debug, Default)]
@@ -116,6 +119,7 @@ impl Project {
             pending: Arc::new(Mutex::new(VecDeque::new())),
             bus: EventBus::new(),
             library: Arc::new(library),
+            save_path: Arc::new(RwLock::new(None)),
         };
         proj.bus.publish(Event::ProjectChanged);
         proj
@@ -767,19 +771,11 @@ impl Project {
 
 // ─── Persistence ──────────────────────────────────────────────────────
 //
-// Auto-save layout (under `~/.pcb-projects/<name>/`):
-//   current.json                    ← live state, rewritten after each
-//                                     mutation (debounced by the caller)
-//   history/<unix_secs>.json        ← rolling snapshot, written every
-//                                     N saves; pruned to the latest
-//                                     `HISTORY_MAX` entries
-//
-// JSON is intentional: tiny (a 10-component design fits in a few KB),
+// JSON files: tiny (a 10-component design fits in a few KB),
 // human-inspectable, and forgiving when we add new fields (everything
-// is `#[serde(default)]`-friendly).
-
-/// How many snapshots to keep in the history dir.
-const HISTORY_MAX: usize = 50;
+// is `#[serde(default)]`-friendly). The path is whatever the user
+// passed to `fragua` (or to `save_to_path`); no implicit per-project
+// directory.
 
 /// Serialisable mirror of `ProjectInner`. Lives only on disk; the
 /// in-memory state is always `ProjectInner`.
@@ -792,57 +788,11 @@ struct ProjectFile {
     palette: Vec<Footprint>,
 }
 
-fn projects_root() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".pcb-projects")
-}
-
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 impl Project {
-    /// Try to load the named project from `~/.pcb-projects/<name>/current.json`.
-    /// Returns `None` if the file doesn't exist OR fails to parse — the
-    /// caller falls back to a fresh project. Parse errors are silenced
-    /// so a corrupt save doesn't brick the app on boot.
-    #[must_use]
-    pub fn load_default(name: &str) -> Option<Self> {
-        let path = projects_root().join(name).join("current.json");
-        let bytes = fs::read(&path).ok()?;
-        let file: ProjectFile = serde_json::from_slice(&bytes).ok()?;
-        let library = match crate::library::Library::open_default() {
-            Ok(lib) => lib,
-            Err(_) => crate::library::Library::open_at(std::env::temp_dir().join("pcb-library"))
-                .ok()?,
-        };
-        // On load, both live AND visible start with the saved state —
-        // there's no animation of "playing back" the project's history.
-        let make_inner = || ProjectInner {
-            name: file.name.clone(),
-            board: file.board.clone(),
-            schematic: file.schematic.clone(),
-            palette: file.palette.clone(),
-        };
-        let proj = Self {
-            inner: Arc::new(RwLock::new(make_inner())),
-            visible: Arc::new(RwLock::new(make_inner())),
-            pending: Arc::new(Mutex::new(VecDeque::new())),
-            bus: EventBus::new(),
-            library: Arc::new(library),
-        };
-        proj.bus.publish(Event::ProjectChanged);
-        Some(proj)
-    }
-
-    /// Load a project from an arbitrary JSON file (the file path the
-    /// user passed on the CLI). Returns `None` if the file is missing
-    /// or can't be parsed.
+    /// Load a project from an arbitrary JSON file (the path the user
+    /// passed on the CLI). Returns `None` if the file is missing or
+    /// can't be parsed. The autosave target is set to `path` so any
+    /// subsequent edit writes back to it.
     #[must_use]
     pub fn load_from_path(path: &Path) -> Option<Self> {
         let bytes = fs::read(path).ok()?;
@@ -864,13 +814,15 @@ impl Project {
             pending: Arc::new(Mutex::new(VecDeque::new())),
             bus: EventBus::new(),
             library: Arc::new(library),
+            save_path: Arc::new(RwLock::new(Some(path.to_path_buf()))),
         };
         proj.bus.publish(Event::ProjectChanged);
         Some(proj)
     }
 
-    /// Write the current state to an arbitrary path (used when the app
-    /// was opened with a CLI file argument). Atomic via tmp+rename.
+    /// Write the current state to `path`, atomically via tmp+rename.
+    /// Also rebinds the autosave target to `path` — so calling this
+    /// once on a memory-only session "promotes" it to autosaving there.
     pub fn save_to_path(&self, path: &Path) -> Result<PathBuf, String> {
         let inner = self.inner.read().expect("project lock poisoned");
         let file = ProjectFile {
@@ -893,95 +845,21 @@ impl Project {
             .map_err(|e| format!("project: write {}: {e}", tmp.display()))?;
         fs::rename(&tmp, path)
             .map_err(|e| format!("project: rename {}: {e}", path.display()))?;
-        Ok(path.to_path_buf())
+        let final_path = path.to_path_buf();
+        *self.save_path.write().expect("save_path lock poisoned") = Some(final_path.clone());
+        Ok(final_path)
     }
 
-    /// Write the current state to `~/.pcb-projects/<name>/current.json`.
-    /// Atomic via tmp+rename so a crash mid-write can't corrupt the file.
-    pub fn save_to_default(&self) -> Result<PathBuf, String> {
-        let inner = self.inner.read().expect("project lock poisoned");
-        let file = ProjectFile {
-            name: inner.name.clone(),
-            board: inner.board.clone(),
-            schematic: inner.schematic.clone(),
-            palette: inner.palette.clone(),
-        };
-        let dir = projects_root().join(&file.name);
-        drop(inner);
-        fs::create_dir_all(&dir).map_err(|e| format!("project: mkdir {}: {e}", dir.display()))?;
-        let path = dir.join("current.json");
-        let tmp = dir.join("current.json.tmp");
-        let bytes = serde_json::to_vec_pretty(&file).map_err(|e| format!("project: serialise: {e}"))?;
-        fs::write(&tmp, &bytes).map_err(|e| format!("project: write {}: {e}", tmp.display()))?;
-        fs::rename(&tmp, &path).map_err(|e| format!("project: rename {}: {e}", path.display()))?;
-        Ok(path)
-    }
-
-    /// Copy `current.json` into `history/<unix_secs>.json`, then prune
-    /// the history dir down to `HISTORY_MAX` newest files. Caller decides
-    /// the cadence (typically every Nth save, not every save, so the
-    /// history doesn't churn on tiny edits).
-    pub fn snapshot_history(&self) -> Result<PathBuf, String> {
-        let name = self.name_owned();
-        let dir = projects_root().join(&name);
-        let history = dir.join("history");
-        fs::create_dir_all(&history)
-            .map_err(|e| format!("project: mkdir {}: {e}", history.display()))?;
-        let src = dir.join("current.json");
-        let dst = history.join(format!("{}.json", now_unix_secs()));
-        // If `current.json` doesn't exist yet, write the live state
-        // directly into the history slot — useful when the very first
-        // history snapshot fires before save_to_default has run.
-        if let Err(_) = fs::copy(&src, &dst) {
-            let inner = self.inner.read().expect("project lock poisoned");
-            let file = ProjectFile {
-                name: inner.name.clone(),
-                board: inner.board.clone(),
-                schematic: inner.schematic.clone(),
-                palette: inner.palette.clone(),
-            };
-            drop(inner);
-            let bytes = serde_json::to_vec_pretty(&file)
-                .map_err(|e| format!("project: serialise: {e}"))?;
-            fs::write(&dst, &bytes)
-                .map_err(|e| format!("project: write {}: {e}", dst.display()))?;
-        }
-        prune_history_dir(&history, HISTORY_MAX);
-        Ok(dst)
-    }
-
-    /// List historical snapshot file paths, newest first.
+    /// Current autosave target. `None` means memory-only — no autosave
+    /// is happening; the caller must `save_to_path` to persist.
     #[must_use]
-    pub fn history_files(&self) -> Vec<PathBuf> {
-        let history = projects_root().join(self.name_owned()).join("history");
-        let Ok(entries) = fs::read_dir(&history) else { return Vec::new(); };
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
-            .map(|e| e.path())
-            .collect();
-        paths.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
-        paths
+    pub fn save_path(&self) -> Option<PathBuf> {
+        self.save_path.read().expect("save_path lock poisoned").clone()
     }
-}
 
-/// Keep only the newest `keep` files in `dir`, deleting the rest.
-fn prune_history_dir(dir: &Path, keep: usize) {
-    let Ok(entries) = fs::read_dir(dir) else { return; };
-    let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
-        .filter_map(|e| {
-            let modified = e.metadata().ok()?.modified().ok()?;
-            Some((e.path(), modified))
-        })
-        .collect();
-    if files.len() <= keep {
-        return;
-    }
-    files.sort_by(|a, b| b.1.cmp(&a.1));
-    for (path, _) in files.iter().skip(keep) {
-        let _ = fs::remove_file(path);
+    /// Set (or clear) the autosave target without writing now.
+    pub fn set_save_path(&self, path: Option<PathBuf>) {
+        *self.save_path.write().expect("save_path lock poisoned") = path;
     }
 }
 
