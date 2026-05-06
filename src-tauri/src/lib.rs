@@ -524,10 +524,13 @@ fn add_demo_resistor(state: State<'_, AppState>) {
 
 /// Entry point used by the binary in `main.rs`.
 pub fn run() {
-    // First thing on launch — print the usage so the operator (or the
-    // agent that just spawned the process) sees how to drive Fragua
-    // without grepping the source.
+    // First thing on launch — print the usage AND the full script
+    // language reference so the operator (or the agent that just
+    // spawned the process) sees the entire surface without grepping the
+    // source or hitting `GET /` first.
     print!("{USAGE}");
+    println!("\n--- SCRIPT REFERENCE ---\n");
+    print!("{}", pcb_script::tools::script_reference());
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     // CLI: `fragua` (no args) → empty in-memory project, no autosave.

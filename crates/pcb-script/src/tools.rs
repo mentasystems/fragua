@@ -73,6 +73,10 @@ PROJECT / READS:\n\
   nets                                         — per-net pad-by-pad connection report\n\
   list-lib                                     — every library entry (key, desc, pad count, attachments)\n\
   list-palette                                 — items waiting in the palette\n\
+  save PATH                                    — write the project to PATH (atomic .tmp+rename).\n\
+                                                 Use this when fragua was launched with no file\n\
+                                                 argument (no autosave); afterwards re-launch with\n\
+                                                 `fragua PATH` to keep autosaving.\n\
 \n\
 BOARD:\n\
   outline W H                                  — set Edge.Cuts rectangle in mm\n\
@@ -169,6 +173,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "batch" => tool_batch(project, args).await,
         "project.status" => tool_project_status(project),
         "project.reset" => tool_project_reset(project),
+        "project.save" => tool_project_save(project, args),
         "board.set_outline" => tool_board_set_outline(project, args),
         "placement.add" => tool_placement_add(project, args),
         "view.snapshot" => tool_view_snapshot(project),
@@ -214,6 +219,31 @@ fn tool_project_reset(project: &Project) -> Result<Value, ToolError> {
     project.reset();
     project.log(ActivityLevel::Info, "project.reset");
     Ok(text_result("Project reset").into())
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveInput {
+    path: String,
+}
+
+/// Write the current project to an arbitrary path. Useful when the app
+/// was launched without a file argument (no autosave): the agent runs a
+/// `save /path/to/board.json` line once it has something worth keeping.
+fn tool_project_save(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: SaveInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("save: {e}")))?;
+    if input.path.trim().is_empty() {
+        return Err(ToolError::invalid_params("save: path is empty"));
+    }
+    let path = std::path::PathBuf::from(&input.path);
+    let written = project
+        .save_to_path(&path)
+        .map_err(|e| ToolError::invalid_params(format!("save: {e}")))?;
+    project.log(
+        ActivityLevel::Info,
+        format!("project.save: wrote {}", written.display()),
+    );
+    Ok(text_result(format!("Saved to {}", written.display())).into())
 }
 
 #[derive(Debug, Deserialize)]
