@@ -21,14 +21,20 @@ USAGE
 LOCAL API
   Stateless HTTP on http://127.0.0.1:7878 (override: FRAGUA_API_ADDR).
 
-  GET  /                 this usage text + the script reference
+  Replies are plain text (text/plain) — agent-friendly, no JSON parsing
+  needed on the client side. Request bodies are JSON.
+
+  GET  /                 usage + the full script reference
   POST /script           run a multi-line script
-                         body: {\"script\": \"...\"}
-                         reply: {\"results\": [...] } per line
+                         body:  {\"script\": \"...\"}
+                         reply: per-line outcomes,
+                                `[L<line> ok|FAIL <tool>] <text>`,
+                                + an unsaved-session warning if any
   POST /save             write the current project to disk (atomic)
-                         body: {\"path\": \"/abs/or/rel/file.json\"}
-                         reply: {\"path\": \"/abs/.../file.json\"}
-  GET  /health           {\"ok\": true}
+                         and bind autosave to that path
+                         body:  {\"path\": \"/abs/or/rel/file.json\"}
+                         reply: `Saved to <path>`
+  GET  /health           `ok`
 
   Examples:
     curl -s http://127.0.0.1:7878/script \\
@@ -755,7 +761,7 @@ mod http {
     //! server — don't expose it past loopback.
 
     use pcb_core::Project;
-    use serde_json::{json, Value};
+    use serde_json::Value;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
@@ -797,17 +803,12 @@ mod http {
                 out.push_str(USAGE);
                 out.push_str("\n--- SCRIPT REFERENCE ---\n");
                 out.push_str(reference);
-                write_status(&mut sock, 200, "OK", "text/plain; charset=utf-8", out.as_bytes()).await
+                write_text(&mut sock, 200, "OK", &out).await
             }
-            ("GET", "/health") => {
-                let body = serde_json::to_vec(&json!({"ok": true})).unwrap_or_default();
-                write_status(&mut sock, 200, "OK", "application/json", &body).await
-            }
+            ("GET", "/health") => write_text(&mut sock, 200, "OK", "ok\n").await,
             ("POST", "/script") => handle_script(&mut sock, &project, &body).await,
             ("POST", "/save") => handle_save(&mut sock, &project, &body).await,
-            _ => {
-                write_status(&mut sock, 404, "Not Found", "text/plain", b"unknown route\n").await
-            }
+            _ => write_text(&mut sock, 404, "Not Found", "unknown route\n").await,
         }
     }
 
@@ -815,15 +816,13 @@ mod http {
         let parsed: Value = match serde_json::from_slice(body) {
             Ok(v) => v,
             Err(e) => {
-                let msg = format!("invalid json body: {e}\n");
-                return write_status(sock, 400, "Bad Request", "text/plain", msg.as_bytes()).await;
+                return write_text(sock, 400, "Bad Request", &format!("invalid json body: {e}\n")).await;
             }
         };
         let path = match parsed.get("path").and_then(Value::as_str) {
             Some(p) if !p.trim().is_empty() => p.to_string(),
             _ => {
-                let msg = b"missing or empty `path`\n";
-                return write_status(sock, 400, "Bad Request", "text/plain", msg).await;
+                return write_text(sock, 400, "Bad Request", "missing or empty `path`\n").await;
             }
         };
         match project.save_to_path(std::path::Path::new(&path)) {
@@ -832,13 +831,13 @@ mod http {
                     pcb_core::ActivityLevel::Info,
                     format!("api.save: wrote {}", written.display()),
                 );
-                let body = serde_json::to_vec(&json!({"path": written})).unwrap_or_default();
-                write_status(sock, 200, "OK", "application/json", &body).await
+                let body = format!(
+                    "Saved to {p}\nAutosave is now bound to this path; subsequent edits write here.\n",
+                    p = written.display(),
+                );
+                write_text(sock, 200, "OK", &body).await
             }
-            Err(e) => {
-                let body = serde_json::to_vec(&json!({"error": e})).unwrap_or_default();
-                write_status(sock, 400, "Bad Request", "application/json", &body).await
-            }
+            Err(e) => write_text(sock, 400, "Bad Request", &format!("save failed: {e}\n")).await,
         }
     }
 
@@ -846,23 +845,79 @@ mod http {
         let args: Value = match serde_json::from_slice(body) {
             Ok(v) => v,
             Err(e) => {
-                let msg = format!("invalid json body: {e}\n");
-                return write_status(sock, 400, "Bad Request", "text/plain", msg.as_bytes()).await;
+                return write_text(sock, 400, "Bad Request", &format!("invalid json body: {e}\n")).await;
             }
         };
         match pcb_script::tools::dispatch(project, "script", &args).await {
             Ok(value) => {
-                let body = serde_json::to_vec(&value).unwrap_or_default();
-                write_status(sock, 200, "OK", "application/json", &body).await
+                let mut text = format_script_result(&value);
+                if project.save_path().is_none() {
+                    text.push_str(unsaved_warning());
+                }
+                write_text(sock, 200, "OK", &text).await
             }
             Err(err) => {
-                let body = serde_json::to_vec(
-                    &json!({"error": {"code": err.code, "message": err.message}}),
-                )
-                .unwrap_or_default();
-                write_status(sock, 400, "Bad Request", "application/json", &body).await
+                let mut text = format!("script error ({code}): {msg}\n",
+                    code = err.code, msg = err.message);
+                if project.save_path().is_none() {
+                    text.push_str(unsaved_warning());
+                }
+                write_text(sock, 400, "Bad Request", &text).await
             }
         }
+    }
+
+    /// Render the script tool's structured reply into the text shape an
+    /// AI agent reads naturally:
+    ///   <summary>
+    ///   [L<line> ok|FAIL <tool>] <inner text or error>
+    ///   ...
+    fn format_script_result(value: &Value) -> String {
+        let mut out = String::new();
+        if let Some(summary) = value
+            .pointer("/content/0/text")
+            .and_then(Value::as_str)
+        {
+            out.push_str(summary);
+            out.push('\n');
+        }
+        if let Some(results) = value
+            .pointer("/structuredContent/results")
+            .and_then(Value::as_array)
+        {
+            for r in results {
+                let line = r.get("line").and_then(Value::as_u64).unwrap_or(0);
+                let tool = r.get("tool").and_then(Value::as_str).unwrap_or("?");
+                let ok = r.get("ok").and_then(Value::as_bool).unwrap_or(false);
+                let body = if ok {
+                    r.pointer("/result/content/0/text")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            // Tool returned no text content: fall back to the
+                            // structured result so the agent sees something.
+                            r.get("result")
+                                .map(|v| v.to_string())
+                                .unwrap_or_default()
+                        })
+                } else {
+                    r.get("error")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| "(no error message)".into())
+                };
+                let status = if ok { "ok" } else { "FAIL" };
+                out.push_str(&format!("[L{line} {status} {tool}] {body}\n"));
+            }
+        }
+        out
+    }
+
+    fn unsaved_warning() -> &'static str {
+        "\nWARNING: this Fragua session is memory-only — no autosave is configured. \
+The current project will be lost on exit unless you persist it with \
+`POST /save {\"path\": \"...\"}` or include a `save PATH` line in the next \
+script. After the first save, autosave rebinds to that path automatically.\n"
     }
 
     async fn read_head(sock: &mut TcpStream) -> std::io::Result<Option<(String, Vec<u8>)>> {
@@ -891,6 +946,15 @@ mod http {
 
     fn find_double_crlf(buf: &[u8]) -> Option<usize> {
         buf.windows(4).position(|w| w == b"\r\n\r\n")
+    }
+
+    async fn write_text(
+        sock: &mut TcpStream,
+        code: u16,
+        reason: &str,
+        body: &str,
+    ) -> std::io::Result<()> {
+        write_status(sock, code, reason, "text/plain; charset=utf-8", body.as_bytes()).await
     }
 
     async fn write_status(
