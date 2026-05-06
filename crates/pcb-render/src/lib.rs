@@ -54,27 +54,51 @@ pub fn render_svg(board: &Board) -> String {
     write_mm_grid(&mut svg, view);
 
     if let Some(outline) = board.outline {
+        // Substrate first: paint the FR4-coloured board area inside
+        // the outline. Anywhere the pour does NOT cover (cutouts,
+        // edge clearance) shows this brown so the eye reads it as
+        // "bare substrate, no copper".
+        write_substrate_fill(&mut svg, outline);
+        // Pours sit on the substrate. Each pour is the outline
+        // (inset by the edge clearance) MINUS the clearance keepouts
+        // around every foreign-net pad / trace / via — same geometry
+        // the Gerber writer emits.
+        for pour in &board.pours {
+            write_pour_polygon(&mut svg, board, pour, outline);
+        }
         write_rect_stroke(&mut svg, outline, "#d6905b", 0.4);
         write_outline_dimensions(&mut svg, outline);
-        write_outline_handles(&mut svg, outline);
     }
 
     // Origin marker so (0,0) is always identifiable.
     write_origin_marker(&mut svg);
 
     // Bottom traces first so top traces visually win at crossings.
-    for trace in board.traces.iter().filter(|t| t.layer == CopperLayer::Bottom) {
+    // Orphan stubs (neither endpoint touches a pad/via/other-trace
+    // of the same net) are skipped so a half-finished route does
+    // not pollute the visual.
+    let orphans = board.orphan_trace_ids();
+    let orphan_vias = board.orphan_via_ids();
+    for trace in board
+        .traces
+        .iter()
+        .filter(|t| t.layer == CopperLayer::Bottom && !orphans.contains(&t.id))
+    {
         write_trace(&mut svg, trace);
     }
     // Ratsnest BELOW footprints so the labels stay readable.
     write_ratsnest(&mut svg, board);
     for fp in board.footprints_in_order() {
-        write_footprint(&mut svg, fp);
+        write_footprint(&mut svg, fp, &board.pours);
     }
-    for trace in board.traces.iter().filter(|t| t.layer == CopperLayer::Top) {
+    for trace in board
+        .traces
+        .iter()
+        .filter(|t| t.layer == CopperLayer::Top && !orphans.contains(&t.id))
+    {
         write_trace(&mut svg, trace);
     }
-    for via in &board.vias {
+    for via in board.vias.iter().filter(|v| !orphan_vias.contains(&v.id)) {
         write_via(&mut svg, via);
     }
 
@@ -202,26 +226,30 @@ fn view_rect(board: &Board) -> Rect {
     )
 }
 
-fn write_footprint(svg: &mut String, fp: &Footprint) {
-    // Wrap the whole footprint in a transform group; pads, body, and
-    // label live in footprint-local coordinates so the rotation is
-    // applied uniformly. The drag hitbox is a transparent body rect
-    // sitting under the pads — click anywhere inside the body and you
-    // can drag it.
+fn write_footprint(svg: &mut String, fp: &Footprint, pours: &[pcb_core::Pour]) {
+    // Wrap the whole footprint in a transform group so pads, body,
+    // and label rotate together with the footprint. Read-only render:
+    // no drag handle, no per-component cursor, no hit-tracking attribute.
     let fx = fp.position.x.to_mm();
     let fy = fp.position.y.to_mm();
+    // `data-board-ref` (the schematic reference) and `data-library-key`
+    // (the library entry it was spawned from) are both kept so the
+    // frontend can spawn-flash, hit-test for the info modal, and
+    // cross-reference the library panel.
     let _ = write!(
         svg,
-        r##"<g data-board-ref="{r}" transform="translate({x:.3},{y:.3}) rotate({deg:.2})" style="cursor:grab">"##,
+        r##"<g data-board-ref="{r}" data-library-key="{k}" transform="translate({x:.3},{y:.3}) rotate({deg:.2})">"##,
         r = escape(&fp.reference),
+        k = escape(&fp.key),
         x = fx,
         y = fy,
         deg = fp.rotation,
     );
 
-    // Body rect: bbox of pads expanded by a small margin. Stroke is
-    // the silkscreen-ish boundary; fill is a transparent hitbox so the
-    // pointer hits anywhere inside the body.
+    // Body rect: bbox of pads expanded by a small margin. Fill is an
+    // almost-fully-transparent white so the whole body acts as a
+    // click hit-target for the info modal — but visually it stays
+    // empty so the pads + traces beneath are not tinted.
     if let Some(body) = body_rect(fp) {
         let bx = body.min.x.to_mm();
         let by = body.min.y.to_mm();
@@ -229,11 +257,11 @@ fn write_footprint(svg: &mut String, fp: &Footprint) {
         let bh = (body.max.y - body.min.y).to_mm();
         let _ = write!(
             svg,
-            r##"<rect x="{bx:.3}" y="{by:.3}" width="{bw:.3}" height="{bh:.3}" fill="rgba(255,255,255,0.02)" stroke="#8b949e" stroke-width="0.1"/>"##,
+            r##"<rect x="{bx:.3}" y="{by:.3}" width="{bw:.3}" height="{bh:.3}" fill="rgba(255,255,255,0.01)" stroke="#8b949e" stroke-width="0.1" style="cursor:pointer"/>"##,
         );
     }
     for pad in &fp.pads {
-        write_pad(svg, pad);
+        write_pad(svg, pad, pours);
     }
     // Reference + value label, plus pad numbers when the pad is large
     // enough to fit one. All labels live inside an inner scale(1,-1) so
@@ -247,15 +275,30 @@ fn write_footprint(svg: &mut String, fp: &Footprint) {
         svg,
         r##"<g transform="scale(1,-1)" pointer-events="none">"##,
     );
-    // REF on top of the body.
+    // Primary label is the library KEY (e.g. "buck_mp1584") so the
+    // board reads as "what this part IS" instead of an auto-counter
+    // reference. Falls back to the reference for legacy footprints
+    // that have no key.
+    let primary = if fp.key.is_empty() { fp.reference.as_str() } else { fp.key.as_str() };
     let _ = write!(
         svg,
         r##"<text x="0" y="{y:.3}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="0.9" fill="#e6edf3">{r}</text>"##,
         y = -label_y,
-        r = escape(&fp.reference),
+        r = escape(primary),
     );
-    // Value below the body, slimmer.
+    // Below the body: reference + value (e.g. "BK1 · 9V→5V"). Lets
+    // multiple instances of the same library part be told apart.
+    let mut sub = String::new();
+    if !fp.reference.is_empty() && !fp.key.is_empty() {
+        sub.push_str(&fp.reference);
+    }
     if !fp.value.is_empty() {
+        if !sub.is_empty() {
+            sub.push_str(" · ");
+        }
+        sub.push_str(&fp.value);
+    }
+    if !sub.is_empty() {
         let val_y = body
             .map(|r| r.max.y.to_mm() + 1.2)
             .unwrap_or(1.2);
@@ -263,25 +306,36 @@ fn write_footprint(svg: &mut String, fp: &Footprint) {
             svg,
             r##"<text x="0" y="{y:.3}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="0.7" fill="#8b949e">{v}</text>"##,
             y = -val_y,
-            v = escape(&fp.value),
+            v = escape(&sub),
         );
     }
-    // Pad numbers — only when the pad is at least 0.8 mm in both axes
-    // so the digits don't bleed outside the copper.
+    // Pad labels — prefer the human pin NAME (e.g. "VBAT", "MOSI",
+    // "GND") and fall back to the bare pad number when no name is
+    // set. Skipped on tiny pads so the text does not bleed outside
+    // the copper. Dark text on the copper fill — readable on the
+    // orange/blue background. The font shrinks for long names so
+    // they still fit in the pad bbox.
+    let _ = pours;
     for pad in &fp.pads {
         let pw = pad.size.0.to_mm();
         let ph = pad.size.1.to_mm();
         if pw < 0.8 || ph < 0.8 {
             continue;
         }
-        let size = (pw.min(ph) * 0.55).clamp(0.35, 1.2);
+        let label_text = if pad.name.is_empty() { pad.number.as_str() } else { pad.name.as_str() };
+        // Heuristic font size: cap at ~half the pad's short side, then
+        // shrink linearly with the label length so 4+ chars still fit.
+        let chars = label_text.chars().count().max(1) as f64;
+        let cap = (pw.min(ph) * 0.55).clamp(0.30, 1.0);
+        let by_width = (pw / chars * 1.4).clamp(0.30, 1.0);
+        let size = cap.min(by_width);
         let _ = write!(
             svg,
             r##"<text x="{x:.3}" y="{y:.3}" text-anchor="middle" dominant-baseline="middle" font-family="ui-monospace, monospace" font-size="{sz:.2}" fill="#0e1116">{n}</text>"##,
             x = pad.offset.x.to_mm(),
             y = -pad.offset.y.to_mm(),
             sz = size,
-            n = escape(&pad.number),
+            n = escape(label_text),
         );
     }
     svg.push_str("</g></g>");
@@ -299,7 +353,7 @@ fn body_rect(fp: &Footprint) -> Option<Rect> {
     Some(iter.fold(first, Rect::union).expand(pcb_core::Length::from_mm(0.4)))
 }
 
-fn write_pad(svg: &mut String, pad: &Pad) {
+fn write_pad(svg: &mut String, pad: &Pad, pours: &[pcb_core::Pour]) {
     let cx = pad.offset.x.to_mm();
     let cy = pad.offset.y.to_mm();
     let w = pad.size.0.to_mm();
@@ -308,6 +362,12 @@ fn write_pad(svg: &mut String, pad: &Pad) {
     // hue (gold for top, cyan for bottom) so the agent and the human
     // can tell at a glance whether a piece of copper is a landing pad
     // or a routed segment.
+    // All pads share the layer's copper colour. Whether a pad is
+    // electrically continuous with a pour reads off the surrounding
+    // shape: pads on the pour's net merge into the orange/olive
+    // wash; pads on other nets get a dark clearance ring around
+    // them (drawn by `write_pour_polygon` as evenodd cutouts).
+    let _ = pours;
     let fill = match pad.layer {
         CopperLayer::Top => "#c97a2b",
         CopperLayer::Bottom => "#2b6cc9",
@@ -319,6 +379,7 @@ fn write_pad(svg: &mut String, pad: &Pad) {
         y = cy - h / 2.0,
     );
 }
+
 
 /// Draw the ratsnest: thin lines between every pair of pads on the
 /// same net, where no trace already routes that pair. Suppressed for
@@ -345,6 +406,12 @@ fn write_ratsnest(svg: &mut String, board: &Board) {
     }
     for via in &board.vias {
         routed.insert(via.net.as_str());
+    }
+    // Nets that have a pour ARE connected — through the pour copper,
+    // not via traces. Skip the ratsnest for them so a 20-pad GND
+    // does not draw the spaghetti star.
+    for pour in &board.pours {
+        routed.insert(pour.net.as_str());
     }
     for (net, pads) in &net_pads {
         if routed.contains(net) || pads.len() < 2 {
@@ -430,6 +497,464 @@ fn write_outline_handles(svg: &mut String, outline: Rect) {
             y = hy - s / 2.0,
         );
     }
+}
+
+/// Visual clearance the pour render leaves around foreign-net items,
+/// in mm. INTENTIONALLY larger than the fab `POUR_CLEARANCE` (0.2 mm
+/// in `pcb-gerber`) so the cutouts are obvious on a typical zoom —
+/// at 0.2 mm the halo is one or two pixels and reads as solid.
+const POUR_CLEARANCE_MM: f64 = 0.6;
+/// Inset of the pour from the board outline, in mm. Matches the fab
+/// value so the visible pour edge is where the copper actually ends.
+const POUR_EDGE_CLEARANCE_MM: f64 = 0.3;
+/// Cell size of the rasterised pour mask, in mm. Smaller = sharper
+/// edges + slower render. 0.125 mm keeps a 100×60 mm board under
+/// ~400 k cells, which morphology + RLE chew through in ~20 ms in
+/// release.
+const POUR_GRID_MM: f64 = 0.125;
+/// Minimum continuous-copper strip width the pour will tolerate,
+/// in mm. Slivers of pour below this width are removed by a
+/// morphological CLOSE on the void grid (dilate-then-erode by half
+/// the strip). Roughly matches what KiCad calls "min copper width".
+const POUR_MIN_STRIP_MM: f64 = 1.2;
+/// Smallest connected pour island the renderer will keep, in mm².
+/// After identifying the largest pour component as "the main
+/// plane", every OTHER pour blob whose total area is under this
+/// threshold gets converted into void. Matches KiCad's "min
+/// island area".
+const POUR_MIN_ISLAND_MM2: f64 = 30.0;
+
+/// FR4 substrate fill across the board outline. Sits between the
+/// canvas grid and the pour copper so any spot uncovered by the pour
+/// (clearance voids, edge ring) reads as bare PCB.
+fn write_substrate_fill(svg: &mut String, outline: Rect) {
+    let _ = write!(
+        svg,
+        r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="#5a3a1f" fill-opacity="0.55" pointer-events="none"/>"##,
+        x = outline.min.x.to_mm(),
+        y = outline.min.y.to_mm(),
+        w = outline.width().to_mm(),
+        h = outline.height().to_mm(),
+    );
+}
+
+/// Render a copper pour as a black-filled rectangle (the outline
+/// inset by the edge clearance) HIDDEN by an SVG `<mask>` wherever a
+/// foreign-net pad, trace, or via on the pour's layer needs
+/// clearance.
+///
+/// Why a mask, not a `<path>` with `fill-rule="evenodd"`?
+/// Even-odd only flips on RING NESTING. When two cutout rectangles
+/// overlap (e.g. a foreign pad and the foreign trace leaving it),
+/// even-odd counts that as depth-3 → filled → a black "island"
+/// appears exactly where the user expects continuous clearance. SVG
+/// masks solve it directly: `black + black` in the mask is still
+/// black, so overlapping cutouts naturally form one continuous
+/// keepout. Same trick KiCad uses internally for its plot output.
+///
+/// Mask convention: white pixels show the underlying fill, black
+/// pixels hide it. So the mask starts as a fully-white rect (pour
+/// visible everywhere) and we paint BLACK shapes for every
+/// clearance region.
+fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, outline: Rect) {
+    let inset = POUR_EDGE_CLEARANCE_MM;
+    let x0 = outline.min.x.to_mm() + inset;
+    let y0 = outline.min.y.to_mm() + inset;
+    let x1 = outline.max.x.to_mm() - inset;
+    let y1 = outline.max.y.to_mm() - inset;
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let w = x1 - x0;
+    let h = y1 - y0;
+    let layer_tag = match pour.layer {
+        CopperLayer::Top => "t",
+        CopperLayer::Bottom => "b",
+    };
+    let mask_id = format!("pour-mask-{layer_tag}-{}", sanitize_id(&pour.net));
+    let cl = POUR_CLEARANCE_MM;
+
+    // 1. Rasterise every keepout (foreign-net pad/trace/via) into a
+    //    boolean grid. `void[i]` = true means "pour copper does NOT
+    //    appear in this cell".
+    let cell = POUR_GRID_MM;
+    let cols = ((w / cell).ceil() as usize).max(1);
+    let rows = ((h / cell).ceil() as usize).max(1);
+    let mut void = vec![false; cols * rows];
+
+    let cell_x = |i: usize| x0 + (i as f64 + 0.5) * cell;
+    let cell_y = |j: usize| y0 + (j as f64 + 0.5) * cell;
+
+    let mut mark_rect = |grid: &mut [bool], rx: f64, ry: f64, rw: f64, rh: f64| {
+        let i0 = (((rx - x0) / cell).floor() as i64).max(0) as usize;
+        let i1 = (((rx + rw - x0) / cell).ceil() as i64).max(0) as usize;
+        let j0 = (((ry - y0) / cell).floor() as i64).max(0) as usize;
+        let j1 = (((ry + rh - y0) / cell).ceil() as i64).max(0) as usize;
+        for j in j0..j1.min(rows) {
+            for i in i0..i1.min(cols) {
+                grid[j * cols + i] = true;
+            }
+        }
+    };
+
+    let mut mark_circle = |grid: &mut [bool], cx: f64, cy: f64, r: f64| {
+        let i0 = (((cx - r - x0) / cell).floor() as i64).max(0) as usize;
+        let i1 = (((cx + r - x0) / cell).ceil() as i64).max(0) as usize;
+        let j0 = (((cy - r - y0) / cell).floor() as i64).max(0) as usize;
+        let j1 = (((cy + r - y0) / cell).ceil() as i64).max(0) as usize;
+        let r2 = r * r;
+        for j in j0..j1.min(rows) {
+            for i in i0..i1.min(cols) {
+                let dx = cell_x(i) - cx;
+                let dy = cell_y(j) - cy;
+                if dx * dx + dy * dy <= r2 {
+                    grid[j * cols + i] = true;
+                }
+            }
+        }
+    };
+
+    let mut mark_segment = |grid: &mut [bool], sx: f64, sy: f64, ex: f64, ey: f64, half: f64| {
+        let xmin = sx.min(ex) - half;
+        let xmax = sx.max(ex) + half;
+        let ymin = sy.min(ey) - half;
+        let ymax = sy.max(ey) + half;
+        let i0 = (((xmin - x0) / cell).floor() as i64).max(0) as usize;
+        let i1 = (((xmax - x0) / cell).ceil() as i64).max(0) as usize;
+        let j0 = (((ymin - y0) / cell).floor() as i64).max(0) as usize;
+        let j1 = (((ymax - y0) / cell).ceil() as i64).max(0) as usize;
+        let dxs = ex - sx;
+        let dys = ey - sy;
+        let len2 = dxs * dxs + dys * dys;
+        let half2 = half * half;
+        for j in j0..j1.min(rows) {
+            for i in i0..i1.min(cols) {
+                let px = cell_x(i);
+                let py = cell_y(j);
+                let t = if len2 > 1e-9 {
+                    (((px - sx) * dxs + (py - sy) * dys) / len2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let qx = sx + t * dxs;
+                let qy = sy + t * dys;
+                let dx = px - qx;
+                let dy = py - qy;
+                if dx * dx + dy * dy <= half2 {
+                    grid[j * cols + i] = true;
+                }
+            }
+        }
+    };
+
+    for fp in board.footprints_in_order() {
+        for pad in &fp.pads {
+            if pad.layer != pour.layer {
+                continue;
+            }
+            if pad.net.as_deref() == Some(pour.net.as_str()) {
+                continue;
+            }
+            let c = fp.pad_world_center(pad);
+            let (pw, ph) = fp.pad_world_size(pad);
+            mark_rect(
+                &mut void,
+                c.x.to_mm() - pw.to_mm() / 2.0 - cl,
+                c.y.to_mm() - ph.to_mm() / 2.0 - cl,
+                pw.to_mm() + cl * 2.0,
+                ph.to_mm() + cl * 2.0,
+            );
+        }
+    }
+    for trace in board.traces.iter().filter(|t| t.layer == pour.layer) {
+        if trace.net == pour.net {
+            continue;
+        }
+        mark_segment(
+            &mut void,
+            trace.start.x.to_mm(),
+            trace.start.y.to_mm(),
+            trace.end.x.to_mm(),
+            trace.end.y.to_mm(),
+            trace.width.to_mm() / 2.0 + cl,
+        );
+    }
+    for via in &board.vias {
+        if via.net == pour.net {
+            continue;
+        }
+        mark_circle(
+            &mut void,
+            via.position.x.to_mm(),
+            via.position.y.to_mm(),
+            via.diameter.to_mm() / 2.0 + cl,
+        );
+    }
+
+    // 2. Morphological CLOSE on the void: dilate by R, then erode
+    //    by R. Closes every pour-copper sliver narrower than 2*R
+    //    cells = `POUR_MIN_STRIP_MM`. CLOSE-on-void is equivalent
+    //    to OPEN-on-pour (de Morgan), so this eats unmanufacturable
+    //    strips of pour without growing the legitimate keepouts.
+    let r_cells = ((POUR_MIN_STRIP_MM * 0.5) / cell).round() as usize;
+    if r_cells > 0 {
+        let mut tmp = vec![false; cols * rows];
+        morph_dilate(&void, &mut tmp, cols, rows, r_cells);
+        morph_erode(&tmp, &mut void, cols, rows, r_cells);
+    }
+
+    // 2b. Find the LARGEST connected pour component (the "main
+    //     plane") and prune any other component whose area is
+    //     below `POUR_MIN_ISLAND_MM2` mm². Components that touch a
+    //     same-net pad are protected (the pad needs the surrounding
+    //     pour copper to read as electrically connected to GND).
+    //     This avoids the previous approach's over-aggressive
+    //     dilation that fragmented the central copper of densely
+    //     populated ICs.
+    let mut protect = vec![false; cols * rows];
+    for fp in board.footprints_in_order() {
+        for pad in &fp.pads {
+            if pad.layer != pour.layer {
+                continue;
+            }
+            if pad.net.as_deref() != Some(pour.net.as_str()) {
+                continue;
+            }
+            let c = fp.pad_world_center(pad);
+            let (pw, ph) = fp.pad_world_size(pad);
+            mark_rect(
+                &mut protect,
+                c.x.to_mm() - pw.to_mm() / 2.0 - cl,
+                c.y.to_mm() - ph.to_mm() / 2.0 - cl,
+                pw.to_mm() + cl * 2.0,
+                ph.to_mm() + cl * 2.0,
+            );
+        }
+    }
+
+    let min_cells = (POUR_MIN_ISLAND_MM2 / (cell * cell)).round() as usize;
+    prune_pour_islands(&mut void, &protect, cols, rows, min_cells);
+
+    // 3. Open the SVG mask. Its pixel space is the pour rect.
+    //    White = pour visible; black = pour hidden (void).
+    let _ = write!(
+        svg,
+        r##"<defs><mask id="{mask_id}" maskUnits="userSpaceOnUse" x="{x0:.3}" y="{y0:.3}" width="{w:.3}" height="{h:.3}"><rect x="{x0:.3}" y="{y0:.3}" width="{w:.3}" height="{h:.3}" fill="white"/>"##,
+    );
+
+    // 4. Run-length encode horizontal void runs into black rects.
+    //    Most rows have only a handful of runs; for an N-component
+    //    board this is typically a few thousand rects total.
+    for j in 0..rows {
+        let row_y = y0 + j as f64 * cell;
+        let mut i = 0usize;
+        while i < cols {
+            if !void[j * cols + i] {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < cols && void[j * cols + i] {
+                i += 1;
+            }
+            let rx = x0 + start as f64 * cell;
+            let rw = (i - start) as f64 * cell;
+            let _ = write!(
+                svg,
+                r##"<rect x="{rx:.3}" y="{ry:.3}" width="{rw:.3}" height="{rh:.3}" fill="black"/>"##,
+                ry = row_y,
+                rh = cell,
+            );
+        }
+    }
+
+    let _ = write!(svg, "</mask></defs>");
+
+    // 5. The pour itself: a dark rectangle filling the outline-
+    //    inset area, masked by the rasterised void above.
+    let _ = write!(
+        svg,
+        r##"<rect x="{x0:.3}" y="{y0:.3}" width="{w:.3}" height="{h:.3}" fill="#0e1116" fill-opacity="0.78" mask="url(#{mask_id})" pointer-events="none"/>"##,
+    );
+}
+
+/// 4-neighbour connected-component analysis on the pour (= non-void
+/// cells in `void`). The largest component is treated as the "main
+/// pour plane" and kept untouched. Every OTHER component is pruned
+/// (turned into void) UNLESS:
+///   * it touches a cell in `protect` (a same-net pad needing the
+///     pour copper to remain), OR
+///   * its area is at least `min_cells` (large enough that it is
+///     probably an intentional secondary pour region).
+fn prune_pour_islands(
+    void: &mut [bool],
+    protect: &[bool],
+    cols: usize,
+    rows: usize,
+    min_cells: usize,
+) {
+    let n = cols * rows;
+    // First pass: label every pour cell with a component id and
+    // record per-component size + protected-flag.
+    let mut comp = vec![u32::MAX; n];
+    let mut sizes: Vec<usize> = Vec::new();
+    let mut prot: Vec<bool> = Vec::new();
+    let mut stack: Vec<usize> = Vec::with_capacity(64);
+    for start in 0..n {
+        if void[start] || comp[start] != u32::MAX {
+            continue;
+        }
+        let id = sizes.len() as u32;
+        sizes.push(0);
+        prot.push(false);
+        stack.clear();
+        stack.push(start);
+        comp[start] = id;
+        while let Some(idx) = stack.pop() {
+            sizes[id as usize] += 1;
+            if protect[idx] {
+                prot[id as usize] = true;
+            }
+            let i = idx % cols;
+            let j = idx / cols;
+            let mut push = |ni: usize, nj: usize, comp: &mut [u32], stack: &mut Vec<usize>| {
+                let nidx = nj * cols + ni;
+                if !void[nidx] && comp[nidx] == u32::MAX {
+                    comp[nidx] = id;
+                    stack.push(nidx);
+                }
+            };
+            if i + 1 < cols {
+                push(i + 1, j, &mut comp, &mut stack);
+            }
+            if i > 0 {
+                push(i - 1, j, &mut comp, &mut stack);
+            }
+            if j + 1 < rows {
+                push(i, j + 1, &mut comp, &mut stack);
+            }
+            if j > 0 {
+                push(i, j - 1, &mut comp, &mut stack);
+            }
+        }
+    }
+
+    // Find the biggest component → that's the main plane.
+    let main = sizes
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, s)| **s)
+        .map(|(i, _)| i as u32);
+    let Some(main) = main else { return };
+
+    // Second pass: prune every cell whose component is neither the
+    // main plane, nor protected, nor large enough to be intentional.
+    for idx in 0..n {
+        let id = comp[idx];
+        if id == u32::MAX {
+            continue;
+        }
+        if id == main {
+            continue;
+        }
+        let id_u = id as usize;
+        if prot[id_u] {
+            continue;
+        }
+        if sizes[id_u] >= min_cells {
+            continue;
+        }
+        void[idx] = true;
+    }
+}
+
+/// Output[i,j] = true iff any cell within `r` of (i,j) in `input` is
+/// true. Separable two-pass implementation: horizontal max into a
+/// scratch buffer, then vertical max into `output`.
+fn morph_dilate(input: &[bool], output: &mut [bool], cols: usize, rows: usize, r: usize) {
+    let mut scratch = vec![false; cols * rows];
+    // Horizontal pass.
+    for j in 0..rows {
+        for i in 0..cols {
+            let lo = i.saturating_sub(r);
+            let hi = (i + r + 1).min(cols);
+            let mut any = false;
+            for k in lo..hi {
+                if input[j * cols + k] {
+                    any = true;
+                    break;
+                }
+            }
+            scratch[j * cols + i] = any;
+        }
+    }
+    // Vertical pass.
+    for j in 0..rows {
+        let lo = j.saturating_sub(r);
+        let hi = (j + r + 1).min(rows);
+        for i in 0..cols {
+            let mut any = false;
+            for k in lo..hi {
+                if scratch[k * cols + i] {
+                    any = true;
+                    break;
+                }
+            }
+            output[j * cols + i] = any;
+        }
+    }
+}
+
+/// Output[i,j] = true iff every cell within `r` of (i,j) in `input`
+/// is true. Same separable structure as `morph_dilate` with `all`
+/// in place of `any`.
+fn morph_erode(input: &[bool], output: &mut [bool], cols: usize, rows: usize, r: usize) {
+    let mut scratch = vec![true; cols * rows];
+    for j in 0..rows {
+        for i in 0..cols {
+            let lo = i.saturating_sub(r);
+            let hi = (i + r + 1).min(cols);
+            let mut all = true;
+            for k in lo..hi {
+                if !input[j * cols + k] {
+                    all = false;
+                    break;
+                }
+            }
+            scratch[j * cols + i] = all;
+        }
+    }
+    for j in 0..rows {
+        let lo = j.saturating_sub(r);
+        let hi = (j + r + 1).min(rows);
+        for i in 0..cols {
+            let mut all = true;
+            for k in lo..hi {
+                if !scratch[k * cols + i] {
+                    all = false;
+                    break;
+                }
+            }
+            output[j * cols + i] = all;
+        }
+    }
+}
+
+/// Lowercase ASCII letters/digits/dashes — anything else becomes `_`.
+/// Used to slugify the pour's net name for the SVG mask id.
+fn sanitize_id(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push_str("net");
+    }
+    out
 }
 
 fn write_rect_stroke(svg: &mut String, rect: Rect, stroke: &str, width_mm: f64) {

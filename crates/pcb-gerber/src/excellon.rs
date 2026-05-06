@@ -20,9 +20,15 @@ pub fn write(board: &Board, plated: bool, w: &mut impl Write) -> io::Result<()> 
     writeln!(w, "METRIC,LZ,000.000")?;
 
     if plated {
-        // Group vias by drill size; emit one tool per group.
+        // Group vias by drill size; emit one tool per group. Orphan
+        // vias (no surviving same-net trace approaches them) are
+        // dropped — drilling a hole the fab would never use.
+        let orphan_vias = board.orphan_via_ids();
         let mut groups: BTreeMap<i64, Vec<&pcb_core::Via>> = BTreeMap::new();
         for via in &board.vias {
+            if orphan_vias.contains(&via.id) {
+                continue;
+            }
             groups.entry(via.drill.0).or_default().push(via);
         }
         for (i, drill_nm) in groups.keys().enumerate() {

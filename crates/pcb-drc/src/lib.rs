@@ -12,6 +12,11 @@
 //!   at least `edge_clearance` inside the board outline.
 //! - **UnconnectedPad**: a pad declares a net but no copper item of
 //!   that net touches it — usually means the router gave up.
+//! - **SmallComponentDangling**: a footprint with fewer than 8 pads
+//!   has at least one pad that is either unrouted or carries no net at
+//!   all. Surfaces the kind of dangling resistor / cap / 2-pin module
+//!   pad that the per-pad UnconnectedPad warning would also catch, but
+//!   raises it once per component so the agent sees a tight summary.
 //!
 //! Pads are axis-aligned in world coords because we only model 90°
 //! rotations; this lets the geometry collapse to AABB-vs-AABB and
@@ -19,7 +24,7 @@
 
 use serde::Serialize;
 
-use pcb_core::{Board, CopperLayer, Footprint, Length, Pad, Rect, Trace};
+use pcb_core::{Board, CopperLayer, Footprint, Length, Pad, Pour, Rect, Trace};
 
 #[derive(Debug, Clone)]
 pub struct DrcOptions {
@@ -59,6 +64,7 @@ pub enum ViolationKind {
     UnconnectedPad,
     NarrowTrace,
     SmallDrill,
+    SmallComponentDangling,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +108,7 @@ pub fn run(board: &Board, opts: &DrcOptions) -> DrcReport {
         check_edge(board, &pads, outline, opts, &mut report);
     }
     check_unconnected_pads(board, &pads, &mut report);
+    check_small_component_dangling(board, &pads, &mut report);
     check_narrow_traces(board, opts, &mut report);
     check_small_drills(board, opts, &mut report);
     report
@@ -115,6 +122,10 @@ struct PadGeom<'a> {
     layer: CopperLayer,
     rect: Rect,
     net: Option<&'a str>,
+    /// Mirrors `Footprint::edge_mounted`. The edge-clearance check
+    /// skips these pads — their job is to sit ON the outline so a
+    /// USB-C cable, antenna, or screwdriver can reach them.
+    edge_mounted: bool,
 }
 
 impl PadGeom<'_> {
@@ -133,6 +144,7 @@ fn collect_pad_geometry(board: &Board) -> Vec<PadGeom<'_>> {
                 layer: pad.layer,
                 rect: pad_world_rect(fp, pad),
                 net: pad.net.as_deref(),
+                edge_mounted: fp.edge_mounted,
             });
         }
     }
@@ -286,6 +298,14 @@ fn check_edge(
         inside_x0.min(inside_x1).min(inside_y0).min(inside_y1)
     };
     for pad in pads {
+        if pad.edge_mounted {
+            // USB-C connectors, screw terminals, header breakouts and
+            // similar parts are deliberately placed flush to the
+            // outline; the edge-clearance rule does not apply to
+            // them. The placement validator already checks that the
+            // pad bbox sits at the outline.
+            continue;
+        }
         let r = pad.rect;
         let gap = edge_gap(r.min.x.to_mm(), r.min.y.to_mm(), r.max.x.to_mm(), r.max.y.to_mm());
         if gap + 1e-6 < clr {
@@ -344,10 +364,12 @@ fn check_unconnected_pads(board: &Board, pads: &[PadGeom], report: &mut DrcRepor
         // Acceptable: another same-net pad on the same layer overlaps
         // (rare, would mean pads butted together) OR a trace endpoint
         // of the same net touches the pad rect on the same layer OR
-        // a via on this net sits on top (any layer).
+        // a via on this net sits on top (any layer) OR the pad lies
+        // on a copper pour for the same net on the same layer.
         let touched = pad_has_same_net_neighbour(pads, pad)
             || trace_touches_pad(board, pad, net)
-            || via_touches_pad(board, pad, net);
+            || via_touches_pad(board, pad, net)
+            || pour_covers_pad(&board.pours, pad, net);
         if !touched {
             let p = pad_center(pad.rect);
             report.push(Violation {
@@ -359,6 +381,59 @@ fn check_unconnected_pads(board: &Board, pads: &[PadGeom], report: &mut DrcRepor
                 involved: vec![pad.label()],
             });
         }
+    }
+}
+
+/// Threshold below which a footprint is considered a "small" component
+/// for the dangling-pad heuristic. Two-pin passives, three-pin SSRs,
+/// breakout connectors, etc. should have every pad wired up; an ESP32
+/// module legitimately has many unused GPIOs and is excluded.
+const SMALL_COMPONENT_PAD_LIMIT: usize = 8;
+
+fn check_small_component_dangling(board: &Board, pads: &[PadGeom], report: &mut DrcReport) {
+    for fp in board.footprints.values() {
+        if fp.pads.len() >= SMALL_COMPONENT_PAD_LIMIT {
+            continue;
+        }
+        let mut dangling: Vec<String> = Vec::new();
+        for fp_pad in &fp.pads {
+            let connected = match &fp_pad.net {
+                None => false,
+                Some(net) => pads
+                    .iter()
+                    .find(|p| {
+                        p.fp_reference == fp.reference
+                            && p.pad_number == fp_pad.number.as_str()
+                    })
+                    .is_some_and(|pg| {
+                        pad_has_same_net_neighbour(pads, pg)
+                            || trace_touches_pad(board, pg, net)
+                            || via_touches_pad(board, pg, net)
+                            || pour_covers_pad(&board.pours, pg, net)
+                    }),
+            };
+            if !connected {
+                dangling.push(format!("{}.{}", fp.reference, fp_pad.number));
+            }
+        }
+        if dangling.is_empty() {
+            continue;
+        }
+        let cx = fp.position.x.to_mm();
+        let cy = fp.position.y.to_mm();
+        report.push(Violation {
+            kind: ViolationKind::SmallComponentDangling,
+            severity: Severity::Warning,
+            message: format!(
+                "{} ({} pads) has dangling pad(s): {}",
+                fp.reference,
+                fp.pads.len(),
+                dangling.join(", ")
+            ),
+            x_mm: cx,
+            y_mm: cy,
+            involved: dangling,
+        });
     }
 }
 
@@ -400,6 +475,15 @@ fn trace_touches_pad(board: &Board, pad: &PadGeom, net: &str) -> bool {
         }
     }
     false
+}
+
+/// A pour with `net` filling `pad.layer` is treated as electrical
+/// ground for any pad on that net + layer. Cross-layer pads need a
+/// via to reach the pour — that case is handled by `via_touches_pad`.
+fn pour_covers_pad(pours: &[Pour], pad: &PadGeom, net: &str) -> bool {
+    pours
+        .iter()
+        .any(|p| p.net == net && p.layer == pad.layer)
 }
 
 fn via_touches_pad(board: &Board, pad: &PadGeom, net: &str) -> bool {

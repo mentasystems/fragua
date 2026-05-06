@@ -5,7 +5,7 @@
 //! all the design reasoning; tools are pure data primitives.
 
 use pcb_core::schematic::{Net, NetConnection, PinSide, SchPin, Symbol, SymbolKind};
-use pcb_core::{ActivityLevel, CopperLayer, Footprint, Length, Pad, Point, Project, Trace, Via};
+use pcb_core::{ActivityLevel, CopperLayer, Footprint, Length, Pad, Point, Pour, Project, Trace, Via};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -113,6 +113,12 @@ ROUTING:\n\
   via NET X Y [drill=N] [diameter=N]           — manual via\n\
   delete-trace ID                              — id from `snap` structured data\n\
   delete-via ID\n\
+  pour NET top|bottom                          — declare a copper pour (ground/power plane); pads\n\
+                                                 of NET on that layer count as connected without\n\
+                                                 a routed trace. Cross-layer pads still need a via.\n\
+                                                 Drop a `pour GND bottom` early on dense boards so\n\
+                                                 the router does not have to thread GND everywhere.\n\
+  clear-pour NET top|bottom                    — remove a pour\n\
 \n\
 DRC / EXPORT:\n\
   drc [clearance=N] [edge=N] [trace_width=N] [drill=N]\n\
@@ -201,6 +207,8 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "route.add_via" => tool_route_add_via(project, args),
         "route.clear" => tool_route_clear(project),
         "route.run" => tool_route_run(project, args),
+        "pour.add" => tool_pour_add(project, args),
+        "pour.remove" => tool_pour_remove(project, args),
         "drc.run" => tool_drc_run(project, args),
         "output.fab_pack" => tool_output_fab_pack(project, args),
         _ => Err(ToolError {
@@ -407,6 +415,8 @@ struct PlacementInput {
 #[derive(Debug, Deserialize)]
 struct PadInput {
     number: String,
+    #[serde(default)]
+    name: String,
     x_mm: f64,
     y_mm: f64,
     w_mm: f64,
@@ -446,6 +456,7 @@ fn tool_placement_add(project: &Project, args: &Value) -> Result<Value, ToolErro
         .into_iter()
         .map(|p| Pad {
             number: p.number,
+            name: p.name,
             offset: Point::new(Length::from_mm(p.x_mm), Length::from_mm(p.y_mm)),
             size: (Length::from_mm(p.w_mm), Length::from_mm(p.h_mm)),
             layer: p.layer.into(),
@@ -1017,9 +1028,19 @@ fn tool_palette_add(project: &Project, args: &Value) -> Result<Value, ToolError>
                 .pads
                 .iter()
                 .map(|pad_plan| {
-                    let net = sch.net_for_pin(symbol.id, &pad_plan.number).map(str::to_string);
+                    let net = sch
+                        .net_for_pin(symbol.id, &pad_plan.number)
+                        .or_else(|| {
+                            if pad_plan.name.is_empty() {
+                                None
+                            } else {
+                                sch.net_for_pin(symbol.id, &pad_plan.name)
+                            }
+                        })
+                        .map(str::to_string);
                     Pad {
                         number: pad_plan.number.clone(),
+                        name: pad_plan.name.clone(),
                         offset: Point::new(
                             Length::from_mm(pad_plan.x_mm),
                             Length::from_mm(pad_plan.y_mm),
@@ -1347,9 +1368,24 @@ fn tool_palette_add_from_library(project: &Project, args: &Value) -> Result<Valu
             symbol.description.clone()
         };
         let pads: Vec<Pad> = entry.pads.iter().map(|p| {
-            let net = sch.net_for_pin(symbol.id, &p.number).map(str::to_string);
+            // Library pads are numbered ("1", "2", ...) but the
+            // schematic side may use names ("A"/"K" for LEDs, "VBAT"
+            // for power pins). Look up by number first, then by the
+            // pad's name so net wiring survives across either
+            // convention.
+            let net = sch
+                .net_for_pin(symbol.id, &p.number)
+                .or_else(|| {
+                    if p.name.is_empty() {
+                        None
+                    } else {
+                        sch.net_for_pin(symbol.id, &p.name)
+                    }
+                })
+                .map(str::to_string);
             Pad {
                 number: p.number.clone(),
+                name: p.name.clone(),
                 offset: Point::new(Length::from_mm(p.x_mm), Length::from_mm(p.y_mm)),
                 size: (Length::from_mm(p.w_mm), Length::from_mm(p.h_mm)),
                 layer: input.layer.into(),
@@ -1567,6 +1603,8 @@ fn tool_route_delete_via(project: &Project, args: &Value) -> Result<Value, ToolE
 #[derive(Debug, Deserialize)]
 struct PadPlan {
     number: String,
+    #[serde(default)]
+    name: String,
     x_mm: f64,
     y_mm: f64,
     w_mm: f64,
@@ -1631,6 +1669,51 @@ fn tool_route_clear(project: &Project) -> Result<Value, ToolError> {
     project.clear_routing();
     project.log(ActivityLevel::Info, "route.clear");
     Ok(text_result("Cleared all traces and vias").into())
+}
+
+#[derive(Debug, Deserialize)]
+struct PourInput {
+    net: String,
+    layer: LayerInput,
+}
+
+fn tool_pour_add(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: PourInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("pour.add: {e}")))?;
+    let layer: CopperLayer = input.layer.into();
+    project.add_pour(Pour {
+        net: input.net.clone(),
+        layer,
+    });
+    project.log(
+        ActivityLevel::Info,
+        format!("pour.add {} on {:?}", input.net, layer),
+    );
+    Ok(text_result(format!(
+        "Pour added: net={} layer={:?}",
+        input.net, layer
+    ))
+    .with_data(json!({"net": input.net, "layer": layer_to_str(layer)})))
+}
+
+fn tool_pour_remove(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: PourInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("pour.remove: {e}")))?;
+    let layer: CopperLayer = input.layer.into();
+    let removed = project.remove_pour(&input.net, layer);
+    Ok(text_result(if removed {
+        format!("Pour removed: net={} layer={:?}", input.net, layer)
+    } else {
+        format!("No pour for net={} layer={:?}", input.net, layer)
+    })
+    .with_data(json!({"removed": removed})))
+}
+
+fn layer_to_str(layer: CopperLayer) -> &'static str {
+    match layer {
+        CopperLayer::Top => "top",
+        CopperLayer::Bottom => "bottom",
+    }
 }
 
 #[derive(Debug, Deserialize)]

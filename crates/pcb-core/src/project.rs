@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::board::{Board, Footprint, Id, Trace, Via};
+use crate::board::{Board, CopperLayer, Footprint, Id, Pour, Trace, Via};
 use crate::event::{ActivityLevel, Event, EventBus};
 use crate::geometry::{Point, Rect};
 use crate::units::Length;
@@ -37,6 +37,8 @@ enum Mutation {
     RemoveTrace(Id),
     AddVia(Via),
     RemoveVia(Id),
+    AddPour(Pour),
+    RemovePour { net: String, layer: CopperLayer },
     ClearRouting,
     ClearNetRouting { net: String },
     AddSymbol(Symbol),
@@ -197,6 +199,18 @@ impl Project {
                 let via_count = visible.board.vias.len();
                 drop(visible);
                 self.bus.publish(Event::RoutingChanged { trace_count, via_count });
+            }
+            Mutation::AddPour(pour) => {
+                visible.board.add_pour(pour);
+                let count = visible.board.pours.len();
+                drop(visible);
+                self.bus.publish(Event::PoursChanged { count });
+            }
+            Mutation::RemovePour { net, layer } => {
+                visible.board.remove_pour(&net, layer);
+                let count = visible.board.pours.len();
+                drop(visible);
+                self.bus.publish(Event::PoursChanged { count });
             }
             Mutation::ClearRouting => {
                 visible.board.clear_routing();
@@ -375,6 +389,31 @@ impl Project {
         }
         self.queue(Mutation::AddVia(via));
         id
+    }
+
+    /// Add a copper pour. Replaces any existing pour for the same
+    /// `(net, layer)` so a second call is idempotent.
+    pub fn add_pour(&self, pour: Pour) {
+        {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.board.add_pour(pour.clone());
+        }
+        self.queue(Mutation::AddPour(pour));
+    }
+
+    /// Remove a pour by `(net, layer)`. Returns true if one was removed.
+    pub fn remove_pour(&self, net: &str, layer: CopperLayer) -> bool {
+        let removed = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.board.remove_pour(net, layer)
+        };
+        if removed {
+            self.queue(Mutation::RemovePour {
+                net: net.to_string(),
+                layer,
+            });
+        }
+        removed
     }
 
     /// Drop everything: schematic, palette, footprints, traces, vias.
@@ -681,9 +720,48 @@ impl Project {
             }
         }
         inner.schematic.set_net(net.clone());
+        // Push the net assignment down to any already-placed footprint
+        // whose schematic symbol is part of this net. Without this,
+        // wiring nets AFTER `place` left footprint pads with `net =
+        // None`, even though the schematic was correct — the router
+        // and the DRC then both saw those pads as unrouted.
+        Self::propagate_net_to_pads(&mut inner, &net);
         drop(inner);
         self.queue(Mutation::SetNet(net));
         Ok(())
+    }
+
+    /// Walk every footprint in `inner.board` and assign `pad.net` for
+    /// any pad addressed (by pad NUMBER, or by pad NAME when number
+    /// fails) by `net.connections`. Idempotent — overwrites previous
+    /// assignments for the same pad on the same net.
+    fn propagate_net_to_pads(inner: &mut ProjectInner, net: &Net) {
+        // Resolve each connection's target pad number on the
+        // matching footprint. Pad NUMBER is the canonical address;
+        // pad NAME is the fallback (LED's "A"/"K", header pin
+        // labels). Built once per call so we don't re-scan.
+        let resolved: Vec<(String, String)> = net
+            .connections
+            .iter()
+            .filter_map(|c| {
+                let sym = inner.schematic.symbols.get(&c.symbol_id)?;
+                Some((sym.reference.clone(), c.pin_number.clone()))
+            })
+            .collect();
+        for fp in inner.board.footprints.values_mut() {
+            for (sym_ref, pin_addr) in &resolved {
+                if &fp.reference != sym_ref {
+                    continue;
+                }
+                if let Some(pad) = fp
+                    .pads
+                    .iter_mut()
+                    .find(|p| &p.number == pin_addr || &p.name == pin_addr)
+                {
+                    pad.net = Some(net.name.clone());
+                }
+            }
+        }
     }
 }
 

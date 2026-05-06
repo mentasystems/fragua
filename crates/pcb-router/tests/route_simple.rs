@@ -7,6 +7,7 @@ use pcb_router::{route, Outcome, RouteOptions};
 fn pad(num: &str, off_x: f64, off_y: f64, net: Option<&str>) -> Pad {
     Pad {
         number: num.into(),
+        name: String::new(),
         offset: Point::new(Length::from_mm(off_x), Length::from_mm(off_y)),
         size: (Length::from_mm(1.0), Length::from_mm(1.2)),
         layer: CopperLayer::Top,

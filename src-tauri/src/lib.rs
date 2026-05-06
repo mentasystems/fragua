@@ -112,16 +112,95 @@ fn reset_route(state: State<'_, AppState>) {
 }
 
 /// List every entry in the user's component library — same shape as the
-/// MCP `library.list` tool but routed through Tauri so the UI panel can
-/// reuse the data without going via the MCP TCP socket.
+/// Library entries USED by the current project — every key referenced
+/// either by a placed footprint or by something still in the palette.
+/// The disk-backed library is shared across projects but the UI panel
+/// is scoped to "what this project actually uses". A future "global
+/// catalog" pane will expose the full library for browsing.
 #[tauri::command]
 fn library_state(state: State<'_, AppState>) -> serde_json::Value {
+    use std::collections::HashSet;
+    let snap = state.project.read();
+    let mut used: HashSet<String> = HashSet::new();
+    for fp in snap.board().footprints.values() {
+        if !fp.key.is_empty() {
+            used.insert(fp.key.clone());
+        }
+    }
+    for fp in snap.palette() {
+        if !fp.key.is_empty() {
+            used.insert(fp.key.clone());
+        }
+    }
+    drop(snap);
     let entries = state.project.library().list();
-    let items: Vec<serde_json::Value> = entries.iter().map(|e| serde_json::json!({
+    let items: Vec<serde_json::Value> = entries
+        .iter()
+        .filter(|e| used.contains(&e.key))
+        .map(|e| serde_json::json!({
+            "key": e.key,
+            "description": e.description,
+            "default_value": e.default_value,
+            "default_rotation_deg": e.default_rotation_deg,
+            "edge_mounted": e.edge_mounted,
+            "pad_count": e.pads.len(),
+            "attachments": e.attachments.iter().map(|a| serde_json::json!({
+                "id": a.id,
+                "kind": a.kind,
+                "filename": a.filename,
+                "mime": a.mime,
+                "added_at": a.added_at,
+            })).collect::<Vec<_>>(),
+            "created_at": e.created_at,
+        }))
+        .collect();
+    serde_json::json!({ "entries": items })
+}
+
+/// All the info the board info-modal needs about one placed
+/// footprint: schematic-side identity (reference, value, description,
+/// position, rotation, edge_mounted) plus the linked library entry
+/// (key, description, pads, attachments). The frontend then fetches
+/// each photo attachment separately via `library_attachment_data_uri`.
+#[tauri::command]
+fn component_info(
+    state: State<'_, AppState>,
+    reference: String,
+) -> Result<serde_json::Value, String> {
+    let snap = state.project.read();
+    let fp = snap
+        .board()
+        .footprints
+        .values()
+        .find(|f| f.reference == reference)
+        .ok_or_else(|| format!("no footprint named {reference}"))?
+        .clone();
+    drop(snap);
+
+    let lib_entry = if fp.key.is_empty() {
+        None
+    } else {
+        state.project.library().find(&fp.key)
+    };
+
+    let pads: Vec<serde_json::Value> = fp
+        .pads
+        .iter()
+        .map(|p| serde_json::json!({
+            "number": p.number,
+            "name": p.name,
+            "net": p.net,
+            "layer": match p.layer {
+                pcb_core::CopperLayer::Top => "top",
+                pcb_core::CopperLayer::Bottom => "bottom",
+            },
+        }))
+        .collect();
+
+    let library = lib_entry.map(|e| serde_json::json!({
         "key": e.key,
         "description": e.description,
         "default_value": e.default_value,
-        "default_rotation_deg": e.default_rotation_deg,
         "edge_mounted": e.edge_mounted,
         "pad_count": e.pads.len(),
         "attachments": e.attachments.iter().map(|a| serde_json::json!({
@@ -129,11 +208,21 @@ fn library_state(state: State<'_, AppState>) -> serde_json::Value {
             "kind": a.kind,
             "filename": a.filename,
             "mime": a.mime,
-            "added_at": a.added_at,
         })).collect::<Vec<_>>(),
-        "created_at": e.created_at,
-    })).collect();
-    serde_json::json!({ "entries": items })
+    }));
+
+    Ok(serde_json::json!({
+        "reference": fp.reference,
+        "key": fp.key,
+        "value": fp.value,
+        "description": fp.description,
+        "rotation_deg": fp.rotation,
+        "edge_mounted": fp.edge_mounted,
+        "x_mm": fp.position.x.to_mm(),
+        "y_mm": fp.position.y.to_mm(),
+        "pads": pads,
+        "library": library,
+    }))
 }
 
 /// Read one library attachment as a base64-encoded data URI so the
@@ -383,6 +472,7 @@ fn add_demo_resistor(state: State<'_, AppState>) {
         pads: vec![
             Pad {
                 number: "1".into(),
+                name: String::new(),
                 offset: Point::new(Length::from_mm(-1.0), Length::ZERO),
                 size: (Length::from_mm(1.0), Length::from_mm(1.2)),
                 layer: CopperLayer::Top,
@@ -390,6 +480,7 @@ fn add_demo_resistor(state: State<'_, AppState>) {
             },
             Pad {
                 number: "2".into(),
+                name: String::new(),
                 offset: Point::new(Length::from_mm(1.0), Length::ZERO),
                 size: (Length::from_mm(1.0), Length::from_mm(1.2)),
                 layer: CopperLayer::Top,
@@ -440,7 +531,8 @@ pub fn run() {
             run_drc,
             export_fab_pack,
             library_state,
-            library_attachment_data_uri
+            library_attachment_data_uri,
+            component_info
         ])
         .run(tauri::generate_context!())
         .expect("tauri runtime");

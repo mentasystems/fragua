@@ -130,8 +130,25 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     let mut ordered: Vec<_> = nets.into_iter().collect();
     ordered.sort_by_key(|(_, pads)| pads.len());
 
+    // Nets that already have a copper pour on at least one layer
+    // skip the router entirely — the pour itself is the electrical
+    // connection, so adding traces is redundant copper that just
+    // clutters the board.
+    let pour_nets: std::collections::HashSet<String> = board
+        .pours
+        .iter()
+        .map(|p| p.net.clone())
+        .collect();
+
     for (net_name, pad_points) in ordered {
         let net_id = net_id_of[&net_name];
+        if pour_nets.contains(&net_name) {
+            per_net.push((
+                net_name,
+                Outcome::Ok { trace_segments: 0, vias: 0 },
+            ));
+            continue;
+        }
         if pad_points.len() < 2 {
             per_net.push((
                 net_name,

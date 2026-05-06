@@ -344,6 +344,18 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
         "list-palette" => Ok(Cmd { line, tool: "palette.list".into(), args: json!({}) }),
         "clear-palette" => Ok(Cmd { line, tool: "palette.clear".into(), args: json!({}) }),
         "clear-route"  => Ok(Cmd { line, tool: "route.clear".into(), args: json!({}) }),
+        "pour" => {
+            // pour NET LAYER  (LAYER = top|bottom)
+            need_args(line, tokens, 2, "pour NET LAYER")?;
+            Ok(Cmd { line, tool: "pour.add".into(),
+                args: json!({"net": tokens[1], "layer": tokens[2]}) })
+        }
+        "clear-pour" => {
+            // clear-pour NET LAYER
+            need_args(line, tokens, 2, "clear-pour NET LAYER")?;
+            Ok(Cmd { line, tool: "pour.remove".into(),
+                args: json!({"net": tokens[1], "layer": tokens[2]}) })
+        }
 
         "outline" => {
             need_args(line, tokens, 2, "outline W H")?;

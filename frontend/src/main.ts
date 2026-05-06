@@ -95,6 +95,9 @@ root.innerHTML = `
     <h2>library <span id="library-count" class="value">0</span></h2>
     <div class="library-list" id="library-list"></div>
   </div>
+  <div class="info-modal" id="info-modal" hidden>
+    <div class="info-modal-card" id="info-modal-card"></div>
+  </div>
 `;
 
 const els = {
@@ -112,6 +115,8 @@ const els = {
   palette: document.getElementById("palette-strip")!,
   boardW: document.getElementById("board-w")!,
   boardH: document.getElementById("board-h")!,
+  infoModal: document.getElementById("info-modal")!,
+  infoCard: document.getElementById("info-modal-card")!,
 };
 
 type DrcViolation = {
@@ -125,8 +130,6 @@ type DrcViolation = {
 
 let view: View = "board";
 let lastState: ProjectState | null = null;
-let hoveredRef: string | null = null;
-let selectedRef: string | null = null;
 let drcViolations: DrcViolation[] = [];
 
 function setView(v: View) {
@@ -160,13 +163,262 @@ function reportFatal(err: unknown) {
   console.error(err);
 }
 
+/// Per-view viewBox state so a re-render (every project change) does
+/// not blow away the user's pan/zoom. Lazily seeded from whatever the
+/// renderer emits on first paint of each view.
+type ViewBox = { x: number; y: number; w: number; h: number };
+const viewBoxState: Record<View, ViewBox | null> = { board: null, schematic: null };
+
 function paintCanvas(state: ProjectState) {
   els.canvas.innerHTML = view === "schematic" ? state.schematic_svg : state.board_svg;
+  const svg = els.canvas.querySelector("svg") as SVGSVGElement | null;
+  if (svg) {
+    // Capture or restore the per-view viewBox so the user's pan/zoom
+    // survives the paint, even when the SVG itself got rebuilt server-side.
+    const fresh = parseViewBox(svg.getAttribute("viewBox"));
+    if (viewBoxState[view] && fresh) {
+      applyViewBox(svg, viewBoxState[view]!);
+    } else if (fresh) {
+      viewBoxState[view] = fresh;
+    }
+    attachPanZoom(svg);
+  }
   if (view === "board") {
-    attachBoardPointerHandlers();
     paintDrcMarkers();
   }
 }
+
+function parseViewBox(s: string | null): ViewBox | null {
+  if (!s) return null;
+  const parts = s.split(/\s+/).map(parseFloat);
+  if (parts.length !== 4 || parts.some(Number.isNaN)) return null;
+  return { x: parts[0], y: parts[1], w: parts[2], h: parts[3] };
+}
+
+function applyViewBox(svg: SVGSVGElement, vb: ViewBox) {
+  svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+}
+
+/// Click-drag = pan, wheel = zoom around cursor, plain click on a
+/// component → info modal. Operates directly on the SVG `viewBox` so
+/// the pan/zoom is purely cosmetic — no reflow, no server roundtrip.
+function attachPanZoom(svg: SVGSVGElement) {
+  svg.style.cursor = "grab";
+
+  svg.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    svg.setPointerCapture(ev.pointerId);
+    svg.style.cursor = "grabbing";
+    const start = viewBoxState[view] ?? parseViewBox(svg.getAttribute("viewBox"));
+    if (!start) return;
+    const px0 = ev.clientX;
+    const py0 = ev.clientY;
+    const rect = svg.getBoundingClientRect();
+    const sx = start.w / rect.width;
+    const sy = start.h / rect.height;
+    // Walk up to the nearest <g data-board-ref> so a slow click on a
+    // pad still resolves the parent component.
+    const downTarget = ev.target as Element;
+    const refOnDown = downTarget.closest?.("[data-board-ref]") as Element | null;
+    let panned = false;
+    const onMove = (e: PointerEvent) => {
+      const dx = (e.clientX - px0) * sx;
+      const dy = (e.clientY - py0) * sy;
+      // 4 px threshold — small wobble during a click should not pan.
+      if (!panned && Math.hypot(e.clientX - px0, e.clientY - py0) < 4) return;
+      panned = true;
+      const next: ViewBox = { x: start.x - dx, y: start.y - dy, w: start.w, h: start.h };
+      viewBoxState[view] = next;
+      applyViewBox(svg, next);
+    };
+    const onUp = () => {
+      svg.removeEventListener("pointermove", onMove);
+      svg.removeEventListener("pointerup", onUp);
+      svg.removeEventListener("pointercancel", onUp);
+      svg.style.cursor = "grab";
+      if (!panned && refOnDown) {
+        const ref = refOnDown.getAttribute("data-board-ref") ?? "";
+        const key = refOnDown.getAttribute("data-library-key") ?? "";
+        if (ref) void openComponentModal(ref, key);
+      }
+    };
+    svg.addEventListener("pointermove", onMove);
+    svg.addEventListener("pointerup", onUp);
+    svg.addEventListener("pointercancel", onUp);
+  });
+
+  svg.addEventListener(
+    "wheel",
+    (ev) => {
+      ev.preventDefault();
+      const current = viewBoxState[view] ?? parseViewBox(svg.getAttribute("viewBox"));
+      if (!current) return;
+      const rect = svg.getBoundingClientRect();
+      // Cursor in SVG units (anchor of the zoom).
+      const fx = current.x + ((ev.clientX - rect.left) / rect.width) * current.w;
+      const fy = current.y + ((ev.clientY - rect.top) / rect.height) * current.h;
+      // Wheel up → zoom IN (smaller viewBox); wheel down → zoom OUT.
+      const k = Math.exp(ev.deltaY * 0.0015);
+      const minSpan = 1; // mm — don't zoom past ~1 mm per pane.
+      const maxSpan = 5000;
+      const newW = clamp(current.w * k, minSpan, maxSpan);
+      const newH = clamp(current.h * k, minSpan, maxSpan);
+      const next: ViewBox = {
+        x: fx - ((fx - current.x) * newW) / current.w,
+        y: fy - ((fy - current.y) * newH) / current.h,
+        w: newW,
+        h: newH,
+      };
+      viewBoxState[view] = next;
+      applyViewBox(svg, next);
+    },
+    { passive: false },
+  );
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+type ComponentInfo = {
+  reference: string;
+  key: string;
+  value: string;
+  description: string;
+  rotation_deg: number;
+  edge_mounted: boolean;
+  x_mm: number;
+  y_mm: number;
+  pads: { number: string; name: string; net: string | null; layer: string }[];
+  library: {
+    key: string;
+    description: string;
+    default_value: string;
+    edge_mounted: boolean;
+    pad_count: number;
+    attachments: { id: string; kind: string; filename: string; mime: string }[];
+  } | null;
+};
+
+async function openComponentModal(reference: string, key: string) {
+  els.infoCard.innerHTML = `<div class="info-loading">loading ${reference}…</div>`;
+  els.infoModal.removeAttribute("hidden");
+  let info: ComponentInfo;
+  try {
+    info = await invoke<ComponentInfo>("component_info", { reference });
+  } catch (err) {
+    els.infoCard.innerHTML = `<div class="info-error">component_info(${reference}): ${err}</div>`;
+    return;
+  }
+  void key;
+
+  const lib = info.library;
+  const photos = lib?.attachments?.filter((a) => /^image\//.test(a.mime)) ?? [];
+  const padsByLayer = info.pads.reduce<Record<string, number>>((m, p) => {
+    m[p.layer] = (m[p.layer] ?? 0) + 1;
+    return m;
+  }, {});
+
+  const head = `
+    <header>
+      <div>
+        <div class="info-key">${esc(lib?.key || info.key || info.reference)}</div>
+        <div class="info-ref">${esc(info.reference)}${info.value ? ` · ${esc(info.value)}` : ""}</div>
+      </div>
+      <button class="info-close" aria-label="close">×</button>
+    </header>
+  `;
+
+  const dataCol = `
+    <div class="info-data">
+      <section class="info-meta">
+        <div><span class="lbl">position</span><span class="val">${info.x_mm.toFixed(2)}, ${info.y_mm.toFixed(2)} mm</span></div>
+        <div><span class="lbl">rotation</span><span class="val">${info.rotation_deg.toFixed(0)}°</span></div>
+        <div><span class="lbl">edge-mount</span><span class="val">${info.edge_mounted ? "yes" : "no"}</span></div>
+        <div><span class="lbl">pads</span><span class="val">${info.pads.length}${
+          Object.keys(padsByLayer).length > 1
+            ? ` (${Object.entries(padsByLayer).map(([l, n]) => `${n} ${l}`).join(", ")})`
+            : ""
+        }</span></div>
+      </section>
+      ${
+        info.description || lib?.description
+          ? `<section class="info-desc">${esc(info.description || lib?.description || "")}</section>`
+          : ""
+      }
+      <section class="info-pads">
+        <h3>pads</h3>
+        <table>
+          <thead><tr><th>#</th><th>name</th><th>net</th><th>layer</th></tr></thead>
+          <tbody>${info.pads
+            .map(
+              (p) => `<tr>
+              <td>${esc(p.number)}</td>
+              <td>${esc(p.name || "—")}</td>
+              <td>${esc(p.net || "—")}</td>
+              <td>${esc(p.layer)}</td>
+            </tr>`,
+            )
+            .join("")}</tbody>
+        </table>
+      </section>
+    </div>
+  `;
+
+  const photoCol = photos.length > 0
+    ? `<div class="info-photos" id="info-photos"></div>`
+    : `<div class="info-photos empty">no photos</div>`;
+
+  els.infoCard.innerHTML = head + `<div class="info-body">${dataCol}${photoCol}</div>`;
+  els.infoCard.querySelector(".info-close")?.addEventListener("click", closeComponentModal);
+
+  // Lazily fetch the photo attachments — these can be a few hundred
+  // KB each so we kick them off after first paint.
+  if (photos.length > 0 && lib) {
+    const host = els.infoCard.querySelector("#info-photos") as HTMLElement | null;
+    if (host) {
+      for (const a of photos) {
+        try {
+          const uri = await invoke<string>("library_attachment_data_uri", {
+            key: lib.key,
+            attachmentId: a.id,
+          });
+          const img = document.createElement("img");
+          img.src = uri;
+          img.alt = a.filename;
+          img.title = a.filename;
+          host.appendChild(img);
+        } catch (err) {
+          appendActivity("error", `attachment ${a.filename}: ${err}`);
+        }
+      }
+    }
+  }
+}
+
+function closeComponentModal() {
+  els.infoModal.setAttribute("hidden", "");
+  els.infoCard.innerHTML = "";
+}
+
+function esc(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && !els.infoModal.hasAttribute("hidden")) {
+    closeComponentModal();
+  }
+});
+
+els.infoModal.addEventListener("click", (ev) => {
+  if (ev.target === els.infoModal) closeComponentModal();
+});
 
 function paintDrcMarkers() {
   if (drcViolations.length === 0) return;
@@ -230,182 +482,11 @@ function paintPalette(state: ProjectState) {
     `;
     chip.querySelector(".chip-ref")!.textContent = item.reference;
     chip.querySelector(".chip-val")!.textContent = item.value || item.library;
-    attachChipDrag(chip, item.reference);
+    // Read-only render: the palette is informational. Placement is
+    // agent-driven via MCP (`place REF X Y` in the script).
     els.palette.appendChild(chip);
   }
 }
-
-/// Pointer-event drag for palette chips. Robust across webviews; the
-/// HTML5 DnD API has too many ways to silently no-op inside Tauri.
-function attachChipDrag(chip: HTMLElement, reference: string) {
-  chip.addEventListener("pointerdown", (ev) => {
-    ev.preventDefault();
-    setView("board");
-    const ghost = document.createElement("div");
-    ghost.className = "drag-ghost";
-    ghost.textContent = reference;
-    document.body.appendChild(ghost);
-    const moveGhost = (e: PointerEvent) => {
-      ghost.style.left = `${e.clientX + 12}px`;
-      ghost.style.top = `${e.clientY + 12}px`;
-    };
-    moveGhost(ev);
-
-    const onMove = (e: PointerEvent) => moveGhost(e);
-    const onUp = async (e: PointerEvent) => {
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onUp);
-      ghost.remove();
-      // Hit-test: was the drop on the canvas?
-      const target = document.elementFromPoint(e.clientX, e.clientY);
-      if (!target?.closest("#canvas-pane")) return;
-      if (!lastState) return;
-      const mm = clientToBoardMm(lastState, e.clientX, e.clientY);
-      if (!mm) return;
-      try {
-        await invoke("place_from_palette", { reference, xMm: mm.x, yMm: mm.y });
-      } catch (err) {
-        appendActivity("error", `place_from_palette(${reference}): ${err}`);
-      }
-    };
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", onUp);
-  });
-}
-
-/// Translate a clientX/clientY (mouse coords on canvas) into board mm.
-function clientToBoardMm(state: ProjectState, clientX: number, clientY: number): { x: number; y: number } | null {
-  if (!state.outline) return null;
-  const svg = els.canvas.querySelector("svg") as SVGSVGElement | null;
-  if (!svg) return null;
-  const pt = svg.createSVGPoint();
-  pt.x = clientX;
-  pt.y = clientY;
-  const ctm = svg.getScreenCTM();
-  if (!ctm) return null;
-  const local = pt.matrixTransform(ctm.inverse());
-  // Inner <g> uses scale(1,-1); undo it so we get board mm.
-  return { x: local.x, y: -local.y };
-}
-
-/// Drag-to-move for footprints already on the board, plus
-/// drag-to-resize for the outline handles, plus hover tracking so the
-/// "R" keyboard shortcut knows which footprint to rotate.
-function attachBoardPointerHandlers() {
-  const svg = els.canvas.querySelector("svg") as SVGSVGElement | null;
-  if (!svg) return;
-
-  // Track which footprint the cursor is over for keyboard rotation.
-  svg.addEventListener("pointermove", (ev) => {
-    const target = ev.target as Element;
-    const ref = target.closest("[data-board-ref]")?.getAttribute("data-board-ref") ?? null;
-    hoveredRef = ref;
-  });
-  svg.addEventListener("pointerleave", () => { hoveredRef = null; });
-
-  svg.addEventListener("pointerdown", (ev) => {
-    const target = ev.target as Element;
-
-    // Click on a footprint? Select it (also drag-starts below).
-    const refClicked = target.closest("[data-board-ref]")?.getAttribute("data-board-ref") ?? null;
-    if (refClicked) {
-      selectedRef = refClicked;
-    } else {
-      selectedRef = null;
-    }
-
-    // Outline resize handle?
-    const edge = target.closest("[data-resize-edge]")?.getAttribute("data-resize-edge");
-    if (edge && lastState?.outline) {
-      ev.preventDefault();
-      const startOutline = lastState.outline;
-      const start = clientToBoardMm(lastState, ev.clientX, ev.clientY);
-      if (!start) return;
-      let lastSent = 0;
-      const compute = (mx: number, my: number): { w: number; h: number } => {
-        let w = startOutline.w_mm;
-        let h = startOutline.h_mm;
-        switch (edge) {
-          case "right":  w = Math.max(1, mx - startOutline.x_mm); break;
-          case "left":   w = Math.max(1, startOutline.x_mm + startOutline.w_mm - mx); break;
-          case "top":    h = Math.max(1, my - startOutline.y_mm); break;
-          case "bottom": h = Math.max(1, startOutline.y_mm + startOutline.h_mm - my); break;
-        }
-        return { w, h };
-      };
-      const onMove = async (e: PointerEvent) => {
-        const now = performance.now();
-        if (now - lastSent < 50) return;
-        lastSent = now;
-        if (!lastState) return;
-        const mm = clientToBoardMm(lastState, e.clientX, e.clientY);
-        if (!mm) return;
-        const { w, h } = compute(mm.x, mm.y);
-        try { await invoke("set_board_outline", { wMm: w, hMm: h }); } catch { /* */ }
-      };
-      const onUp = async (e: PointerEvent) => {
-        document.removeEventListener("pointermove", onMove);
-        document.removeEventListener("pointerup", onUp);
-        if (!lastState) return;
-        const mm = clientToBoardMm(lastState, e.clientX, e.clientY);
-        if (!mm) return;
-        const { w, h } = compute(mm.x, mm.y);
-        try { await invoke("set_board_outline", { wMm: w, hMm: h }); } catch (err) {
-          appendActivity("error", `resize: ${err}`);
-        }
-      };
-      document.addEventListener("pointermove", onMove);
-      document.addEventListener("pointerup", onUp);
-      // Suppress the rest of the unused-var warning
-      void start;
-      return;
-    }
-
-    // Footprint drag?
-    const ref = target.closest("[data-board-ref]")?.getAttribute("data-board-ref");
-    if (!ref) return;
-    ev.preventDefault();
-    let lastSent = 0;
-    const onMove = async (e: PointerEvent) => {
-      const now = performance.now();
-      if (now - lastSent < 33) return;
-      lastSent = now;
-      if (!lastState) return;
-      const mm = clientToBoardMm(lastState, e.clientX, e.clientY);
-      if (!mm) return;
-      try { await invoke("move_footprint", { reference: ref, xMm: mm.x, yMm: mm.y }); } catch { /* */ }
-    };
-    const onUp = async (e: PointerEvent) => {
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onUp);
-      if (!lastState) return;
-      const mm = clientToBoardMm(lastState, e.clientX, e.clientY);
-      if (!mm) return;
-      try { await invoke("move_footprint", { reference: ref, xMm: mm.x, yMm: mm.y }); } catch (err) {
-        appendActivity("error", `move(${ref}): ${err}`);
-      }
-    };
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", onUp);
-  });
-}
-
-document.addEventListener("keydown", async (ev) => {
-  // Ignore key events from inputs (board size, etc).
-  const target = ev.target as Element | null;
-  if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
-  if (ev.key.toLowerCase() === "r") {
-    const ref = selectedRef ?? hoveredRef;
-    if (!ref) return;
-    ev.preventDefault();
-    const delta = ev.shiftKey ? -90 : 90;
-    try {
-      await invoke("rotate_footprint", { reference: ref, degreesDelta: delta });
-    } catch (err) {
-      appendActivity("error", `rotate(${ref}): ${err}`);
-    }
-  }
-});
 
 async function refresh() {
   const state = await invoke<ProjectState>("project_state");

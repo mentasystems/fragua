@@ -128,6 +128,23 @@ pub fn search(
                 continue;
             }
             let mut step_cost = if move_dir == Dir::Via { via_cost } else { 1 };
+            // "Via in pad" penalty: discourage but don't forbid via
+            // flips that land on a same-net pad cell. Fab houses
+            // (JLCPCB) require a more expensive via-in-pad-fill
+            // process for those, so we'd rather offset the via by a
+            // cell when an alternative exists.
+            if move_dir == Dir::Via {
+                let on_pad = matches!(
+                    grid.get(GridPoint { layer: 0, col: next_p.col, row: next_p.row }),
+                    Cell::NetPad(_)
+                ) || matches!(
+                    grid.get(GridPoint { layer: 1, col: next_p.col, row: next_p.row }),
+                    Cell::NetPad(_)
+                );
+                if on_pad {
+                    step_cost = step_cost.saturating_add(40);
+                }
+            }
             // Bend penalty: same-layer turn that doesn't extend the
             // current run. After a via or from the start node we don't
             // count it (the next move always counts as "new" then).

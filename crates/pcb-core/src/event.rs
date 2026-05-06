@@ -32,6 +32,9 @@ pub enum Event {
     /// Routing (traces + vias) changed in bulk — typically emitted
     /// after a router pass or a manual clear.
     RoutingChanged { trace_count: usize, via_count: usize },
+    /// A copper pour was added or removed. Carries the resulting pour
+    /// count so the UI can re-fetch and re-render.
+    PoursChanged { count: usize },
     /// One frame of an in-progress auto-placement. Streamed several
     /// times per second so the UI can animate components settling.
     PlacementProgress { iteration: u32 },

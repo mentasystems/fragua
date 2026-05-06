@@ -22,6 +22,7 @@ fn footprint(reference: &str, value: &str, x_mm: f64, y_mm: f64) -> Footprint {
         pads: vec![
             Pad {
                 number: "1".into(),
+                name: String::new(),
                 offset: Point::new(Length::from_mm(-1.0), Length::ZERO),
                 size: (Length::from_mm(1.0), Length::from_mm(1.2)),
                 layer: CopperLayer::Top,
@@ -29,6 +30,7 @@ fn footprint(reference: &str, value: &str, x_mm: f64, y_mm: f64) -> Footprint {
             },
             Pad {
                 number: "2".into(),
+                name: String::new(),
                 offset: Point::new(Length::from_mm(1.0), Length::ZERO),
                 size: (Length::from_mm(1.0), Length::from_mm(1.2)),
                 layer: CopperLayer::Top,

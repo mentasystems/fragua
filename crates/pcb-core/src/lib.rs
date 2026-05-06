@@ -15,7 +15,7 @@ pub mod project;
 pub mod schematic;
 pub mod units;
 
-pub use board::{Board, CopperLayer, Footprint, Id, Pad, Trace, Via};
+pub use board::{Board, CopperLayer, Footprint, Id, Pad, Pour, Trace, Via};
 pub use event::{ActivityLevel, Event, EventBus};
 pub use geometry::{Point, Rect};
 pub use library::{Attachment, Library, LibraryEntry, LibraryPad};

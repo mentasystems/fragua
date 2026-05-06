@@ -14,7 +14,7 @@ members = [
 version = "0.0.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/kidandcat/pcb"
+repository = "https://github.com/kidandcat/fragua"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
