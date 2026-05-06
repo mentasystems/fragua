@@ -83,6 +83,8 @@ root.innerHTML = `
       <span class="label">mm</span>
     </span>
     <span class="spacer"></span>
+    <span class="tab" id="toggle-library" title="show/hide library panel">lib</span>
+    <span class="tab" id="toggle-activity" title="show/hide activity log">log</span>
     <span class="label">api</span><span class="value accent" id="proj-api">—</span>
   </div>
   <div class="palette-strip" id="palette-strip"></div>
@@ -112,6 +114,8 @@ const els = {
   libraryCount: document.getElementById("library-count")!,
   tabBoard: document.getElementById("tab-board")!,
   tabSch: document.getElementById("tab-sch")!,
+  toggleLibrary: document.getElementById("toggle-library")!,
+  toggleActivity: document.getElementById("toggle-activity")!,
   palette: document.getElementById("palette-strip")!,
   boardW: document.getElementById("board-w")!,
   boardH: document.getElementById("board-h")!,
@@ -145,6 +149,29 @@ function setView(v: View) {
 // through MCP — no UI buttons.
 els.tabBoard.addEventListener("click", () => setView("board"));
 els.tabSch.addEventListener("click", () => setView("schematic"));
+
+// Side-pane toggles. Default: both panels hidden — the agent log /
+// library panes get in the way for most tasks; the human can flip them
+// open with these tabs. Choice is remembered in localStorage.
+function applyPaneToggle(key: "library" | "activity", visible: boolean) {
+  const cls = key === "library" ? "hide-library" : "hide-activity";
+  const tab = key === "library" ? els.toggleLibrary : els.toggleActivity;
+  root!.classList.toggle(cls, !visible);
+  tab.classList.toggle("active", visible);
+  localStorage.setItem(`fragua.pane.${key}`, visible ? "1" : "0");
+}
+function readPanePref(key: "library" | "activity"): boolean {
+  const stored = localStorage.getItem(`fragua.pane.${key}`);
+  return stored === "1"; // default = hidden
+}
+applyPaneToggle("library", readPanePref("library"));
+applyPaneToggle("activity", readPanePref("activity"));
+els.toggleLibrary.addEventListener("click", () =>
+  applyPaneToggle("library", root!.classList.contains("hide-library")),
+);
+els.toggleActivity.addEventListener("click", () =>
+  applyPaneToggle("activity", root!.classList.contains("hide-activity")),
+);
 
 function appendActivity(level: string, message: string) {
   const entry = document.createElement("div");

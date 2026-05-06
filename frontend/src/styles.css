@@ -21,14 +21,21 @@ html, body, #app {
 }
 
 #app {
+  --lib-col: 240px;
+  --log-col: 320px;
   display: grid;
-  grid-template-columns: 240px 1fr 320px;
+  grid-template-columns: var(--lib-col) 1fr var(--log-col);
   grid-template-rows: 36px auto 1fr;
   grid-template-areas:
     "topbar topbar topbar"
     "library palette activity"
     "library canvas  activity";
 }
+
+#app.hide-library  { --lib-col: 0px; }
+#app.hide-library .library-pane { display: none; }
+#app.hide-activity { --log-col: 0px; }
+#app.hide-activity .activity-pane { display: none; }
 
 .topbar {
   grid-area: topbar;
