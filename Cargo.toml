@@ -6,6 +6,7 @@ members = [
     "crates/pcb-placer",
     "crates/pcb-drc",
     "crates/pcb-erc",
+    "crates/pcb-fab",
     "crates/pcb-gerber",
     "crates/pcb-render",
     "crates/pcb-script",

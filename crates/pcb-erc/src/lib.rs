@@ -16,11 +16,33 @@ use serde::Serialize;
 use pcb_core::schematic::{PinRole, Schematic};
 use pcb_core::Board;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ErcOptions {
-    // Reserved for future per-rule toggles. The MVP runs every rule
-    // unconditionally — adding knobs once we have user feedback on
-    // which rules need to be silenceable per project.
+    /// Run the heuristic "design intent" rules in addition to the
+    /// strict netlist checks. These flag conventions (decoupling
+    /// caps near power pins, pull-ups on I²C lines) that almost
+    /// every working design follows but aren't strictly required —
+    /// they're heuristics, not hard rules. Default `true`; turn off
+    /// with `erc strict_only=true` when you want only the always-bug
+    /// findings.
+    pub heuristics: bool,
+    /// Maximum body-to-body distance (mm) between a chip's PowerIn
+    /// pin and a capacitor on the same net for the cap to count as
+    /// a decoupling cap for that pin. Beyond this the heuristic
+    /// fires `MissingDecouplingCap`.
+    pub decoupling_max_dist_mm: f64,
+}
+
+impl Default for ErcOptions {
+    fn default() -> Self {
+        Self {
+            heuristics: true,
+            // 5 mm is generous — best practice is < 2 mm, but smaller
+            // boards / hand-routed designs sometimes can't get there
+            // and we don't want false positives.
+            decoupling_max_dist_mm: 5.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -68,6 +90,17 @@ pub enum ErcKind {
     /// `Bidir`, or `PowerOut`). Either the input is meant to float
     /// (rare; signal it explicitly) or the agent forgot a driver.
     UnconnectedInput,
+    /// Heuristic: a chip's `PowerIn` pin has no capacitor on the same
+    /// net within `decoupling_max_dist_mm`. Decoupling caps belong
+    /// physically close to the chip pin; absence usually means the
+    /// agent forgot to add one or placed it across the board.
+    MissingDecouplingCap,
+    /// Heuristic: a net whose name looks like an I²C line (SDA/SCL)
+    /// is `Bidir` on every endpoint but no resistor sits on it. I²C
+    /// requires pull-ups to VCC; a missing one means the bus won't
+    /// communicate. Triggers only on the obvious naming convention
+    /// to keep false positives down.
+    MissingPullup,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,7 +131,7 @@ impl ErcReport {
 }
 
 #[must_use]
-pub fn run(board: &Board, sch: &Schematic, _opts: &ErcOptions) -> ErcReport {
+pub fn run(board: &Board, sch: &Schematic, opts: &ErcOptions) -> ErcReport {
     let mut report = ErcReport::default();
     check_duplicate_pins(sch, &mut report);
     check_floating_pins(sch, &mut report);
@@ -106,6 +139,10 @@ pub fn run(board: &Board, sch: &Schematic, _opts: &ErcOptions) -> ErcReport {
     check_orphan_symbols(sch, &mut report);
     check_phantom_nets(board, sch, &mut report);
     check_role_based_rules(board, sch, &mut report);
+    if opts.heuristics {
+        check_decoupling(board, sch, opts.decoupling_max_dist_mm, &mut report);
+        check_i2c_pullups(sch, &mut report);
+    }
     report
 }
 
@@ -380,6 +417,142 @@ fn check_role_based_rules(board: &Board, sch: &Schematic, report: &mut ErcReport
                     involved: vec![net_name.clone(), label.clone()],
                 });
             }
+        }
+    }
+}
+
+/// Heuristic: every IC's `PowerIn` pin should have a capacitor (any
+/// kind, any value) on the same net within `max_dist_mm` of the
+/// chip's body. The capacitor decouples high-frequency noise from
+/// the rail; missing it is the most common "blue smoke" mistake.
+///
+/// We measure footprint-to-footprint center distance (not pad-to-pad)
+/// — close enough for the heuristic, and avoids surprising the agent
+/// with errors when a cap is far from the chip on a pad-by-pad metric
+/// but visually right next to it.
+fn check_decoupling(
+    board: &Board,
+    sch: &Schematic,
+    max_dist_mm: f64,
+    report: &mut ErcReport,
+) {
+    use std::collections::HashMap;
+    // Map symbol_id -> footprint position (if placed on the board).
+    // Symbols whose footprints aren't placed yet are skipped — the
+    // heuristic only makes sense once positions exist.
+    let mut sym_pos: HashMap<pcb_core::Id, (f64, f64)> = HashMap::new();
+    for sym in sch.symbols_in_order() {
+        if let Some(fp) = board.footprints.values().find(|f| f.reference == sym.reference) {
+            sym_pos.insert(sym.id, (fp.position.x.to_mm(), fp.position.y.to_mm()));
+        }
+    }
+
+    // Group capacitor footprints by net.
+    let mut caps_by_net: HashMap<String, Vec<(String, f64, f64)>> = HashMap::new();
+    for sym in sch.symbols_in_order() {
+        let is_cap = matches!(sym.kind, pcb_core::SymbolKind::Capacitor);
+        if !is_cap {
+            continue;
+        }
+        let Some(&(x, y)) = sym_pos.get(&sym.id) else { continue };
+        // Find every net this capacitor is on.
+        for net in sch.nets.values() {
+            if net.connections.iter().any(|c| c.symbol_id == sym.id) {
+                caps_by_net
+                    .entry(net.name.clone())
+                    .or_default()
+                    .push((sym.reference.clone(), x, y));
+            }
+        }
+    }
+
+    for sym in sch.symbols_in_order() {
+        // Only ICs care about decoupling caps. Discretes are caps
+        // themselves or one-pin parts.
+        if !matches!(sym.kind, pcb_core::SymbolKind::GenericIc { .. }) {
+            continue;
+        }
+        let Some(&(sx, sy)) = sym_pos.get(&sym.id) else { continue };
+        for pin in sym.kind.pins() {
+            if pin.role != PinRole::PowerIn {
+                continue;
+            }
+            // What net is this pin on?
+            let net_name = sch.net_for_pin(sym.id, &pin.number);
+            let Some(net_name) = net_name else { continue };
+            // Pours are decoupling-equivalent for power planes.
+            if board.pours.iter().any(|p| p.net == net_name) {
+                continue;
+            }
+            // Cap on this net within max_dist_mm of this chip?
+            let close_cap = caps_by_net
+                .get(net_name)
+                .map(|caps| {
+                    caps.iter().any(|(_, cx, cy)| {
+                        let dx = cx - sx;
+                        let dy = cy - sy;
+                        (dx * dx + dy * dy).sqrt() <= max_dist_mm
+                    })
+                })
+                .unwrap_or(false);
+            if !close_cap {
+                let label = format!("{}.{}", sym.reference, pin.number);
+                report.push(Violation {
+                    kind: ErcKind::MissingDecouplingCap,
+                    severity: Severity::Warning,
+                    message: format!(
+                        "no decoupling cap within {max_dist_mm:.1} mm of {label} (net {net_name}); add e.g. 100 nF on the same net close to the pin",
+                    ),
+                    involved: vec![label, net_name.to_string()],
+                });
+            }
+        }
+    }
+}
+
+/// Heuristic: I²C nets named `SDA` / `SCL` (and common variants)
+/// must have a pull-up resistor; the bus uses open-drain drivers and
+/// the line floats high through the resistor. We only check the
+/// well-known names — false positives on a custom-named bus are
+/// worse than false negatives.
+fn check_i2c_pullups(sch: &Schematic, report: &mut ErcReport) {
+    use std::collections::HashSet;
+    fn is_i2c(name: &str) -> bool {
+        let n = name.to_ascii_uppercase();
+        let n = n.trim_start_matches('+').trim_start_matches('-');
+        let n = n.trim_start_matches("I2C_").trim_start_matches("I2C");
+        matches!(n, "SDA" | "SCL")
+            || n.ends_with("_SDA")
+            || n.ends_with("_SCL")
+            || n.starts_with("SDA")
+            || n.starts_with("SCL")
+    }
+
+    // Resistor symbol_ids for quick membership check.
+    let resistor_ids: HashSet<pcb_core::Id> = sch
+        .symbols_in_order()
+        .filter(|s| matches!(s.kind, pcb_core::SymbolKind::Resistor))
+        .map(|s| s.id)
+        .collect();
+
+    for net in sch.nets.values() {
+        if !is_i2c(&net.name) {
+            continue;
+        }
+        let has_resistor = net
+            .connections
+            .iter()
+            .any(|c| resistor_ids.contains(&c.symbol_id));
+        if !has_resistor {
+            report.push(Violation {
+                kind: ErcKind::MissingPullup,
+                severity: Severity::Warning,
+                message: format!(
+                    "I²C net {} has no pull-up resistor; add one to VCC (typical 4.7 kΩ)",
+                    net.name,
+                ),
+                involved: vec![net.name.clone()],
+            });
         }
     }
 }

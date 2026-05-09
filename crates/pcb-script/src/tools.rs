@@ -95,8 +95,13 @@ BOARD:\n\
                                                  0 = sharp. Clamped to min(W, H) / 2.\n\
 \n\
 LIBRARY (build first, reuse forever):\n\
-  lib KEY [value=V] [rot=N] [edge=true|false] [desc=\"...\"]\n\
+  lib KEY [value=V] [rot=N] [edge=true|false] [desc=\"...\"] [lcsc=Cxxxx] [mpn=...]\n\
     pad NUMBER X Y W H [name=NAME]             — repeat for every pad\n\
+    # `lcsc` = LCSC catalogue ID (e.g. C25804 for 10k 0603). Required\n\
+    #   for JLCPCB SMT assembly to know what part to load. Optional\n\
+    #   but strongly recommended once the part is real.\n\
+    # `mpn` = manufacturer part number (e.g. RC0603FR-0710KL). Carries\n\
+    #   into the BOM as a fallback when no `lcsc` is set.\n\
     silk-line LAYER X1 Y1 X2 Y2 [width=N]      — body outline / pin-1 marker, in footprint-local mm.\n\
                                                  Same syntax as the top-level verb, but coords are\n\
                                                  relative to the footprint origin and follow it when\n\
@@ -213,7 +218,18 @@ VALIDATION / EXPORT:\n\
                                                — design rules check (board side); defaults\n\
                                                  clearance=0.20, edge=0.30, trace_width=0.10,\n\
                                                  drill=0.20\n\
-  export DIR [name=STEM]                       — write Gerbers + drill + BOM + pick-and-place\n\
+  export DIR [name=STEM]                       — write the raw fab outputs (gerbers + drill + BOM +\n\
+                                                 CPL) to a directory in KiCad-default format. Use\n\
+                                                 `pack` instead when you want a ready-to-upload zip.\n\
+  pack [fab=jlcpcb|pcbway|generic] [out=DIR]   — run ERC + DRC + manufacturing-DRC, generate every\n\
+                                                 fab artefact, format the BOM and CPL for the chosen\n\
+                                                 provider, and zip the lot ready to upload. Defaults\n\
+                                                 fab=jlcpcb, out=~/Downloads. The result is a single\n\
+                                                 `<project>-<fab>.zip` plus a README.txt inside it\n\
+                                                 explaining which file is which and how to order.\n\
+                                                 If any check fires errors, the zip is still written\n\
+                                                 (so you can see the partial output) but the reply\n\
+                                                 says NOT READY and lists the blockers.\n\
 \n\
 === RULES ===\n\
 - One action per line. Indent (2 spaces / tab) = sub-line of previous block.\n\
@@ -323,6 +339,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "silk.add_text" => tool_silk_add_text(project, args),
         "drc.run" => tool_drc_run(project, args),
         "erc.run" => tool_erc_run(project, args),
+        "fab.pack" => tool_fab_pack(project, args),
         "schematic.set_class" => tool_schematic_set_class(project, args),
         "pour.auto" => tool_auto_pour(project, args),
         "output.fab_pack" => tool_output_fab_pack(project, args),
@@ -1503,6 +1520,15 @@ struct LibraryCreateInput {
     /// world-aware `FootprintSilk` items.
     #[serde(default)]
     silk: Vec<LibrarySilkInput>,
+    /// Optional LCSC catalogue ID (e.g. "C25804"). Plumbed straight
+    /// to the JLCPCB BOM writer so SMT assembly knows what part to
+    /// load. Routing/placement ignore it.
+    #[serde(default)]
+    lcsc_id: Option<String>,
+    /// Optional manufacturer part number (e.g. "RC0603FR-0710KL").
+    /// Fab-agnostic identifier used by every assembler.
+    #[serde(default)]
+    mpn: Option<String>,
 }
 
 /// Wire-format mirror of `pcb_core::LibrarySilk` — kept separate from
@@ -1594,6 +1620,8 @@ fn tool_library_create(project: &Project, args: &Value) -> Result<Value, ToolErr
         edge_mounted: input.edge_mounted,
         pads,
         silk,
+        lcsc_id: input.lcsc_id,
+        mpn: input.mpn,
         attachments: Vec::new(),
         created_at: 0,
     };
@@ -2673,6 +2701,67 @@ fn tool_auto_pour(project: &Project, _args: &Value) -> Result<Value, ToolError> 
         "added": summary.added,
         "already_present": summary.already_present,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+struct FabPackArgs {
+    /// Provider name: "jlcpcb" / "pcbway" / "generic". Default
+    /// jlcpcb because that's what most non-technical users will pick.
+    #[serde(default)]
+    fab: Option<String>,
+    /// Directory to drop the zip in. Default `~/Downloads`.
+    #[serde(default)]
+    out_dir: Option<String>,
+}
+
+fn tool_fab_pack(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: FabPackArgs = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("pack: {e}")))?;
+
+    let provider = match input.fab.as_deref() {
+        None => pcb_fab::Provider::Jlcpcb,
+        Some(s) => pcb_fab::Provider::from_name(s)
+            .ok_or_else(|| ToolError::invalid_params(format!(
+                "pack: unknown fab `{s}` — supported: jlcpcb, pcbway, generic"
+            )))?,
+    };
+
+    let out_dir = match input.out_dir {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h).join("Downloads"))
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp")),
+    };
+
+    let report = pcb_fab::pack(project, provider, &out_dir)
+        .map_err(|e| ToolError::invalid_params(format!("pack: {e}")))?;
+
+    let summary = if report.blocking {
+        format!(
+            "pack: NOT READY — wrote {} ({} files), but blocking issues: {}",
+            report.zip_path.display(),
+            report.files.len(),
+            report.blocking_reasons.join("; "),
+        )
+    } else {
+        format!(
+            "pack: ready — wrote {} ({} files); upload to {}",
+            report.zip_path.display(),
+            report.files.len(),
+            report.provider,
+        )
+    };
+
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "fab.pack: {} → {} ({} blocking)",
+            report.provider,
+            report.zip_path.display(),
+            report.blocking_reasons.len(),
+        ),
+    );
+    Ok(text_result(summary).with_data(serde_json::to_value(&report).unwrap_or(json!({}))))
 }
 
 fn tool_erc_run(project: &Project, _args: &Value) -> Result<Value, ToolError> {

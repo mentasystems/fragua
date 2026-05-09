@@ -116,6 +116,19 @@ pub struct LibraryEntry {
     /// these into).
     #[serde(default)]
     pub silk: Vec<LibrarySilk>,
+    /// LCSC catalogue number (e.g. "C25804" for a 10 kΩ 0603 chip
+    /// resistor). Optional. Used by the JLCPCB BOM writer to populate
+    /// the "LCSC Part #" column so JLCPCB SMT assembly knows which
+    /// part to load. The agent fills this when picking a real part;
+    /// the placement / routing pipeline doesn't read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lcsc_id: Option<String>,
+    /// Manufacturer part number (e.g. "RC0603FR-0710KL"). Optional,
+    /// fab-agnostic — every assembly house accepts MPN as the
+    /// canonical "what to put down here" identifier. Falls back into
+    /// generic-format BOMs when an LCSC ID isn't available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mpn: Option<String>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
     /// Unix seconds at creation.

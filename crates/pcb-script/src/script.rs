@@ -364,6 +364,9 @@ impl Block {
                     ("edge_mounted", AttrType::Bool),
                     ("desc", AttrType::StrInto("description")),
                     ("description", AttrType::Str),
+                    ("lcsc", AttrType::StrInto("lcsc_id")),
+                    ("lcsc_id", AttrType::Str),
+                    ("mpn", AttrType::Str),
                 ])?;
                 // `description` is required by library.create — synthesise an empty
                 // string if the agent didn't provide one (the tool will reject empty
@@ -680,6 +683,16 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 ("name", AttrType::Str),
             ])?;
             Ok(Cmd { line, tool: "output.fab_pack".into(), args })
+        }
+        "pack" => {
+            // pack [fab=jlcpcb|pcbway|generic] [out=PATH]
+            // Default: fab=jlcpcb, out=~/Downloads.
+            let mut args = json!({});
+            apply_kv(&mut args, &tokens[1..], line, &[
+                ("fab", AttrType::Str),
+                ("out", AttrType::StrInto("out_dir")),
+            ])?;
+            Ok(Cmd { line, tool: "fab.pack".into(), args })
         }
 
         other => Err(ParseError::at(line, format!("unknown verb `{other}`"))),
