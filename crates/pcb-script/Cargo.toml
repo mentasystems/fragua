@@ -12,6 +12,7 @@ pcb-render = { path = "../pcb-render" }
 pcb-router = { path = "../pcb-router" }
 pcb-placer = { path = "../pcb-placer" }
 pcb-drc = { path = "../pcb-drc" }
+pcb-erc = { path = "../pcb-erc" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"

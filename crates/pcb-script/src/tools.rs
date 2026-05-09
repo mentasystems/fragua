@@ -173,10 +173,16 @@ SILK:\n\
                                                  stroke font. ASCII printable only; default size\n\
                                                  1.2 mm cap height, default stroke ~size/8.\n\
 \n\
-DRC / EXPORT:\n\
+VALIDATION / EXPORT:\n\
+  erc                                          — electrical rules check (schematic side):\n\
+                                                 floating pin/net, duplicate pin assignment,\n\
+                                                 empty net, orphan symbol, phantom net (board\n\
+                                                 pad on a net the schematic doesn't declare).\n\
+                                                 Run before placement to catch netlist bugs early.\n\
   drc [clearance=N] [edge=N] [trace_width=N] [drill=N]\n\
-                                               — design-rule check; defaults clearance=0.20,\n\
-                                                 edge=0.30, trace_width=0.10, drill=0.20\n\
+                                               — design rules check (board side); defaults\n\
+                                                 clearance=0.20, edge=0.30, trace_width=0.10,\n\
+                                                 drill=0.20\n\
   export DIR [name=STEM]                       — write Gerbers + drill + BOM + pick-and-place\n\
 \n\
 === RULES ===\n\
@@ -258,6 +264,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "silk.add_line" => tool_silk_add_line(project, args),
         "silk.add_text" => tool_silk_add_text(project, args),
         "drc.run" => tool_drc_run(project, args),
+        "erc.run" => tool_erc_run(project, args),
         "output.fab_pack" => tool_output_fab_pack(project, args),
         _ => Err(ToolError {
             code: error_code::METHOD_NOT_FOUND,
@@ -2366,6 +2373,41 @@ fn tool_drc_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         "DRC: {} error(s), {} warning(s)",
         report.error_count, report.warning_count
     );
+    Ok(text_result(summary).with_data(serde_json::to_value(&report).unwrap_or(json!({}))))
+}
+
+fn tool_erc_run(project: &Project, _args: &Value) -> Result<Value, ToolError> {
+    let snap = project.read();
+    let report = pcb_erc::run(snap.board(), snap.schematic(), &pcb_erc::ErcOptions::default());
+    drop(snap);
+
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "erc.run: {} error(s), {} warning(s)",
+            report.error_count, report.warning_count
+        ),
+    );
+
+    // Surface the first ~6 violation messages inline so a one-shot
+    // `erc` call gives the agent something actionable without having
+    // to read the structured `violations` array.
+    let mut summary = format!(
+        "ERC: {} error(s), {} warning(s)",
+        report.error_count, report.warning_count,
+    );
+    for v in report.violations.iter().take(6) {
+        summary.push_str(&format!(
+            "\n  [{:?}] {}",
+            v.severity, v.message,
+        ));
+    }
+    if report.violations.len() > 6 {
+        summary.push_str(&format!(
+            "\n  ... and {} more (see structuredContent.violations)",
+            report.violations.len() - 6,
+        ));
+    }
     Ok(text_result(summary).with_data(serde_json::to_value(&report).unwrap_or(json!({}))))
 }
 

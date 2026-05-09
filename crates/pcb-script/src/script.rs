@@ -626,6 +626,11 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
             ])?;
             Ok(Cmd { line, tool: "drc.run".into(), args })
         }
+        "erc" => {
+            // No options yet; the report is whatever every rule
+            // surfaced. Schema-stable so the agent can rely on it.
+            Ok(Cmd { line, tool: "erc.run".into(), args: json!({}) })
+        }
         "export" => {
             need_args(line, tokens, 1, "export DIR [name=STEM]")?;
             let mut args = json!({"out_dir": tokens[1]});

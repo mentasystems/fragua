@@ -2159,6 +2159,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcb-erc"
+version = "0.0.0"
+dependencies = [
+ "pcb-core",
+ "serde",
+]
+
+[[package]]
 name = "pcb-gerber"
 version = "0.0.0"
 dependencies = [
@@ -2193,6 +2201,7 @@ dependencies = [
  "base64 0.22.1",
  "pcb-core",
  "pcb-drc",
+ "pcb-erc",
  "pcb-gerber",
  "pcb-placer",
  "pcb-render",

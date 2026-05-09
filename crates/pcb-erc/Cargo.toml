@@ -1,0 +1,13 @@
+[package]
+name = "pcb-erc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Electrical rules check (schematic-side validation) for the pcb tool."
+
+[dependencies]
+pcb-core = { path = "../pcb-core" }
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

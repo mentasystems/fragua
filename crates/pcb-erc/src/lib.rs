@@ -1,0 +1,285 @@
+//! `pcb-erc` — electrical rules check.
+//!
+//! Schematic-side validation: catches netlist bugs *before* they
+//! propagate into placement and routing. Sister crate to `pcb-drc`,
+//! which validates board geometry. The split is conceptual:
+//!
+//! - DRC: "is the copper geometry legal?" (clearance, drill, edge…)
+//! - ERC: "is the netlist coherent?" (pins wired, nets non-trivial…)
+//!
+//! ERC runs over the schematic plus the board's pad-net assignments,
+//! so it can also flag mismatches between the two sides — e.g. a
+//! footprint pad referencing a net the schematic doesn't declare.
+
+use serde::Serialize;
+
+use pcb_core::schematic::Schematic;
+use pcb_core::Board;
+
+#[derive(Debug, Clone, Default)]
+pub struct ErcOptions {
+    // Reserved for future per-rule toggles. The MVP runs every rule
+    // unconditionally — adding knobs once we have user feedback on
+    // which rules need to be silenceable per project.
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    /// The schematic is provably broken (e.g. same pin in two nets) —
+    /// the agent should fix this before doing anything else.
+    Error,
+    /// Probably a bug, but the design might still build (e.g. a pin
+    /// the agent intentionally left floating). Worth surfacing so the
+    /// agent can decide.
+    Warning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErcKind {
+    /// A pin on a placed symbol is not assigned to any net.
+    FloatingPin,
+    /// A net has fewer than two pin connections — it cannot conduct
+    /// (or has no electrical purpose).
+    FloatingNet,
+    /// A `(symbol, pin)` pair appears in 2+ nets — model corruption,
+    /// the router will see ambiguous connectivity.
+    DuplicatePin,
+    /// A net is declared in the schematic but has no connections at
+    /// all. Either the agent forgot to wire it or it's stale.
+    EmptyNet,
+    /// A footprint pad references a net the schematic doesn't declare.
+    /// Indicates the agent edited footprint pad nets without keeping
+    /// the schematic in sync.
+    PhantomNet,
+    /// A symbol exists on the schematic but none of its pins are in
+    /// any net — the part is electrically disconnected. Often the
+    /// agent forgot to wire the whole component.
+    OrphanSymbol,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Violation {
+    pub kind: ErcKind,
+    pub severity: Severity,
+    pub message: String,
+    /// Schematic-side identifier(s) involved: pin labels like
+    /// `"R1.1"`, net names, or symbol references.
+    pub involved: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ErcReport {
+    pub violations: Vec<Violation>,
+    pub error_count: usize,
+    pub warning_count: usize,
+}
+
+impl ErcReport {
+    fn push(&mut self, v: Violation) {
+        match v.severity {
+            Severity::Error => self.error_count += 1,
+            Severity::Warning => self.warning_count += 1,
+        }
+        self.violations.push(v);
+    }
+}
+
+#[must_use]
+pub fn run(board: &Board, sch: &Schematic, _opts: &ErcOptions) -> ErcReport {
+    let mut report = ErcReport::default();
+    check_duplicate_pins(sch, &mut report);
+    check_floating_pins(sch, &mut report);
+    check_floating_and_empty_nets(sch, &mut report);
+    check_orphan_symbols(sch, &mut report);
+    check_phantom_nets(board, sch, &mut report);
+    report
+}
+
+/// Same `(symbol_id, pin_number)` declared in 2+ nets. The router
+/// would see contradictory connectivity; flag as Error so the agent
+/// fixes the schematic before doing anything else.
+fn check_duplicate_pins(sch: &Schematic, report: &mut ErcReport) {
+    use std::collections::HashMap;
+    // (symbol_id, pin_number) -> set of net names referencing it.
+    let mut homes: HashMap<(pcb_core::Id, String), Vec<String>> = HashMap::new();
+    for (net_name, net) in &sch.nets {
+        for c in &net.connections {
+            homes
+                .entry((c.symbol_id, c.pin_number.clone()))
+                .or_default()
+                .push(net_name.clone());
+        }
+    }
+    for ((sym_id, pin), mut nets) in homes {
+        if nets.len() < 2 {
+            continue;
+        }
+        nets.sort();
+        nets.dedup();
+        if nets.len() < 2 {
+            // Same net listed twice on the same pin — also wrong but
+            // less alarming; keep this as the duplicate-pin error path
+            // so it still surfaces.
+        }
+        let label = pin_label(sch, sym_id, &pin);
+        report.push(Violation {
+            kind: ErcKind::DuplicatePin,
+            severity: Severity::Error,
+            message: format!(
+                "{label} appears in {n} nets ({}); the router will see ambiguous connectivity",
+                nets.join(", "),
+                n = nets.len(),
+            ),
+            involved: std::iter::once(label).chain(nets).collect(),
+        });
+    }
+}
+
+/// Symbol pins not in any net. Common cause: the agent declared the
+/// symbol but forgot to wire one of its pins. Fully-orphan symbols
+/// (no pin on any net) get a single `OrphanSymbol` violation instead
+/// — emitting `FloatingPin` per pin too would be redundant noise.
+fn check_floating_pins(sch: &Schematic, report: &mut ErcReport) {
+    use std::collections::HashSet;
+    let mut wired: HashSet<(pcb_core::Id, String)> = HashSet::new();
+    let mut covered_symbols: HashSet<pcb_core::Id> = HashSet::new();
+    for net in sch.nets.values() {
+        for c in &net.connections {
+            wired.insert((c.symbol_id, c.pin_number.clone()));
+            covered_symbols.insert(c.symbol_id);
+        }
+    }
+    for sym in sch.symbols_in_order() {
+        if !covered_symbols.contains(&sym.id) {
+            // Whole symbol is orphan; OrphanSymbol fires instead.
+            continue;
+        }
+        for pin in sym.kind.pins() {
+            if wired.contains(&(sym.id, pin.number.clone())) {
+                continue;
+            }
+            let label = format!("{}.{}", sym.reference, pin.number);
+            report.push(Violation {
+                kind: ErcKind::FloatingPin,
+                severity: Severity::Warning,
+                message: format!("{label} is not connected to any net"),
+                involved: vec![label],
+            });
+        }
+    }
+}
+
+/// Nets with 0 or 1 connections. 0 = empty (declared but never wired);
+/// 1 = floating (only one endpoint, can't form a circuit).
+fn check_floating_and_empty_nets(sch: &Schematic, report: &mut ErcReport) {
+    for net in sch.nets.values() {
+        // Dedup connections so a (mistakenly) twice-listed pin doesn't
+        // mask a real "only one pin" net.
+        // Dedup via a set since `Id` doesn't impl `Ord`.
+        let endpoints: std::collections::HashSet<(pcb_core::Id, String)> = net
+            .connections
+            .iter()
+            .map(|c| (c.symbol_id, c.pin_number.clone()))
+            .collect();
+        let endpoints: Vec<_> = endpoints.into_iter().collect();
+        match endpoints.len() {
+            0 => report.push(Violation {
+                kind: ErcKind::EmptyNet,
+                severity: Severity::Warning,
+                message: format!("net {} has no connections", net.name),
+                involved: vec![net.name.clone()],
+            }),
+            1 => {
+                let (sym_id, pin) = &endpoints[0];
+                let label = pin_label(sch, *sym_id, pin);
+                report.push(Violation {
+                    kind: ErcKind::FloatingNet,
+                    severity: Severity::Warning,
+                    message: format!(
+                        "net {} only touches {label} — needs at least 2 endpoints to conduct",
+                        net.name,
+                    ),
+                    involved: vec![net.name.clone(), label],
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Symbols whose pins are entirely absent from every net. The whole
+/// component is dangling — usually a schematic mistake (forgotten
+/// wiring) rather than a deliberate "no-connect" symbol.
+fn check_orphan_symbols(sch: &Schematic, report: &mut ErcReport) {
+    use std::collections::HashSet;
+    let mut covered: HashSet<pcb_core::Id> = HashSet::new();
+    for net in sch.nets.values() {
+        for c in &net.connections {
+            covered.insert(c.symbol_id);
+        }
+    }
+    for sym in sch.symbols_in_order() {
+        if covered.contains(&sym.id) {
+            continue;
+        }
+        // Skip symbols with zero pins (degenerate placeholders).
+        if sym.kind.pins().is_empty() {
+            continue;
+        }
+        report.push(Violation {
+            kind: ErcKind::OrphanSymbol,
+            severity: Severity::Warning,
+            message: format!(
+                "symbol {} ({}) has no pins on any net",
+                sym.reference,
+                sym.kind.label(),
+            ),
+            involved: vec![sym.reference.clone()],
+        });
+    }
+}
+
+/// Footprint pads referencing nets the schematic doesn't declare.
+/// Catches the case where the agent assigned `pad.net` directly
+/// (bypassing the schematic) or renamed a net on one side only.
+fn check_phantom_nets(board: &Board, sch: &Schematic, report: &mut ErcReport) {
+    use std::collections::HashSet;
+    let known_nets: HashSet<&str> = sch.nets.keys().map(String::as_str).collect();
+    // Also count pours as a legitimate source of the net name (a
+    // ground pour on its own implicitly defines GND even before any
+    // schematic-side connection).
+    let pour_nets: HashSet<&str> = board.pours.iter().map(|p| p.net.as_str()).collect();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    for fp in board.footprints_in_order() {
+        for pad in &fp.pads {
+            let Some(net) = pad.net.as_deref() else { continue };
+            if known_nets.contains(net) || pour_nets.contains(net) {
+                continue;
+            }
+            let label = format!("{}.{}", fp.reference, pad.number);
+            // Dedup by (net, pad ref) so we only emit one violation
+            // per offending pad even if the same phantom net appears
+            // on many pads of one footprint.
+            if !seen.insert((net.to_string(), label.clone())) {
+                continue;
+            }
+            report.push(Violation {
+                kind: ErcKind::PhantomNet,
+                severity: Severity::Error,
+                message: format!(
+                    "footprint pad {label} is on net `{net}` but the schematic doesn't declare that net",
+                ),
+                involved: vec![label, net.to_string()],
+            });
+        }
+    }
+}
+
+fn pin_label(sch: &Schematic, sym_id: pcb_core::Id, pin: &str) -> String {
+    sch.symbols
+        .get(&sym_id)
+        .map(|s| format!("{}.{}", s.reference, pin))
+        .unwrap_or_else(|| format!("?.{pin}"))
+}
