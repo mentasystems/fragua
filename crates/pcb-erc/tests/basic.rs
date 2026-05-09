@@ -73,6 +73,7 @@ fn floating_pin_fires_when_pin_is_unconnected() {
             symbol_id: u_id,
             pin_number: "1".into(),
         }],
+        class: None,
     });
     let report = run(&empty_board(), &sch, &ErcOptions::default());
     let floating: Vec<&pcb_erc::Violation> = report
@@ -95,6 +96,7 @@ fn floating_net_fires_when_only_one_pin() {
             symbol_id: u_id,
             pin_number: "1".into(),
         }],
+        class: None,
     });
     let report = run(&empty_board(), &sch, &ErcOptions::default());
     assert!(report
@@ -112,10 +114,12 @@ fn duplicate_pin_fires_when_same_pin_in_two_nets() {
     sch.set_net(Net {
         name: "A".into(),
         connections: vec![NetConnection { symbol_id: u_id, pin_number: "1".into() }],
+        class: None,
     });
     sch.set_net(Net {
         name: "B".into(),
         connections: vec![NetConnection { symbol_id: u_id, pin_number: "1".into() }],
+        class: None,
     });
     let report = run(&empty_board(), &sch, &ErcOptions::default());
     let dup = report
@@ -133,6 +137,7 @@ fn empty_net_fires_when_no_connections() {
     sch.set_net(Net {
         name: "ORPHAN".into(),
         connections: Vec::new(),
+        class: None,
     });
     let report = run(&empty_board(), &sch, &ErcOptions::default());
     assert!(report
@@ -181,6 +186,7 @@ fn clean_schematic_produces_zero_violations() {
             NetConnection { symbol_id: u1_id, pin_number: "1".into() },
             NetConnection { symbol_id: u2_id, pin_number: "1".into() },
         ],
+        class: None,
     });
     sch.set_net(Net {
         name: "B".into(),
@@ -188,6 +194,7 @@ fn clean_schematic_produces_zero_violations() {
             NetConnection { symbol_id: u1_id, pin_number: "2".into() },
             NetConnection { symbol_id: u2_id, pin_number: "2".into() },
         ],
+        class: None,
     });
     let report = run(&empty_board(), &sch, &ErcOptions::default());
     assert_eq!(report.error_count, 0, "{:?}", report.violations);

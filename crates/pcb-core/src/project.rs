@@ -525,6 +525,21 @@ impl Project {
 
     /// Replace the connections on a named net. Returns an error if any
     /// referenced symbol or pin does not exist — keeps the netlist
+    /// Add or replace a named `NetClass`. Reused by every net that
+    /// references the class by name. Mutates the schematic; the
+    /// router and DRC pick the new rules up on their next call.
+    pub fn set_net_class(&self, class: crate::schematic::NetClass) {
+        let name = class.name.clone();
+        {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.schematic.set_net_class(class);
+        }
+        self.log(
+            crate::ActivityLevel::Info,
+            format!("schematic.set_class: {name}"),
+        );
+    }
+
     /// consistent so downstream tools (router, BOM) never see dangling
     /// references.
     pub fn set_net(&self, net: Net) -> Result<(), String> {

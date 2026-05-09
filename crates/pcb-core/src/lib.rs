@@ -25,5 +25,5 @@ pub use event::{ActivityLevel, Event, EventBus};
 pub use geometry::{Point, Rect};
 pub use library::{Attachment, Library, LibraryEntry, LibraryPad, LibrarySilk};
 pub use project::{Project, ProjectSnapshot};
-pub use schematic::{Net, NetConnection, PinSide, SchPin, Schematic, Symbol, SymbolKind};
+pub use schematic::{Net, NetClass, NetConnection, PinSide, SchPin, Schematic, Symbol, SymbolKind};
 pub use units::{Length, MIL, MM, NM, UM};

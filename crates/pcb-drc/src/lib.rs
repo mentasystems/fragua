@@ -41,6 +41,20 @@ pub struct DrcOptions {
     /// optimum"; below that the detour is usually noise (cell-pitch
     /// rounding, single 90° bend around a footprint).
     pub routing_inefficient_ratio: f32,
+    /// Per-net rule overrides (net classes). When two pieces of copper
+    /// from different nets are checked for clearance, the required
+    /// gap is the strictest of `min_clearance` and either net's
+    /// override — so a 0.3 mm power-class clearance is honoured even
+    /// when paired with a 0.2 mm signal.
+    pub net_overrides: HashMap<String, NetOverride>,
+}
+
+/// Per-net rule overrides — fields default to "use the call-site
+/// defaults" when `None`. Mirrors `pcb_router::NetOverride` so the
+/// caller can build one map and feed both crates.
+#[derive(Debug, Clone, Default)]
+pub struct NetOverride {
+    pub clearance: Option<Length>,
 }
 
 impl Default for DrcOptions {
@@ -53,8 +67,24 @@ impl Default for DrcOptions {
             min_trace_width: Length::from_mm(0.1),
             min_drill: Length::from_mm(0.2),
             routing_inefficient_ratio: 1.5,
+            net_overrides: HashMap::new(),
         }
     }
+}
+
+/// Effective clearance required between two nets: the strictest of the
+/// global default and either net's class override. Used by every
+/// pair-wise clearance check (pad-pad, trace-trace, trace-pad).
+fn effective_clearance_mm(opts: &DrcOptions, net_a: Option<&str>, net_b: Option<&str>) -> f64 {
+    let mut c = opts.min_clearance.to_mm();
+    for n in [net_a, net_b].into_iter().flatten() {
+        if let Some(o) = opts.net_overrides.get(n) {
+            if let Some(over) = o.clearance {
+                c = c.max(over.to_mm());
+            }
+        }
+    }
+    c
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -174,7 +204,6 @@ fn pad_world_rect(fp: &Footprint, pad: &Pad) -> Rect {
 }
 
 fn check_pad_pad(pads: &[PadGeom], opts: &DrcOptions, report: &mut DrcReport) {
-    let clr = opts.min_clearance.to_mm();
     for i in 0..pads.len() {
         for j in (i + 1)..pads.len() {
             let a = &pads[i];
@@ -186,6 +215,7 @@ fn check_pad_pad(pads: &[PadGeom], opts: &DrcOptions, report: &mut DrcReport) {
             if a.net == b.net && a.net.is_some() {
                 continue;
             }
+            let clr = effective_clearance_mm(opts, a.net, b.net);
             let gap = aabb_gap_mm(a.rect, b.rect);
             if gap + 1e-6 < clr {
                 let mid = midpoint(a.rect, b.rect);
@@ -207,7 +237,6 @@ fn check_pad_pad(pads: &[PadGeom], opts: &DrcOptions, report: &mut DrcReport) {
 }
 
 fn check_trace_trace(board: &Board, opts: &DrcOptions, report: &mut DrcReport) {
-    let clr = opts.min_clearance.to_mm();
     let traces: Vec<&Trace> = board.traces.iter().collect();
     for i in 0..traces.len() {
         for j in (i + 1)..traces.len() {
@@ -219,6 +248,7 @@ fn check_trace_trace(board: &Board, opts: &DrcOptions, report: &mut DrcReport) {
             if a.net == b.net {
                 continue;
             }
+            let clr = effective_clearance_mm(opts, Some(a.net.as_str()), Some(b.net.as_str()));
             let half_a = a.width.to_mm() / 2.0;
             let half_b = b.width.to_mm() / 2.0;
             let centerline_dist = segment_segment_distance(
@@ -259,7 +289,6 @@ fn check_trace_pad(
     opts: &DrcOptions,
     report: &mut DrcReport,
 ) {
-    let clr = opts.min_clearance.to_mm();
     for trace in &board.traces {
         let half = trace.width.to_mm() / 2.0;
         for pad in pads {
@@ -269,6 +298,7 @@ fn check_trace_pad(
             if pad.net == Some(trace.net.as_str()) {
                 continue;
             }
+            let clr = effective_clearance_mm(opts, Some(trace.net.as_str()), pad.net);
             let centerline_dist = segment_aabb_distance(
                 (trace.start.x.to_mm(), trace.start.y.to_mm()),
                 (trace.end.x.to_mm(), trace.end.y.to_mm()),

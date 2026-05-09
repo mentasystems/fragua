@@ -108,6 +108,49 @@ fn routes_two_two_pin_resistors_sharing_a_net() {
     }
 }
 
+#[test]
+fn net_override_widens_the_traces_it_lays() {
+    // Two pads on net "POWER" 10 mm apart on a fresh board; route
+    // with a per-net override that doubles the trace width and verify
+    // every emitted trace honours it.
+    let mut board = Board::new();
+    board.outline = Some(Rect::from_corners(
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+        Point::new(Length::from_mm(40.0), Length::from_mm(20.0)),
+    ));
+    board.add_footprint(footprint(
+        "R1",
+        10.0,
+        10.0,
+        vec![pad("1", 0.0, 0.0, Some("POWER"))],
+    ));
+    board.add_footprint(footprint(
+        "R2",
+        20.0,
+        10.0,
+        vec![pad("1", 0.0, 0.0, Some("POWER"))],
+    ));
+
+    let mut opts = pcb_router::RouteOptions::default();
+    opts.net_overrides.insert(
+        "POWER".into(),
+        pcb_router::NetOverride {
+            trace_width: Some(Length::from_mm(0.50)),
+            clearance: None,
+        },
+    );
+    let _report = pcb_router::route(&mut board, &opts);
+    assert!(!board.traces.is_empty(), "expected at least one trace");
+    for t in &board.traces {
+        assert!(
+            (t.width.to_mm() - 0.50).abs() < 1e-6,
+            "trace on net `{}` should be 0.50 mm wide, got {} mm",
+            t.net,
+            t.width.to_mm(),
+        );
+    }
+}
+
 /// Three pads colinear on net N. The optimal Steiner / Prim tree is
 /// 2 segments (left-pad → middle-pad → right-pad) of length equal to
 /// HPWL (the bounding-box half-perimeter). Star routing through any

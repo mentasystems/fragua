@@ -22,4 +22,4 @@ mod astar;
 mod grid;
 mod router;
 
-pub use router::{route, Outcome, RouteOptions, RouteReport};
+pub use router::{route, NetOverride, Outcome, RouteOptions, RouteReport};

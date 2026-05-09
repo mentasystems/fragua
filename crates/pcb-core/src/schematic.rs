@@ -110,10 +110,34 @@ pub struct NetConnection {
     pub pin_number: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Net {
     pub name: String,
     pub connections: Vec<NetConnection>,
+    /// Optional name of the `NetClass` that governs this net's
+    /// physical rules (trace width, clearance). `None` means "use the
+    /// project's default — whatever `RouteOptions` / `DrcOptions`
+    /// supply at the call site".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+}
+
+/// A named bundle of physical rules a net adheres to. Power rails
+/// typically use a class with a wider `trace_width_mm`; high-speed
+/// signals use one with tighter `clearance_mm`. Per-class fields
+/// override the call-site defaults of the router and DRC; unset
+/// fields fall back to the defaults so a class can override only what
+/// it cares about.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NetClass {
+    pub name: String,
+    /// Trace width (mm) the router lays for nets in this class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_width_mm: Option<f64>,
+    /// Minimum clearance (mm) between this net's copper and any
+    /// foreign-net copper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearance_mm: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -121,6 +145,11 @@ pub struct Schematic {
     pub symbols: HashMap<Id, Symbol>,
     pub symbol_order: Vec<Id>,
     pub nets: HashMap<String, Net>,
+    /// Named rule bundles. `nets[*].class` references entries here.
+    /// Persists with the schematic so the router and DRC see the same
+    /// classes the agent declared.
+    #[serde(default)]
+    pub net_classes: HashMap<String, NetClass>,
 }
 
 impl Schematic {
@@ -158,6 +187,21 @@ impl Schematic {
         self.symbol_order
             .iter()
             .filter_map(|id| self.symbols.get(id))
+    }
+
+    /// Add or replace a named net class.
+    pub fn set_net_class(&mut self, class: NetClass) {
+        self.net_classes.insert(class.name.clone(), class);
+    }
+
+    /// Look up the class for the given net by name. Returns the class
+    /// only if both (a) the net exists and has `class = Some(...)`,
+    /// and (b) that class is in `net_classes`. Otherwise returns
+    /// `None` — callers should fall back to their own defaults.
+    #[must_use]
+    pub fn class_for_net(&self, net_name: &str) -> Option<&NetClass> {
+        let class_name = self.nets.get(net_name)?.class.as_ref()?;
+        self.net_classes.get(class_name)
     }
 
     /// All connections on a given pin, across nets. Each pin should

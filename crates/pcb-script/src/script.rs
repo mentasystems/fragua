@@ -425,11 +425,34 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
         }
 
         "net" => {
-            need_args(line, tokens, 2, "net NAME PIN1 [PIN2 ...]")?;
+            // net NAME PIN1 [PIN2 ...] [class=NAME]
+            need_args(line, tokens, 2, "net NAME PIN1 [PIN2 ...] [class=NAME]")?;
             let name = tokens[1].clone();
-            let pins: Vec<Value> = tokens[2..].iter().map(|s| Value::String(s.clone())).collect();
-            Ok(Cmd { line, tool: "schematic.connect".into(),
-                     args: json!({"net": name, "pins": pins}) })
+            // Positional pins end at the first kv token (`class=...`).
+            let mut pins: Vec<Value> = Vec::new();
+            let mut kv_start = tokens.len();
+            for (i, t) in tokens.iter().enumerate().skip(2) {
+                if t.contains('=') {
+                    kv_start = i;
+                    break;
+                }
+                pins.push(Value::String(t.clone()));
+            }
+            let mut args = json!({"net": name, "pins": pins});
+            apply_kv(&mut args, &tokens[kv_start..], line, &[
+                ("class", AttrType::Str),
+            ])?;
+            Ok(Cmd { line, tool: "schematic.connect".into(), args })
+        }
+        "class" => {
+            // class NAME [width=N] [clearance=N]
+            need_args(line, tokens, 1, "class NAME [width=N] [clearance=N]")?;
+            let mut args = json!({"name": tokens[1]});
+            apply_kv(&mut args, &tokens[2..], line, &[
+                ("width",     AttrType::NumInto("trace_width_mm")),
+                ("clearance", AttrType::NumInto("clearance_mm")),
+            ])?;
+            Ok(Cmd { line, tool: "schematic.set_class".into(), args })
         }
 
         "find-lib" => {

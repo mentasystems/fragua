@@ -119,7 +119,13 @@ SCHEMATIC:\n\
   sym REF KIND [key=K] [value=V] [rot=N] [x=N] [y=N] [desc=\"...\"]\n\
     pin NUMBER SIDE [NAME]                     — only for KIND=ic; SIDE = L|R|T|B (or full names)\n\
                                                  KIND aliases: ic, r, c, l, led, d\n\
-  net NAME PIN1 PIN2 ...                       — PIN = REF.PIN_NUMBER or REF.PIN_NAME (case-insensitive)\n\
+  net NAME PIN1 PIN2 ... [class=NAME]          — PIN = REF.PIN_NUMBER or REF.PIN_NAME (case-insensitive).\n\
+                                                 `class` attaches a net class (see below) so the\n\
+                                                 router/DRC use its trace_width / clearance for\n\
+                                                 this net.\n\
+  class NAME [width=N] [clearance=N]           — declare or replace a net class. Set on a net via\n\
+                                                 `net NAME ... class=NAME`. Unset fields fall back\n\
+                                                 to the route/drc defaults at the call site.\n\
 \n\
 PALETTE / PLACEMENT:\n\
   palette REF KEY [rot=N] [value=V] [layer=top|bottom]\n\
@@ -265,6 +271,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "silk.add_text" => tool_silk_add_text(project, args),
         "drc.run" => tool_drc_run(project, args),
         "erc.run" => tool_erc_run(project, args),
+        "schematic.set_class" => tool_schematic_set_class(project, args),
         "output.fab_pack" => tool_output_fab_pack(project, args),
         _ => Err(ToolError {
             code: error_code::METHOD_NOT_FOUND,
@@ -1005,6 +1012,11 @@ fn auto_place(project: &Project) -> Point {
 struct ConnectInput {
     net: String,
     pins: Vec<String>,
+    /// Optional `NetClass` name to attach to this net. If unset (or
+    /// the named class doesn't exist) the router and DRC fall back to
+    /// their default trace_width/clearance.
+    #[serde(default)]
+    class: Option<String>,
 }
 
 fn tool_schematic_connect(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -1052,6 +1064,7 @@ fn tool_schematic_connect(project: &Project, args: &Value) -> Result<Value, Tool
         .set_net(Net {
             name: input.net.clone(),
             connections,
+            class: input.class.clone(),
         })
         .map_err(ToolError::invalid_params)?;
     project.log(
@@ -2201,6 +2214,31 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: RouteRunInput = serde_json::from_value(args.clone())
         .map_err(|e| ToolError::invalid_params(format!("route.run: {e}")))?;
 
+    // Build per-net router overrides from the schematic's net classes:
+    // for every net that names a class, surface its trace_width and
+    // clearance so the router uses them when laying that net's copper
+    // and stamping the grid. The router itself stays schematic-agnostic.
+    let net_overrides: std::collections::HashMap<String, pcb_router::NetOverride> = {
+        let snap = project.read();
+        let sch = snap.schematic();
+        let mut out = std::collections::HashMap::new();
+        for (net_name, net) in &sch.nets {
+            let Some(class) = sch.class_for_net(net_name) else { continue };
+            let mut over = pcb_router::NetOverride::default();
+            if let Some(w) = class.trace_width_mm {
+                over.trace_width = Some(Length::from_mm(w));
+            }
+            if let Some(c) = class.clearance_mm {
+                over.clearance = Some(Length::from_mm(c));
+            }
+            // Skip noisy entries where the class declares no overrides.
+            if over.trace_width.is_some() || over.clearance.is_some() {
+                out.insert(net.name.clone(), over);
+            }
+        }
+        out
+    };
+
     let opts = pcb_router::RouteOptions {
         cell: Length::from_mm(input.cell_mm),
         trace_width: Length::from_mm(input.trace_width_mm),
@@ -2208,6 +2246,7 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         via_cost: input.via_cost,
         via_drill: Length::from_mm(input.via_drill_mm),
         via_diameter: Length::from_mm(input.via_diameter_mm),
+        net_overrides,
     };
 
     // Route on a clone so the lock is released quickly; then push the
@@ -2359,6 +2398,18 @@ fn tool_drc_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
     if let Some(v) = input.routing_inefficient_ratio { opts.routing_inefficient_ratio = v; }
 
     let snap = project.read();
+    // Surface schematic net classes as DRC overrides so a class with
+    // tighter clearance than the global default actually gets enforced.
+    let sch = snap.schematic();
+    for (net_name, _net) in &sch.nets {
+        let Some(class) = sch.class_for_net(net_name) else { continue };
+        if let Some(c) = class.clearance_mm {
+            opts.net_overrides.insert(
+                net_name.clone(),
+                pcb_drc::NetOverride { clearance: Some(Length::from_mm(c)) },
+            );
+        }
+    }
     let report = pcb_drc::run(snap.board(), &opts);
     drop(snap);
 
@@ -2374,6 +2425,41 @@ fn tool_drc_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         report.error_count, report.warning_count
     );
     Ok(text_result(summary).with_data(serde_json::to_value(&report).unwrap_or(json!({}))))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetClassInput {
+    name: String,
+    #[serde(default)]
+    trace_width_mm: Option<f64>,
+    #[serde(default)]
+    clearance_mm: Option<f64>,
+}
+
+fn tool_schematic_set_class(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: SetClassInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("class: {e}")))?;
+    if input.name.trim().is_empty() {
+        return Err(ToolError::invalid_params("class: name is empty"));
+    }
+    let class = pcb_core::NetClass {
+        name: input.name.clone(),
+        trace_width_mm: input.trace_width_mm,
+        clearance_mm: input.clearance_mm,
+    };
+    project.set_net_class(class);
+    let mut text = format!("class {} set", input.name);
+    let mut bits: Vec<String> = Vec::new();
+    if let Some(w) = input.trace_width_mm { bits.push(format!("width={w} mm")); }
+    if let Some(c) = input.clearance_mm { bits.push(format!("clearance={c} mm")); }
+    if !bits.is_empty() {
+        text.push_str(&format!(" ({})", bits.join(", ")));
+    }
+    Ok(text_result(text).with_data(json!({
+        "name": input.name,
+        "trace_width_mm": input.trace_width_mm,
+        "clearance_mm": input.clearance_mm,
+    })))
 }
 
 fn tool_erc_run(project: &Project, _args: &Value) -> Result<Value, ToolError> {

@@ -1,6 +1,6 @@
 //! Driver that ties the grid and A* together.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use pcb_core::{Board, CopperLayer, Length, Point, Rect, Trace, Via};
 
@@ -14,9 +14,13 @@ pub struct RouteOptions {
     /// coarse enough for grids of ~250 × 250 cells per layer to stay
     /// fast.
     pub cell: Length,
-    /// Trace width laid down by the router.
+    /// Default trace width laid down by the router. Per-net entries in
+    /// `net_overrides` win when set.
     pub trace_width: Length,
-    /// Clearance added on every side of pad obstacles.
+    /// Default clearance added on every side of pad obstacles. Per-net
+    /// entries in `net_overrides` win when set; the grid is stamped at
+    /// the *max* clearance across all overrides + this default so a
+    /// stricter net's clearance is never undersold.
     pub clearance: Length,
     /// Cost (in cells) of punching a via vs. routing one cell on the
     /// same layer. Higher = router prefers single-layer detours.
@@ -24,6 +28,18 @@ pub struct RouteOptions {
     /// Via geometry produced when the path flips layers.
     pub via_drill: Length,
     pub via_diameter: Length,
+    /// Per-net rule overrides keyed by net name. Built by the caller
+    /// from the schematic's `NetClass` definitions; the router stays
+    /// schematic-agnostic and just consults this map.
+    pub net_overrides: HashMap<String, NetOverride>,
+}
+
+/// Per-net rule overrides — fields default to "use the global
+/// `RouteOptions` value" when `None`.
+#[derive(Debug, Clone, Default)]
+pub struct NetOverride {
+    pub trace_width: Option<Length>,
+    pub clearance: Option<Length>,
 }
 
 impl Default for RouteOptions {
@@ -39,6 +55,7 @@ impl Default for RouteOptions {
             via_cost: 8,
             via_drill: Length::from_mm(0.3),
             via_diameter: Length::from_mm(0.6),
+            net_overrides: HashMap::new(),
         }
     }
 }
@@ -330,7 +347,17 @@ fn count_failed(r: &RouteReport) -> usize {
 /// negotiated-congestion cost map before the first pass.
 fn compute_region(board: &Board, opts: &RouteOptions) -> Rect {
     let edge_clearance = Length::from_mm(0.3);
-    let half_widest = Length(opts.trace_width.0.max(opts.via_diameter.0) / 2);
+    // Widest copper feature across the *effective* trace widths (max
+    // of default and any class override) and the via diameter. Used
+    // to inset the routing region so even the fattest power trace
+    // sits clear of the board edge.
+    let mut widest = opts.trace_width.0.max(opts.via_diameter.0);
+    for o in opts.net_overrides.values() {
+        if let Some(w) = o.trace_width {
+            widest = widest.max(w.0);
+        }
+    }
+    let half_widest = Length(widest / 2);
     let outline_inset = edge_clearance + half_widest;
     match board.outline {
         Some(r) => Rect::from_corners(
@@ -365,13 +392,27 @@ fn route_pass(
 
     let region = compute_region(board, opts);
     let mut grid = Grid::new(region, opts.cell);
+    // Effective clearance for grid setup = max across the global
+    // default and every per-net override. The grid is built once, so
+    // we have to be conservative — using the strictest clearance
+    // means a class with 0.30 mm clearance never gets less halo than
+    // a default of 0.20 mm.
+    let max_clearance: Length = {
+        let mut c = opts.clearance;
+        for o in opts.net_overrides.values() {
+            if let Some(over) = o.clearance {
+                if over.0 > c.0 { c = over; }
+            }
+        }
+        c
+    };
     let net_id_lookup = |n: &str| net_id_of.get(n).copied();
-    grid.stamp_pads(board, &net_id_lookup, opts.clearance);
-    // Halo around freshly-laid traces, in cells: clearance / cell.
+    grid.stamp_pads(board, &net_id_lookup, max_clearance);
+    // Halo around freshly-laid traces, in cells: max_clearance / cell.
     // Round up so 0.20 mm clearance on a 0.25 mm grid still gives one
     // cell of breathing room.
     let halo_cells = {
-        let raw = (opts.clearance.0 + opts.cell.0 - 1) / opts.cell.0;
+        let raw = (max_clearance.0 + opts.cell.0 - 1) / opts.cell.0;
         i32::try_from(raw).unwrap_or(1).max(1)
     };
     // Via-safety radius: a via's copper extends `via_diameter/2` from
@@ -379,7 +420,7 @@ fn route_pass(
     // on both layers. The A* check rejects via flips landing inside
     // this radius of foreign cells.
     let via_safe_radius = {
-        let raw = (opts.via_diameter.0 / 2 + opts.clearance.0 + opts.cell.0 - 1) / opts.cell.0;
+        let raw = (opts.via_diameter.0 / 2 + max_clearance.0 + opts.cell.0 - 1) / opts.cell.0;
         i32::try_from(raw).unwrap_or(1).max(1)
     };
 
@@ -454,6 +495,14 @@ fn route_pass(
         let seed = pad_points[seed_idx].clone();
         let seed_grid = grid.snap(seed.center, seed.layer);
 
+        // Resolve this net's trace width: per-net override wins,
+        // otherwise the global default.
+        let net_trace_width = opts
+            .net_overrides
+            .get(net_name)
+            .and_then(|o| o.trace_width)
+            .unwrap_or(opts.trace_width);
+
         let mut net_segments = 0usize;
         let mut net_vias = 0usize;
         let mut net_length_mm = 0.0_f64;
@@ -497,8 +546,16 @@ fn route_pass(
                 failed = true;
                 break;
             };
-            let (segs, vias, length_mm) =
-                lay_path(board, &mut grid, &result.path, net_name, net_id, opts, halo_cells);
+            let (segs, vias, length_mm) = lay_path(
+                board,
+                &mut grid,
+                &result.path,
+                net_name,
+                net_id,
+                opts,
+                halo_cells,
+                net_trace_width,
+            );
             net_segments += segs;
             net_vias += vias;
             net_length_mm += length_mm;
@@ -603,6 +660,7 @@ fn lay_path(
     net_id: u32,
     opts: &RouteOptions,
     halo_cells: i32,
+    trace_width: Length,
 ) -> (usize, usize, f64) {
     if path.len() < 2 {
         return (0, 0, 0.0);
@@ -624,6 +682,7 @@ fn lay_path(
                     net_id,
                     opts,
                     halo_cells,
+                    trace_width,
                 );
                 segments += 1;
             }
@@ -648,6 +707,7 @@ fn lay_path(
             net_id,
             opts,
             halo_cells,
+            trace_width,
         );
         segments += 1;
     }
@@ -664,6 +724,7 @@ fn emit_trace(
     net_id: u32,
     opts: &RouteOptions,
     halo_cells: i32,
+    trace_width: Length,
 ) -> f64 {
     if path.len() < 2 {
         return 0.0;
@@ -681,7 +742,7 @@ fn emit_trace(
             layer,
             start,
             end,
-            width: opts.trace_width,
+            width: trace_width,
             net: net.to_string(),
         };
         grid.stamp_trace(s, e, net_id, halo_cells);
