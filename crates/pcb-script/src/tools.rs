@@ -4,6 +4,8 @@
 //! `pcb-core` to mutate the project, return the result. The agent owns
 //! all the design reasoning; tools are pure data primitives.
 
+use std::collections::HashMap;
+
 use pcb_core::schematic::{Net, NetConnection, PinSide, SchPin, Symbol, SymbolKind};
 use pcb_core::{
     ActivityLevel, CopperLayer, Footprint, FootprintSilk, Length, LibrarySilk, Pad, Point, Pour,
@@ -129,6 +131,16 @@ PALETTE / PLACEMENT:\n\
                                                  edge_mounted constraint\n\
   move REF X Y\n\
   rotate REF DEG                               — absolute rotation, multiples of 90 recommended\n\
+  auto-place REF [REF...] [iters=N] [seed=N] [max_step=N] [min_step=N] [min_gap=N] [gap_penalty=N]\n\
+                                               — simulated-annealing placer over the listed refs.\n\
+                                                 Pinned refs (everything not listed) stay put.\n\
+                                                 Optimises HPWL plus a soft body-to-body gap\n\
+                                                 penalty; obeys outline + edge_mounted constraints,\n\
+                                                 hard-rejects pad overlap. Defaults: iters=8000\n\
+                                                 (~3 s for ~20 components), seed=clock, max_step=20 mm,\n\
+                                                 min_gap=2.0 mm, gap_penalty=16. Bigger min_gap =\n\
+                                                 more breathing room for the router; bigger\n\
+                                                 gap_penalty = SA enforces the gap more strictly.\n\
 \n\
 ROUTING:\n\
   route [trace_width=N] [clearance=N] [via_drill=N] [via_diameter=N] [via_cost=N] [cell=N]\n\
@@ -239,6 +251,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "route.add_trace" => tool_route_add_trace(project, args),
         "route.add_via" => tool_route_add_via(project, args),
         "route.clear" => tool_route_clear(project),
+        "placement.auto" => tool_placement_auto(project, args),
         "route.run" => tool_route_run(project, args),
         "pour.add" => tool_pour_add(project, args),
         "pour.remove" => tool_pour_remove(project, args),
@@ -2055,6 +2068,127 @@ fn default_clearance() -> f64 { 0.20 }
 fn default_via_cost() -> u32 { 8 }
 fn default_via_drill() -> f64 { 0.30 }
 fn default_via_diameter() -> f64 { 0.60 }
+
+#[derive(Debug, Deserialize)]
+struct AutoPlaceInput {
+    refs: Vec<String>,
+    /// Floats so the script parser (which emits `42` as `42.0` for any
+    /// numeric kv) can hand them to us; we cast to the integer types
+    /// the placer wants below. Negative or NaN values are clamped.
+    #[serde(default)]
+    iters: Option<f64>,
+    #[serde(default)]
+    seed: Option<f64>,
+    #[serde(default)]
+    max_step_mm: Option<f64>,
+    #[serde(default)]
+    min_step_mm: Option<f64>,
+    #[serde(default)]
+    min_gap_mm: Option<f64>,
+    #[serde(default)]
+    gap_penalty_factor: Option<f64>,
+}
+
+fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: AutoPlaceInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("auto-place: {e}")))?;
+
+    let mut opts = pcb_placer::PlaceOptions::default();
+    if let Some(v) = input.iters { opts.max_iterations = v.max(0.0) as usize; }
+    if let Some(v) = input.seed { opts.seed = v.max(0.0) as u64; }
+    if let Some(v) = input.max_step_mm { opts.max_step_mm = v; }
+    if let Some(v) = input.min_step_mm { opts.min_step_mm = v; }
+    if let Some(v) = input.min_gap_mm { opts.min_gap_mm = v; }
+    if let Some(v) = input.gap_penalty_factor { opts.gap_penalty_factor = v; }
+
+    // Place on a clone so the project lock is released quickly. Apply
+    // the resulting positions back through the regular `move_footprint_to`
+    // / `rotate_footprint` APIs so the UI sees the moves event by event.
+    let mut work = project.read().board().clone();
+    let report = pcb_placer::place(&mut work, &input.refs, &opts)
+        .map_err(|e| ToolError::invalid_params(format!("auto-place: {e}")))?;
+
+    // Push back any positions / rotations that actually changed. We
+    // use the id-based, unchecked Project APIs (`move_footprint` /
+    // `set_footprint_rotation`) instead of the ref-based, validated
+    // ones: the placer's FINAL state is consistent, but applying move
+    // by move re-validates each intermediate state against the LIVE
+    // project, which falsely rejects a step when two parts cross paths
+    // mid-batch. The id-based path skips the re-check.
+    let mut applied_moves = 0usize;
+    let mut applied_rotations = 0usize;
+    let live_id_of_ref: HashMap<String, pcb_core::Id> = project
+        .read()
+        .board()
+        .footprints_in_order()
+        .map(|fp| (fp.reference.clone(), fp.id))
+        .collect();
+    for r in &report.moved {
+        let Some(target) = work
+            .footprints_in_order()
+            .find(|fp| &fp.reference == r)
+            .cloned()
+        else {
+            continue;
+        };
+        let Some(&id) = live_id_of_ref.get(r) else { continue };
+        if project.move_footprint(id, target.position) {
+            applied_moves += 1;
+        }
+        if project.set_footprint_rotation(id, target.rotation) {
+            applied_rotations += 1;
+        }
+    }
+    let errors: Vec<String> = Vec::new();
+
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "auto-place: HPWL {:.1} → {:.1} mm ({:+.1} mm), {} accepted of {} iters, applied {} moves",
+            report.initial_hpwl_mm,
+            report.final_hpwl_mm,
+            report.final_hpwl_mm - report.initial_hpwl_mm,
+            report.accepted,
+            report.iterations,
+            applied_moves,
+        ),
+    );
+
+    let mut text = format!(
+        "auto-place: HPWL {:.1} mm → {:.1} mm ({:+.1} mm), moved {} footprint(s)",
+        report.initial_hpwl_mm,
+        report.final_hpwl_mm,
+        report.final_hpwl_mm - report.initial_hpwl_mm,
+        applied_moves,
+    );
+    if !report.skipped.is_empty() {
+        text.push_str(&format!(
+            "\n  skipped {} unknown ref(s): {}",
+            report.skipped.len(),
+            report.skipped.join(", "),
+        ));
+    }
+    if !errors.is_empty() {
+        text.push_str("\n  errors:");
+        for e in &errors {
+            text.push_str("\n    ");
+            text.push_str(e);
+        }
+    }
+
+    Ok(text_result(text).with_data(json!({
+        "initial_hpwl_mm": round2(report.initial_hpwl_mm),
+        "final_hpwl_mm": round2(report.final_hpwl_mm),
+        "delta_mm": round2(report.final_hpwl_mm - report.initial_hpwl_mm),
+        "iterations": report.iterations,
+        "accepted": report.accepted,
+        "moved": report.moved,
+        "applied_moves": applied_moves,
+        "applied_rotations": applied_rotations,
+        "skipped": report.skipped,
+        "errors": errors,
+    })))
+}
 
 fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: RouteRunInput = serde_json::from_value(args.clone())

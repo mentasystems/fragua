@@ -130,6 +130,25 @@ impl Project {
         moved
     }
 
+    /// Set a footprint's rotation by id, bypassing the overlap and
+    /// edge-mount probe that `rotate_footprint` runs. Used by trusted
+    /// callers (the auto-placer) that have already validated the full
+    /// final placement: a ref-by-ref re-check against the LIVE state
+    /// would falsely reject intermediate steps where two parts haven't
+    /// landed yet.
+    pub fn set_footprint_rotation(&self, id: Id, rotation_deg: f32) -> bool {
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        let position = if let Some(fp) = inner.board.footprints.get_mut(&id) {
+            fp.rotation = rotation_deg;
+            fp.position
+        } else {
+            return false;
+        };
+        drop(inner);
+        self.bus.publish(Event::FootprintMoved { id, position });
+        true
+    }
+
     pub fn remove_footprint(&self, id: Id) -> bool {
         let removed = {
             let mut inner = self.inner.write().expect("project lock poisoned");
@@ -335,7 +354,7 @@ impl Project {
             .ok_or_else(|| format!("no palette item named {reference}"))?;
         let mut fp = inner.palette[idx].clone();
         fp.position = position;
-        if let Some(other) = first_overlapper(&inner.board, &fp, None) {
+        if let Some(other) = inner.board.first_overlapper(&fp, None) {
             return Err(format!(
                 "{reference} at ({:.2}, {:.2}) mm would overlap {} — pick another position",
                 position.x.to_mm(),
@@ -343,7 +362,7 @@ impl Project {
                 other,
             ));
         }
-        if let Some(reason) = edge_violation(&inner.board, &fp) {
+        if let Some(reason) = inner.board.edge_mount_violation(&fp) {
             return Err(format!(
                 "{reference} is edge-mounted but {reason} — pick a position whose bbox touches the board outline",
             ));
@@ -374,12 +393,12 @@ impl Project {
             .ok_or_else(|| format!("no board footprint named {reference}"))?;
         let mut probe = inner.board.footprints[&id].clone();
         probe.rotation = rotation_deg;
-        if let Some(other) = first_overlapper(&inner.board, &probe, Some(id)) {
+        if let Some(other) = inner.board.first_overlapper(&probe, Some(id)) {
             return Err(format!(
                 "{reference} rotated to {rotation_deg:.0}° would overlap {other}"
             ));
         }
-        if let Some(reason) = edge_violation(&inner.board, &probe) {
+        if let Some(reason) = inner.board.edge_mount_violation(&probe) {
             return Err(format!(
                 "{reference} is edge-mounted but after rotation {reason}",
             ));
@@ -408,14 +427,14 @@ impl Project {
             .ok_or_else(|| format!("no board footprint named {reference}"))?;
         let mut probe = inner.board.footprints[&id].clone();
         probe.position = position;
-        if let Some(other) = first_overlapper(&inner.board, &probe, Some(id)) {
+        if let Some(other) = inner.board.first_overlapper(&probe, Some(id)) {
             return Err(format!(
                 "moving {reference} to ({:.2}, {:.2}) mm would overlap {other}",
                 position.x.to_mm(),
                 position.y.to_mm(),
             ));
         }
-        if let Some(reason) = edge_violation(&inner.board, &probe) {
+        if let Some(reason) = inner.board.edge_mount_violation(&probe) {
             return Err(format!(
                 "{reference} is edge-mounted but moving to ({:.2}, {:.2}) mm {reason}",
                 position.x.to_mm(),
@@ -672,66 +691,6 @@ impl Project {
     pub fn set_save_path(&self, path: Option<PathBuf>) {
         *self.save_path.write().expect("save_path lock poisoned") = path;
     }
-}
-
-/// Tolerance in mm: how close a bbox edge must be to a board outline
-/// edge for the footprint to count as "touching the edge". Bigger than
-/// the trace clearance default so rounding doesn't reject borderline
-/// placements.
-const EDGE_TOUCH_TOLERANCE_MM: f64 = 0.5;
-
-/// If `probe.edge_mounted` is true, return a human-readable reason
-/// when its bbox does NOT touch any side of the board outline. Returns
-/// `None` if either edge_mounted is false (no constraint), the board
-/// has no outline yet, or at least one bbox side is within tolerance
-/// of the matching outline side.
-fn edge_violation(board: &Board, probe: &Footprint) -> Option<String> {
-    if !probe.edge_mounted {
-        return None;
-    }
-    let outline = board.outline?;
-    let bbox = probe.bounds()?;
-    let tol_nm = (EDGE_TOUCH_TOLERANCE_MM * 1_000_000.0) as i64;
-    let touches_left   = (bbox.min.x.0 - outline.min.x.0).abs() <= tol_nm;
-    let touches_right  = (outline.max.x.0 - bbox.max.x.0).abs() <= tol_nm;
-    let touches_top    = (bbox.min.y.0 - outline.min.y.0).abs() <= tol_nm;
-    let touches_bottom = (outline.max.y.0 - bbox.max.y.0).abs() <= tol_nm;
-    if touches_left || touches_right || touches_top || touches_bottom {
-        return None;
-    }
-    let dx_left = (bbox.min.x.0 - outline.min.x.0).abs() as f64 / 1_000_000.0;
-    let dx_right = (outline.max.x.0 - bbox.max.x.0).abs() as f64 / 1_000_000.0;
-    let dy_top = (bbox.min.y.0 - outline.min.y.0).abs() as f64 / 1_000_000.0;
-    let dy_bottom = (outline.max.y.0 - bbox.max.y.0).abs() as f64 / 1_000_000.0;
-    let nearest = dx_left.min(dx_right).min(dy_top).min(dy_bottom);
-    Some(format!(
-        "the bbox is {nearest:.2} mm from the nearest outline edge"
-    ))
-}
-
-/// Return the reference of the first existing board footprint whose
-/// bbox intersects `probe`'s bbox, or `None` if `probe` is clear.
-/// `ignore_id` skips a single footprint (useful for move/rotate where
-/// the probe is the same footprint at a new pose).
-/// Minimum body-to-body clearance between two footprints (mm). Anything
-/// closer than this can't be hand-soldered or reworked without disturbing
-/// the neighbour, so the placement API rejects it.
-const MIN_FOOTPRINT_GAP_MM: f64 = 0.5;
-
-fn first_overlapper(board: &Board, probe: &Footprint, ignore_id: Option<Id>) -> Option<String> {
-    let probe_bounds = probe.bounds()?.expand(Length::from_mm(MIN_FOOTPRINT_GAP_MM / 2.0));
-    for fp in board.footprints_in_order() {
-        if Some(fp.id) == ignore_id {
-            continue;
-        }
-        if let Some(b) = fp.bounds() {
-            let inflated = b.expand(Length::from_mm(MIN_FOOTPRINT_GAP_MM / 2.0));
-            if probe_bounds.intersects(&inflated) {
-                return Some(fp.reference.clone());
-            }
-        }
-    }
-    None
 }
 
 /// Read-only view of the project, held while the caller is reading.

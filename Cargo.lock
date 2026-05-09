@@ -2166,6 +2166,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcb-placer"
+version = "0.0.0"
+dependencies = [
+ "pcb-core",
+]
+
+[[package]]
 name = "pcb-render"
 version = "0.0.0"
 dependencies = [
@@ -2187,6 +2194,7 @@ dependencies = [
  "pcb-core",
  "pcb-drc",
  "pcb-gerber",
+ "pcb-placer",
  "pcb-render",
  "pcb-router",
  "serde",

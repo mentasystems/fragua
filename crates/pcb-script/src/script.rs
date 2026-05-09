@@ -586,6 +586,36 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
             Ok(Cmd { line, tool: "route.delete_via".into(), args: json!({"id": tokens[1]}) })
         }
 
+        "auto-place" => {
+            // auto-place REF [REF...] [iters=N] [seed=N] [max_step=N] [min_step=N]
+            need_args(line, tokens, 1, "auto-place REF [REF...] [iters=N] [seed=N] [max_step=N]")?;
+            // Positional refs end at the first token containing `=`. Refs
+            // can't contain `=` (alphanumeric + `.` + `_` only), so this
+            // split is unambiguous.
+            let mut refs: Vec<String> = Vec::new();
+            let mut kv_start = tokens.len();
+            for (i, t) in tokens.iter().enumerate().skip(1) {
+                if t.contains('=') {
+                    kv_start = i;
+                    break;
+                }
+                refs.push(t.clone());
+            }
+            if refs.is_empty() {
+                return Err(ParseError::at(line, "auto-place: at least one footprint reference required".to_string()));
+            }
+            let mut args = json!({ "refs": refs });
+            apply_kv(&mut args, &tokens[kv_start..], line, &[
+                ("iters",    AttrType::Num),
+                ("seed",     AttrType::Num),
+                ("max_step", AttrType::NumInto("max_step_mm")),
+                ("min_step", AttrType::NumInto("min_step_mm")),
+                ("min_gap",  AttrType::NumInto("min_gap_mm")),
+                ("gap_penalty", AttrType::NumInto("gap_penalty_factor")),
+            ])?;
+            Ok(Cmd { line, tool: "placement.auto".into(), args })
+        }
+
         "drc" => {
             let mut args = json!({});
             apply_kv(&mut args, &tokens[1..], line, &[
