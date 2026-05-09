@@ -97,6 +97,61 @@ fn trace_touching_pad_marks_pad_as_connected() {
 }
 
 #[test]
+fn routing_inefficient_fires_when_actual_far_exceeds_hpwl() {
+    let mut board = Board::new();
+    board.outline = Some(Rect::from_corners(
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+        Point::new(Length::from_mm(50.0), Length::from_mm(50.0)),
+    ));
+    // Two pads on net "S" 10 mm apart on the X axis. HPWL = 10 mm.
+    board.add_footprint(fp("R1", 5.0, 25.0, vec![pad("1", 0.0, 0.0, Some("S"))]));
+    board.add_footprint(fp("R2", 15.0, 25.0, vec![pad("1", 0.0, 0.0, Some("S"))]));
+    // Snake the trace so the actual length is ~30 mm — 3× HPWL, well
+    // above the default 1.5× threshold.
+    let seg = |x1, y1, x2, y2| Trace {
+        id: Id::new(),
+        layer: CopperLayer::Top,
+        start: Point::new(Length::from_mm(x1), Length::from_mm(y1)),
+        end: Point::new(Length::from_mm(x2), Length::from_mm(y2)),
+        width: Length::from_mm(0.25),
+        net: "S".into(),
+    };
+    board.add_trace(seg(5.0, 25.0, 5.0, 35.0));
+    board.add_trace(seg(5.0, 35.0, 15.0, 35.0));
+    board.add_trace(seg(15.0, 35.0, 15.0, 25.0));
+    let report = run(&board, &DrcOptions::default());
+    assert!(report
+        .violations
+        .iter()
+        .any(|v| v.kind == ViolationKind::RoutingInefficient));
+}
+
+#[test]
+fn routing_inefficient_silent_when_close_to_hpwl() {
+    let mut board = Board::new();
+    board.outline = Some(Rect::from_corners(
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+        Point::new(Length::from_mm(50.0), Length::from_mm(50.0)),
+    ));
+    board.add_footprint(fp("R1", 5.0, 25.0, vec![pad("1", 0.0, 0.0, Some("S"))]));
+    board.add_footprint(fp("R2", 15.0, 25.0, vec![pad("1", 0.0, 0.0, Some("S"))]));
+    // Direct trace; length ≈ HPWL.
+    board.add_trace(Trace {
+        id: Id::new(),
+        layer: CopperLayer::Top,
+        start: Point::new(Length::from_mm(5.0), Length::from_mm(25.0)),
+        end: Point::new(Length::from_mm(15.0), Length::from_mm(25.0)),
+        width: Length::from_mm(0.25),
+        net: "S".into(),
+    });
+    let report = run(&board, &DrcOptions::default());
+    assert!(!report
+        .violations
+        .iter()
+        .any(|v| v.kind == ViolationKind::RoutingInefficient));
+}
+
+#[test]
 fn edge_clearance_violation() {
     let mut board = Board::new();
     board.outline = Some(Rect::from_corners(

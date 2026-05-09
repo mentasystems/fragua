@@ -22,6 +22,8 @@
 //! rotations; this lets the geometry collapse to AABB-vs-AABB and
 //! AABB-vs-segment distance checks instead of full polygon clipping.
 
+use std::collections::{HashMap, HashSet};
+
 use serde::Serialize;
 
 use pcb_core::{Board, CopperLayer, Footprint, Length, Pad, Pour, Rect, Trace};
@@ -32,6 +34,13 @@ pub struct DrcOptions {
     pub edge_clearance: Length,
     pub min_trace_width: Length,
     pub min_drill: Length,
+    /// `actual_wire / HPWL_lower_bound` above which a net is flagged
+    /// `RoutingInefficient`. HPWL = the half-perimeter of the net's pad
+    /// bounding box, the universal lower bound on tree wire length.
+    /// 1.5 means "the routing used 50 % more wire than the geometric
+    /// optimum"; below that the detour is usually noise (cell-pitch
+    /// rounding, single 90° bend around a footprint).
+    pub routing_inefficient_ratio: f32,
 }
 
 impl Default for DrcOptions {
@@ -43,6 +52,7 @@ impl Default for DrcOptions {
             edge_clearance: Length::from_mm(0.3),
             min_trace_width: Length::from_mm(0.1),
             min_drill: Length::from_mm(0.2),
+            routing_inefficient_ratio: 1.5,
         }
     }
 }
@@ -65,6 +75,11 @@ pub enum ViolationKind {
     NarrowTrace,
     SmallDrill,
     SmallComponentDangling,
+    /// A net was routed but the actual wire length is much longer than
+    /// the HPWL lower bound for its pads — usually a sign that the
+    /// router had to take a long detour because some other net was
+    /// blocking the obvious corridor (i.e. a placement issue).
+    RoutingInefficient,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,6 +126,7 @@ pub fn run(board: &Board, opts: &DrcOptions) -> DrcReport {
     check_small_component_dangling(board, &pads, &mut report);
     check_narrow_traces(board, opts, &mut report);
     check_small_drills(board, opts, &mut report);
+    check_routing_inefficient(board, opts, &mut report);
     report
 }
 
@@ -519,6 +535,85 @@ fn check_narrow_traces(board: &Board, opts: &DrcOptions, report: &mut DrcReport)
                 x_mm: mx,
                 y_mm: my,
                 involved: vec![trace.net.clone()],
+            });
+        }
+    }
+}
+
+/// Flag every routed net whose total wire length exceeds the HPWL
+/// (half-perimeter of the pad bounding box) lower bound by more than
+/// `opts.routing_inefficient_ratio`. HPWL is the minimum wire any tree
+/// connecting the pads can use, so a high ratio means the router took a
+/// detour — usually because some other net's traces were blocking the
+/// natural corridor. The fix is almost always to move components, not
+/// to change the router's parameters.
+fn check_routing_inefficient(board: &Board, opts: &DrcOptions, report: &mut DrcReport) {
+    let pour_nets: HashSet<&str> = board.pours.iter().map(|p| p.net.as_str()).collect();
+
+    // Per-net pad world-centres (mm). Skip nets that ride a pour — the
+    // pour is the connection, no traces are expected.
+    let mut net_pads: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
+    for fp in board.footprints.values() {
+        for pad in &fp.pads {
+            let Some(net) = pad.net.as_deref() else { continue; };
+            if pour_nets.contains(net) {
+                continue;
+            }
+            let c = fp.pad_world_center(pad);
+            net_pads
+                .entry(net.to_string())
+                .or_default()
+                .push((c.x.to_mm(), c.y.to_mm()));
+        }
+    }
+
+    // Per-net actual wire length, summed across both layers.
+    let mut net_length: HashMap<&str, f64> = HashMap::new();
+    for trace in &board.traces {
+        let dx = trace.end.x.to_mm() - trace.start.x.to_mm();
+        let dy = trace.end.y.to_mm() - trace.start.y.to_mm();
+        *net_length.entry(trace.net.as_str()).or_insert(0.0) += (dx * dx + dy * dy).sqrt();
+    }
+
+    let threshold = f64::from(opts.routing_inefficient_ratio);
+    for (net, pads) in &net_pads {
+        if pads.len() < 2 {
+            continue;
+        }
+        let actual = net_length.get(net.as_str()).copied().unwrap_or(0.0);
+        // Unrouted nets are caught by UnconnectedPad / SmallComponentDangling;
+        // we only opine on what the router did lay.
+        if actual <= 1e-6 {
+            continue;
+        }
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for &(x, y) in pads {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+        let hpwl = (max_x - min_x) + (max_y - min_y);
+        if hpwl < 1e-3 {
+            // All pads on top of each other — degenerate, skip.
+            continue;
+        }
+        let ratio = actual / hpwl;
+        if ratio > threshold {
+            let cx = pads.iter().map(|p| p.0).sum::<f64>() / pads.len() as f64;
+            let cy = pads.iter().map(|p| p.1).sum::<f64>() / pads.len() as f64;
+            report.push(Violation {
+                kind: ViolationKind::RoutingInefficient,
+                severity: Severity::Warning,
+                message: format!(
+                    "net {net}: {actual:.2} mm of wire vs {hpwl:.2} mm lower bound (ratio {ratio:.2}× — placement is forcing a detour)"
+                ),
+                x_mm: cx,
+                y_mm: cy,
+                involved: vec![net.clone()],
             });
         }
     }

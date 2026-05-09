@@ -45,7 +45,18 @@ impl Default for RouteOptions {
 
 #[derive(Debug, Clone)]
 pub enum Outcome {
-    Ok { trace_segments: usize, vias: usize },
+    Ok {
+        trace_segments: usize,
+        vias: usize,
+        /// Sum of straight-segment lengths laid down for this net, mm.
+        length_mm: f64,
+        /// Sum of Manhattan distances from the chosen hub pad to every
+        /// other pad in the net, mm. This is the lower bound a perfect
+        /// orthogonal star tree could hit. `length_mm / lower_bound_mm`
+        /// is the "detour ratio" — 1.0 = optimal, > 1.5 = the router
+        /// (or the placement) made the net work harder than it should.
+        lower_bound_mm: f64,
+    },
     Failed { reason: String },
 }
 
@@ -54,25 +65,151 @@ pub struct RouteReport {
     pub per_net: Vec<(String, Outcome)>,
     pub trace_count: usize,
     pub via_count: usize,
+    /// Sum of `length_mm` over every successfully-routed net.
+    pub total_length_mm: f64,
+    /// Sum of `lower_bound_mm` over the same set.
+    pub total_lower_bound_mm: f64,
+    /// How many full rip-up-and-reroute passes the driver performed
+    /// before settling on this report. 1 = single pass (no RR&R needed
+    /// or RR&R didn't help); 2..=`MAX_RR_ITERATIONS` = RR&R kicked in.
+    pub iterations: usize,
 }
+
+/// Hard cap on rip-up-and-reroute passes. Each pass clears all routing
+/// and re-runs the per-net A* loop with a different ordering, so the
+/// cost is roughly linear in this constant. 3 is empirically enough to
+/// recover most fixable failures without exploding wall-clock time.
+const MAX_RR_ITERATIONS: usize = 3;
+
+/// A net is "bad" — and pulled to the front of the next iteration's
+/// order — if its detour ratio exceeds this threshold or it failed
+/// outright. 1.8 means "the actual wire is ≥80 % longer than the
+/// hub-to-pads optimum"; below that, reordering rarely helps.
+const BAD_DETOUR_RATIO: f64 = 1.8;
 
 /// Route every net found in the board's pad assignments. Mutates
 /// `board` in place: existing routing is cleared, new routing is laid.
+///
+/// The driver runs up to `MAX_RR_ITERATIONS` rip-up-and-reroute passes.
+/// After each pass, any net that failed or whose detour ratio exceeds
+/// `BAD_DETOUR_RATIO` is pulled to the front of the order for the next
+/// pass — those bad nets get pristine corridors before the easy nets
+/// claim the obvious paths. The "best" report (fewest failures, then
+/// shortest total wire) wins; if no iteration improves on the first,
+/// the first wins and the board is laid back to its first-pass state.
 pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
-    board.clear_routing();
-
-    // Collect nets and their pad locations.
     let nets = collect_nets(board);
     if nets.is_empty() {
+        board.clear_routing();
         return RouteReport {
             per_net: Vec::new(),
             trace_count: 0,
             via_count: 0,
+            total_length_mm: 0.0,
+            total_lower_bound_mm: 0.0,
+            iterations: 0,
         };
     }
-    let net_names: Vec<String> = nets.keys().cloned().collect();
-    let net_id_of_owned = net_names.clone();
-    let net_id_of: HashMap<String, u32> = net_id_of_owned
+
+    // First-pass order: easy nets (fewest pads) first. Same heuristic
+    // as before — gets the unconstrained nets to lay copper before the
+    // hairy ones contend for space.
+    let mut order: Vec<String> = nets.keys().cloned().collect();
+    order.sort_by_key(|n| nets.get(n).map(Vec::len).unwrap_or(0));
+
+    let mut best: Option<(Board, RouteReport)> = None;
+    let mut last_order: Option<Vec<String>> = None;
+    let mut iterations_run = 0;
+    for _ in 1..=MAX_RR_ITERATIONS {
+        // Stop early if reordering produced nothing new — no point
+        // re-running the exact same sequence twice.
+        if last_order.as_ref() == Some(&order) {
+            break;
+        }
+        last_order = Some(order.clone());
+        iterations_run += 1;
+
+        let mut work = board.clone();
+        work.clear_routing();
+        let report = route_pass(&mut work, &nets, &order, opts);
+
+        let take_it = match &best {
+            None => true,
+            Some((_, prev)) => report_is_better(&report, prev),
+        };
+        if take_it {
+            best = Some((work, report.clone()));
+        }
+
+        // Identify bad nets for next iteration. Failed nets always go
+        // to the front; inefficient ones follow. Everything else keeps
+        // its relative position so we don't rotate the easy nets too.
+        let mut failed: Vec<String> = Vec::new();
+        let mut inefficient: Vec<String> = Vec::new();
+        for (name, outcome) in &report.per_net {
+            match outcome {
+                Outcome::Failed { .. } => failed.push(name.clone()),
+                Outcome::Ok { length_mm, lower_bound_mm, .. }
+                    if *lower_bound_mm > 0.0
+                        && length_mm / lower_bound_mm > BAD_DETOUR_RATIO =>
+                {
+                    inefficient.push(name.clone());
+                }
+                _ => {}
+            }
+        }
+        if failed.is_empty() && inefficient.is_empty() {
+            break;
+        }
+        let bad: std::collections::HashSet<String> =
+            failed.iter().chain(inefficient.iter()).cloned().collect();
+        let rest: Vec<String> = order.iter().filter(|n| !bad.contains(*n)).cloned().collect();
+        order = failed.into_iter().chain(inefficient).chain(rest).collect();
+    }
+
+    let (best_work, mut best_report) = best.expect("at least one iteration ran");
+    best_report.iterations = iterations_run;
+    // Stamp the winning routing onto the caller's board.
+    board.clear_routing();
+    for trace in best_work.traces {
+        board.add_trace(trace);
+    }
+    for via in best_work.vias {
+        board.add_via(via);
+    }
+    best_report
+}
+
+/// Heuristic: fewer failed nets > shorter total wire > fewer vias.
+fn report_is_better(a: &RouteReport, b: &RouteReport) -> bool {
+    let fails_a = count_failed(a);
+    let fails_b = count_failed(b);
+    if fails_a != fails_b {
+        return fails_a < fails_b;
+    }
+    if (a.total_length_mm - b.total_length_mm).abs() > 1e-6 {
+        return a.total_length_mm < b.total_length_mm;
+    }
+    a.via_count < b.via_count
+}
+
+fn count_failed(r: &RouteReport) -> usize {
+    r.per_net
+        .iter()
+        .filter(|(_, o)| matches!(o, Outcome::Failed { .. }))
+        .count()
+}
+
+/// One full routing pass: lay every net (in `order`) onto a freshly
+/// cleared `board` and return the per-net outcomes. The board's
+/// routing must already be cleared by the caller.
+fn route_pass(
+    board: &mut Board,
+    nets: &BTreeMap<String, Vec<NetPadInfo>>,
+    order: &[String],
+    opts: &RouteOptions,
+) -> RouteReport {
+    let net_id_of: HashMap<String, u32> = order
         .iter()
         .enumerate()
         .map(|(i, n)| (n.clone(), i as u32))
@@ -123,12 +260,8 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     let mut per_net = Vec::with_capacity(nets.len());
     let mut total_traces = 0;
     let mut total_vias = 0;
-
-    // Route nets in order of increasing pad count so easy ones lay
-    // down their tracks before harder ones contend for space. This is
-    // a cheap heuristic; full rip-up-and-retry comes in a later phase.
-    let mut ordered: Vec<_> = nets.into_iter().collect();
-    ordered.sort_by_key(|(_, pads)| pads.len());
+    let mut total_length_mm = 0.0_f64;
+    let mut total_lower_bound_mm = 0.0_f64;
 
     // Nets that already have a copper pour on at least one layer
     // skip the router entirely — the pour itself is the electrical
@@ -140,19 +273,30 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
         .map(|p| p.net.clone())
         .collect();
 
-    for (net_name, pad_points) in ordered {
-        let net_id = net_id_of[&net_name];
-        if pour_nets.contains(&net_name) {
+    for net_name in order {
+        let Some(pad_points) = nets.get(net_name) else { continue };
+        let net_id = net_id_of[net_name];
+        if pour_nets.contains(net_name) {
             per_net.push((
-                net_name,
-                Outcome::Ok { trace_segments: 0, vias: 0 },
+                net_name.clone(),
+                Outcome::Ok {
+                    trace_segments: 0,
+                    vias: 0,
+                    length_mm: 0.0,
+                    lower_bound_mm: 0.0,
+                },
             ));
             continue;
         }
         if pad_points.len() < 2 {
             per_net.push((
-                net_name,
-                Outcome::Ok { trace_segments: 0, vias: 0 },
+                net_name.clone(),
+                Outcome::Ok {
+                    trace_segments: 0,
+                    vias: 0,
+                    length_mm: 0.0,
+                    lower_bound_mm: 0.0,
+                },
             ));
             continue;
         }
@@ -181,6 +325,8 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
 
         let mut net_segments = 0usize;
         let mut net_vias = 0usize;
+        let mut net_length_mm = 0.0_f64;
+        let mut net_lower_bound_mm = 0.0_f64;
         let mut failed = false;
         // Spokes ordered by distance to hub (closest first). Once the
         // first spokes lay copper near the hub, subsequent (farther)
@@ -197,6 +343,11 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
                 + (hub.center.y.0 - q.center.y.0).unsigned_abs()
         });
         for spoke in spokes_sorted {
+            // Lower bound: hub→spoke Manhattan distance. Sum over all
+            // spokes is the optimum total wire for an orthogonal star
+            // tree, which is what the router lays.
+            net_lower_bound_mm += (hub.center.x.to_mm() - spoke.center.x.to_mm()).abs()
+                + (hub.center.y.to_mm() - spoke.center.y.to_mm()).abs();
             let spoke_grid = grid.snap(spoke.center, spoke.layer);
             let Some(result) = search(
                 &grid,
@@ -221,19 +372,24 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
                 failed = true;
                 break;
             };
-            let (segs, vias) =
-                lay_path(board, &mut grid, &result.path, &net_name, net_id, opts, halo_cells);
+            let (segs, vias, length_mm) =
+                lay_path(board, &mut grid, &result.path, net_name, net_id, opts, halo_cells);
             net_segments += segs;
             net_vias += vias;
+            net_length_mm += length_mm;
         }
         if !failed {
             total_traces += net_segments;
             total_vias += net_vias;
+            total_length_mm += net_length_mm;
+            total_lower_bound_mm += net_lower_bound_mm;
             per_net.push((
-                net_name,
+                net_name.clone(),
                 Outcome::Ok {
                     trace_segments: net_segments,
                     vias: net_vias,
+                    length_mm: net_length_mm,
+                    lower_bound_mm: net_lower_bound_mm,
                 },
             ));
         }
@@ -243,12 +399,17 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
         per_net,
         trace_count: total_traces,
         via_count: total_vias,
+        total_length_mm,
+        total_lower_bound_mm,
+        iterations: 0,
     }
 }
 
 /// Collapse the path's grid cells into trace segments + via flips and
 /// add them to the board. Stamps the new traces onto the grid so
-/// subsequent nets honour them as obstacles.
+/// subsequent nets honour them as obstacles. Returns
+/// `(segments, vias, length_mm)` where `length_mm` is the sum of all
+/// straight segments laid (vias themselves contribute zero length).
 fn lay_path(
     board: &mut Board,
     grid: &mut Grid,
@@ -257,19 +418,20 @@ fn lay_path(
     net_id: u32,
     opts: &RouteOptions,
     halo_cells: i32,
-) -> (usize, usize) {
+) -> (usize, usize, f64) {
     if path.len() < 2 {
-        return (0, 0);
+        return (0, 0, 0.0);
     }
     let mut segments = 0;
     let mut vias = 0;
+    let mut length_mm = 0.0_f64;
     let mut seg_start_idx = 0;
     for i in 1..path.len() {
         let prev = path[i - 1];
         let cur = path[i];
         if cur.layer != prev.layer {
             if seg_start_idx < i - 1 {
-                emit_trace(
+                length_mm += emit_trace(
                     board,
                     grid,
                     &path[seg_start_idx..i],
@@ -293,7 +455,7 @@ fn lay_path(
         }
     }
     if seg_start_idx < path.len() - 1 {
-        emit_trace(
+        length_mm += emit_trace(
             board,
             grid,
             &path[seg_start_idx..],
@@ -304,9 +466,11 @@ fn lay_path(
         );
         segments += 1;
     }
-    (segments, vias)
+    (segments, vias, length_mm)
 }
 
+/// Emit all the straight segments contained in `path` (one per turn)
+/// and return the total length, in mm, of the segments laid.
 fn emit_trace(
     board: &mut Board,
     grid: &mut Grid,
@@ -315,12 +479,30 @@ fn emit_trace(
     net_id: u32,
     opts: &RouteOptions,
     halo_cells: i32,
-) {
+) -> f64 {
     if path.len() < 2 {
-        return;
+        return 0.0;
     }
     let layer = path[0].copper_layer();
+    let mut total_mm = 0.0_f64;
     let mut start_idx = 0;
+    let push_trace = |board: &mut Board, grid: &mut Grid, s: GridPoint, e: GridPoint| -> f64 {
+        let start = grid.unsnap(s);
+        let end = grid.unsnap(e);
+        let len_mm = (start.x.to_mm() - end.x.to_mm()).abs()
+            + (start.y.to_mm() - end.y.to_mm()).abs();
+        let trace = Trace {
+            id: pcb_core::Id::new(),
+            layer,
+            start,
+            end,
+            width: opts.trace_width,
+            net: net.to_string(),
+        };
+        grid.stamp_trace(s, e, net_id, halo_cells);
+        board.add_trace(trace);
+        len_mm
+    };
     for i in 1..path.len() {
         let a = path[i - 1];
         let b = path[i];
@@ -329,31 +511,14 @@ fn emit_trace(
         let started_horizontal = a.row == s.row;
         let direction_change = i > 1 && going_horizontal != started_horizontal;
         if direction_change {
-            let trace = Trace {
-                id: pcb_core::Id::new(),
-                layer,
-                start: grid.unsnap(s),
-                end: grid.unsnap(a),
-                width: opts.trace_width,
-                net: net.to_string(),
-            };
-            grid.stamp_trace(s, a, net_id, halo_cells);
-            board.add_trace(trace);
+            total_mm += push_trace(board, grid, s, a);
             start_idx = i - 1;
         }
     }
     let s = path[start_idx];
     let e = path[path.len() - 1];
-    let trace = Trace {
-        id: pcb_core::Id::new(),
-        layer,
-        start: grid.unsnap(s),
-        end: grid.unsnap(e),
-        width: opts.trace_width,
-        net: net.to_string(),
-    };
-    grid.stamp_trace(s, e, net_id, halo_cells);
-    board.add_trace(trace);
+    total_mm += push_trace(board, grid, s, e);
+    total_mm
 }
 
 /// One pad to be routed: its world-coord centre, copper layer, and

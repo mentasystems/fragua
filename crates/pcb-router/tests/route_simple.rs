@@ -71,4 +71,28 @@ fn routes_two_two_pin_resistors_sharing_a_net() {
     );
     assert!(report.trace_count >= 1, "report = {report:?}");
     assert!(!board.traces.is_empty());
+
+    // The router should report length metrics on every successfully
+    // routed net, and at least one iteration must have run.
+    assert!(report.iterations >= 1);
+    assert!(report.total_length_mm > 0.0);
+    assert!(report.total_lower_bound_mm > 0.0);
+    for (name, outcome) in &report.per_net {
+        if let Outcome::Ok { length_mm, lower_bound_mm, trace_segments, .. } = outcome {
+            if *trace_segments > 0 {
+                assert!(
+                    *length_mm > 0.0 && *lower_bound_mm > 0.0,
+                    "net {name} routed but no length metrics: {outcome:?}",
+                );
+                // Two-pad nets are routed star-style (1 spoke), so the
+                // actual wire is at most a small constant factor above
+                // the Manhattan lower bound. Use 1.5× as a safety net
+                // against future regressions in `lay_path`.
+                assert!(
+                    *length_mm <= *lower_bound_mm * 1.5 + 1.0,
+                    "net {name}: length {length_mm:.2} > 1.5× lower bound {lower_bound_mm:.2}",
+                );
+            }
+        }
+    }
 }

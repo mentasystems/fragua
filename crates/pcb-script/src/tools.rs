@@ -2087,10 +2087,25 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         .per_net
         .iter()
         .map(|(name, outcome)| match outcome {
-            pcb_router::Outcome::Ok { trace_segments, vias } => json!({
-                "net": name, "ok": true,
-                "trace_segments": trace_segments, "vias": vias,
-            }),
+            pcb_router::Outcome::Ok {
+                trace_segments,
+                vias,
+                length_mm,
+                lower_bound_mm,
+            } => {
+                let detour = if *lower_bound_mm > 0.0 {
+                    length_mm / lower_bound_mm
+                } else {
+                    1.0
+                };
+                json!({
+                    "net": name, "ok": true,
+                    "trace_segments": trace_segments, "vias": vias,
+                    "length_mm": round2(*length_mm),
+                    "lower_bound_mm": round2(*lower_bound_mm),
+                    "detour_ratio": round2(detour),
+                })
+            }
             pcb_router::Outcome::Failed { reason } => json!({
                 "net": name, "ok": false, "reason": reason,
             }),
@@ -2101,6 +2116,11 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         .iter()
         .filter_map(|(n, o)| matches!(o, pcb_router::Outcome::Failed { .. }).then_some(n.as_str()))
         .collect();
+    let total_detour = if report.total_lower_bound_mm > 0.0 {
+        report.total_length_mm / report.total_lower_bound_mm
+    } else {
+        1.0
+    };
 
     // Run DRC right after the route so the agent gets the verdict
     // in a single round-trip and can iterate without a second call.
@@ -2111,18 +2131,25 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
     project.log(
         ActivityLevel::Info,
         format!(
-            "route.run: {} traces, {} vias, {} net(s) failed; DRC {}E {}W",
+            "route.run: {} traces, {} vias, {:.1} mm wire (detour {:.2}×), {} pass(es), {} net(s) failed; DRC {}E {}W",
             report.trace_count,
             report.via_count,
+            report.total_length_mm,
+            total_detour,
+            report.iterations,
             failed.len(),
             drc_report.error_count,
             drc_report.warning_count,
         ),
     );
     Ok(text_result(format!(
-        "Routed: {} traces, {} vias{}; DRC: {} error(s), {} warning(s)",
+        "Routed: {} traces, {} vias, {:.1} mm wire (detour {:.2}× over {:.1} mm lower bound), {} pass(es){}; DRC: {} error(s), {} warning(s)",
         report.trace_count,
         report.via_count,
+        report.total_length_mm,
+        total_detour,
+        report.total_lower_bound_mm,
+        report.iterations,
         if failed.is_empty() {
             String::new()
         } else {
@@ -2134,9 +2161,17 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
     .with_data(json!({
         "trace_count": report.trace_count,
         "via_count": report.via_count,
+        "total_length_mm": round2(report.total_length_mm),
+        "total_lower_bound_mm": round2(report.total_lower_bound_mm),
+        "total_detour_ratio": round2(total_detour),
+        "iterations": report.iterations,
         "per_net": per_net,
         "drc": serde_json::to_value(&drc_report).unwrap_or(json!({})),
     })))
+}
+
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
 }
 
 #[derive(Debug, Deserialize)]
@@ -2149,6 +2184,8 @@ struct DrcInput {
     min_trace_width_mm: Option<f64>,
     #[serde(default)]
     min_drill_mm: Option<f64>,
+    #[serde(default)]
+    routing_inefficient_ratio: Option<f32>,
 }
 
 fn tool_drc_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -2160,6 +2197,7 @@ fn tool_drc_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
     if let Some(v) = input.edge_clearance_mm { opts.edge_clearance = Length::from_mm(v); }
     if let Some(v) = input.min_trace_width_mm { opts.min_trace_width = Length::from_mm(v); }
     if let Some(v) = input.min_drill_mm { opts.min_drill = Length::from_mm(v); }
+    if let Some(v) = input.routing_inefficient_ratio { opts.routing_inefficient_ratio = v; }
 
     let snap = project.read();
     let report = pcb_drc::run(snap.board(), &opts);
