@@ -13,7 +13,7 @@
 
 use serde::Serialize;
 
-use pcb_core::schematic::Schematic;
+use pcb_core::schematic::{PinRole, Schematic};
 use pcb_core::Board;
 
 #[derive(Debug, Clone, Default)]
@@ -57,6 +57,17 @@ pub enum ErcKind {
     /// any net — the part is electrically disconnected. Often the
     /// agent forgot to wire the whole component.
     OrphanSymbol,
+    /// Two or more `Output` pins drive the same net — an electrical
+    /// short. `Bidir` pins are tolerated (they negotiate at the
+    /// protocol level on a shared bus).
+    MultipleDrivers,
+    /// A net has at least one `PowerIn` pin but no `PowerOut` source —
+    /// the classic "forgot to wire the regulator" bug.
+    UnpoweredPowerNet,
+    /// An `Input` pin sits on a net with no driver (no `Output`,
+    /// `Bidir`, or `PowerOut`). Either the input is meant to float
+    /// (rare; signal it explicitly) or the agent forgot a driver.
+    UnconnectedInput,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,6 +105,7 @@ pub fn run(board: &Board, sch: &Schematic, _opts: &ErcOptions) -> ErcReport {
     check_floating_and_empty_nets(sch, &mut report);
     check_orphan_symbols(sch, &mut report);
     check_phantom_nets(board, sch, &mut report);
+    check_role_based_rules(board, sch, &mut report);
     report
 }
 
@@ -273,6 +285,101 @@ fn check_phantom_nets(board: &Board, sch: &Schematic, report: &mut ErcReport) {
                 ),
                 involved: vec![label, net.to_string()],
             });
+        }
+    }
+}
+
+/// Per-net checks that depend on `PinRole`:
+///
+/// - **MultipleDrivers**: 2+ `Output` pins on the same net.
+/// - **UnpoweredPowerNet**: at least one `PowerIn` and no `PowerOut`
+///   source. (A net with only `PowerIn` pins is sinking energy from
+///   nowhere — the agent forgot to wire a regulator or supply.)
+/// - **UnconnectedInput**: an `Input` pin on a net that has no
+///   driver (no Output, Bidir, or PowerOut). The input is left
+///   electrically floating; if intentional the agent should re-wire
+///   it to GND or VCC explicitly.
+///
+/// Pours of a power net (e.g. a bottom-layer GND pour) count as a
+/// PowerOut source: the pour itself is the supply geometry, even if
+/// no schematic pin declares Power explicitly. Avoids spurious
+/// "unpowered GND" warnings on every project that uses a ground pour.
+fn check_role_based_rules(board: &Board, sch: &Schematic, report: &mut ErcReport) {
+    use std::collections::{HashMap, HashSet};
+    /// All pins on a given net, with their resolved roles.
+    type NetPinRoles = HashMap<String, Vec<(String, PinRole)>>;
+
+    // Nets with a pour are implicitly "powered": the pour itself is
+    // the supply geometry. Without this, every project with a GND
+    // pour would fire an UnpoweredPowerNet warning on GND.
+    let poured_nets: HashSet<&str> = board.pours.iter().map(|p| p.net.as_str()).collect();
+
+    let mut roles: NetPinRoles = HashMap::new();
+    for (net_name, net) in &sch.nets {
+        let entries = roles.entry(net_name.clone()).or_default();
+        for c in &net.connections {
+            let Some(sym) = sch.symbols.get(&c.symbol_id) else { continue };
+            let role = sym
+                .kind
+                .pins()
+                .into_iter()
+                .find(|p| p.number == c.pin_number)
+                .map(|p| p.role)
+                .unwrap_or_default();
+            entries.push((format!("{}.{}", sym.reference, c.pin_number), role));
+        }
+    }
+
+    for (net_name, pins) in &roles {
+        let outputs: Vec<&str> = pins
+            .iter()
+            .filter(|(_, r)| *r == PinRole::Output)
+            .map(|(label, _)| label.as_str())
+            .collect();
+        let has_power_out = pins.iter().any(|(_, r)| *r == PinRole::PowerOut)
+            || poured_nets.contains(net_name.as_str());
+        let has_power_in = pins.iter().any(|(_, r)| *r == PinRole::PowerIn);
+        let has_driver = pins.iter().any(|(_, r)| {
+            matches!(r, PinRole::Output | PinRole::Bidir | PinRole::PowerOut)
+        }) || poured_nets.contains(net_name.as_str());
+
+        if outputs.len() >= 2 {
+            report.push(Violation {
+                kind: ErcKind::MultipleDrivers,
+                severity: Severity::Error,
+                message: format!(
+                    "net {net_name} has {n} Output drivers ({}); only one Output pin may drive a net",
+                    outputs.join(", "),
+                    n = outputs.len(),
+                ),
+                involved: std::iter::once(net_name.clone())
+                    .chain(outputs.iter().map(|s| s.to_string()))
+                    .collect(),
+            });
+        }
+
+        if has_power_in && !has_power_out {
+            report.push(Violation {
+                kind: ErcKind::UnpoweredPowerNet,
+                severity: Severity::Warning,
+                message: format!(
+                    "net {net_name} has PowerIn pin(s) but no PowerOut source — did you forget to wire the supply?",
+                ),
+                involved: vec![net_name.clone()],
+            });
+        }
+
+        for (label, role) in pins {
+            if *role == PinRole::Input && !has_driver {
+                report.push(Violation {
+                    kind: ErcKind::UnconnectedInput,
+                    severity: Severity::Warning,
+                    message: format!(
+                        "input pin {label} on net {net_name} has no driver (no Output, Bidir, or PowerOut)",
+                    ),
+                    involved: vec![net_name.clone(), label.clone()],
+                });
+            }
         }
     }
 }

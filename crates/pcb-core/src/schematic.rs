@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::board::Id;
+use crate::board::{CopperLayer, Id};
 use crate::geometry::Point;
 
 /// Side of a symbol body where a pin stub points outwards.
@@ -24,6 +24,41 @@ pub enum PinSide {
     Bottom,
 }
 
+/// Electrical role of a pin. ERC uses these to catch shorts that DRC
+/// can't see (the geometry is legal, but the wiring is semantically
+/// wrong — e.g. two outputs driving the same net).
+///
+/// Discretes (R, C, L, LED, D) are always `Passive` — they don't
+/// drive or sink, just pass current. ICs declare a role per pin; the
+/// default `Passive` is the safe fallback for anything the agent
+/// doesn't classify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PinRole {
+    /// No active role — passes signal/current through. Default for
+    /// resistors, capacitors, jumpers, and unspecified IC pins.
+    #[default]
+    Passive,
+    /// Pin sinks a signal (e.g. UART RX, microcontroller GPIO in
+    /// input mode). Needs at least one driver on its net.
+    Input,
+    /// Pin drives a signal (e.g. UART TX, level shifter output).
+    /// Two `Output` pins on the same net is an electrical short.
+    Output,
+    /// Both — typical for I²C SDA/SCL, GPIO that toggles direction,
+    /// data buses. ERC tolerates multiple `Bidir` on a net (they
+    /// negotiate at protocol level).
+    Bidir,
+    /// Power source (regulator output, battery +, USB VBUS, header
+    /// pin labelled +3V3 connected to a supply). Provides energy to
+    /// the net.
+    PowerOut,
+    /// Power sink (chip VDD, MCU VBAT, decoupling cap on a rail).
+    /// A net of `PowerIn` pins with no `PowerOut` source is the
+    /// classic "forgot to connect the regulator" bug.
+    PowerIn,
+}
+
 /// One pin on a generic-IC symbol. Discrete primitives (resistor,
 /// capacitor…) define their pins implicitly via `SymbolKind`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +67,11 @@ pub struct SchPin {
     /// Human-readable name (e.g. "VBAT", "PA0"). May be empty.
     pub name: String,
     pub side: PinSide,
+    /// Electrical role for ERC. Defaults to `Passive` so existing
+    /// schematics load with the loosest semantics — ERC won't fire
+    /// drive-related rules until the agent classifies pins.
+    #[serde(default)]
+    pub role: PinRole,
 }
 
 /// What the symbol *is*. Determines body shape and implicit pinout for
@@ -55,12 +95,12 @@ impl SymbolKind {
     pub fn pins(&self) -> Vec<SchPin> {
         match self {
             Self::Resistor | Self::Capacitor | Self::Inductor => vec![
-                SchPin { number: "1".into(), name: String::new(), side: PinSide::Left },
-                SchPin { number: "2".into(), name: String::new(), side: PinSide::Right },
+                SchPin { number: "1".into(), name: String::new(), side: PinSide::Left, role: PinRole::Passive },
+                SchPin { number: "2".into(), name: String::new(), side: PinSide::Right, role: PinRole::Passive },
             ],
             Self::Led | Self::Diode => vec![
-                SchPin { number: "A".into(), name: "A".into(), side: PinSide::Left },
-                SchPin { number: "K".into(), name: "K".into(), side: PinSide::Right },
+                SchPin { number: "A".into(), name: "A".into(), side: PinSide::Left, role: PinRole::Passive },
+                SchPin { number: "K".into(), name: "K".into(), side: PinSide::Right, role: PinRole::Passive },
             ],
             Self::GenericIc { pins } => pins.clone(),
         }
@@ -138,6 +178,15 @@ pub struct NetClass {
     /// foreign-net copper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clearance_mm: Option<f64>,
+    /// Layers on which the schematic wants this class's nets to ride
+    /// a copper pour instead of routed traces. `[Bottom]` is the
+    /// classic GND-on-bottom pattern; `[Top, Bottom]` is the standard
+    /// "GND plane on both layers" — every same-net pad on either
+    /// layer connects via the pour without any routed trace. The
+    /// `auto-pour` verb (and the `route` verb implicitly) materialise
+    /// the listed pours. Empty = no pour, route as normal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pour_layers: Vec<CopperLayer>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

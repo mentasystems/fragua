@@ -203,19 +203,22 @@ impl Block {
     fn absorb_continuation(&mut self, line: usize, tokens: &[String]) -> Result<(), ParseError> {
         match (self.verb.as_str(), tokens[0].as_str()) {
             ("sym", "pin") => {
-                // `pin NUMBER SIDE [name=NAME]` or `pin NUMBER SIDE NAME`
+                // `pin NUMBER SIDE [NAME] [name=NAME] [role=ROLE]`
                 if tokens.len() < 3 {
                     return Err(ParseError::at(
                         line,
-                        "pin needs at least: pin NUMBER SIDE [NAME]",
+                        "pin needs at least: pin NUMBER SIDE [NAME] [role=ROLE]",
                     ));
                 }
                 let number = tokens[1].clone();
                 let side = expand_side(&tokens[2], line)?;
                 let mut name = String::new();
+                let mut role: Option<String> = None;
                 for t in &tokens[3..] {
                     if let Some(rest) = t.strip_prefix("name=") {
                         name = rest.to_string();
+                    } else if let Some(rest) = t.strip_prefix("role=") {
+                        role = Some(canonical_pin_role(rest, line)?);
                     } else if !t.contains('=') {
                         // Bare third token is the pin name (e.g. `pin 1 L V5`).
                         name = t.clone();
@@ -224,6 +227,9 @@ impl Block {
                 let mut pin = json!({"number": number, "side": side});
                 if !name.is_empty() {
                     pin.as_object_mut().unwrap().insert("name".into(), Value::String(name));
+                }
+                if let Some(r) = role {
+                    pin.as_object_mut().unwrap().insert("role".into(), Value::String(r));
                 }
                 self.pins.push(pin);
                 Ok(())
@@ -445,14 +451,20 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
             Ok(Cmd { line, tool: "schematic.connect".into(), args })
         }
         "class" => {
-            // class NAME [width=N] [clearance=N]
-            need_args(line, tokens, 1, "class NAME [width=N] [clearance=N]")?;
+            // class NAME [width=N] [clearance=N] [pour=top|bottom]
+            need_args(line, tokens, 1, "class NAME [width=N] [clearance=N] [pour=top|bottom]")?;
             let mut args = json!({"name": tokens[1]});
             apply_kv(&mut args, &tokens[2..], line, &[
                 ("width",     AttrType::NumInto("trace_width_mm")),
                 ("clearance", AttrType::NumInto("clearance_mm")),
+                ("pour",      AttrType::Str),
             ])?;
             Ok(Cmd { line, tool: "schematic.set_class".into(), args })
+        }
+        "auto-pour" => {
+            // No args: walk the schematic and materialise pours for
+            // every net whose class declares a `pour_layer`.
+            Ok(Cmd { line, tool: "pour.auto".into(), args: json!({}) })
         }
 
         "find-lib" => {
@@ -733,6 +745,24 @@ fn expand_side(s: &str, line: usize) -> Result<String, ParseError> {
         "t" | "top"    => "top".into(),
         "b" | "bottom" => "bottom".into(),
         other => return Err(ParseError::at(line, format!("side: expected L/R/T/B (or full names), got `{other}`"))),
+    })
+}
+
+/// Canonical PinRole name (snake_case) the JSON layer expects, with
+/// short aliases ("in", "out", "pwr", "pwr_in") so the agent can be
+/// terse in long pin lists.
+fn canonical_pin_role(s: &str, line: usize) -> Result<String, ParseError> {
+    Ok(match s.to_ascii_lowercase().as_str() {
+        "passive" | "p"             => "passive".into(),
+        "input"   | "in"            => "input".into(),
+        "output"  | "out"           => "output".into(),
+        "bidir"   | "io"            => "bidir".into(),
+        "power"   | "power_out" | "pwr" | "pwr_out" => "power_out".into(),
+        "power_in" | "pwr_in"       => "power_in".into(),
+        other => return Err(ParseError::at(
+            line,
+            format!("role: expected passive/input/output/bidir/power_out/power_in, got `{other}`"),
+        )),
     })
 }
 

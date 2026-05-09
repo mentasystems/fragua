@@ -123,9 +123,15 @@ SCHEMATIC:\n\
                                                  `class` attaches a net class (see below) so the\n\
                                                  router/DRC use its trace_width / clearance for\n\
                                                  this net.\n\
-  class NAME [width=N] [clearance=N]           — declare or replace a net class. Set on a net via\n\
+  class NAME [width=N] [clearance=N] [pour=top|bottom|both]\n\
+                                               — declare or replace a net class. Set on a net via\n\
                                                  `net NAME ... class=NAME`. Unset fields fall back\n\
-                                                 to the route/drc defaults at the call site.\n\
+                                                 to the route/drc defaults at the call site. `pour`\n\
+                                                 makes every net in the class ride a copper pour on\n\
+                                                 the chosen layer(s) instead of routed traces; the\n\
+                                                 router skips those nets. `pour=both` is the\n\
+                                                 standard GND-on-both-layers pattern that connects\n\
+                                                 same-net pads regardless of which side they sit on.\n\
 \n\
 PALETTE / PLACEMENT:\n\
   palette REF KEY [rot=N] [value=V] [layer=top|bottom]\n\
@@ -159,6 +165,8 @@ ROUTING:\n\
   via NET X Y [drill=N] [diameter=N]           — manual via\n\
   delete-trace ID                              — id from `snap` structured data\n\
   delete-via ID\n\
+  auto-pour                                    — materialise a `Pour` for every net whose class has\n\
+                                                 `pour=...` set (run implicitly by `route` too).\n\
   pour NET top|bottom                          — declare a copper pour (ground/power plane); pads\n\
                                                  of NET on that layer count as connected without\n\
                                                  a routed trace. Cross-layer pads still need a via.\n\
@@ -272,6 +280,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "drc.run" => tool_drc_run(project, args),
         "erc.run" => tool_erc_run(project, args),
         "schematic.set_class" => tool_schematic_set_class(project, args),
+        "pour.auto" => tool_auto_pour(project, args),
         "output.fab_pack" => tool_output_fab_pack(project, args),
         _ => Err(ToolError {
             code: error_code::METHOD_NOT_FOUND,
@@ -913,6 +922,36 @@ struct PinInput {
     #[serde(default)]
     name: String,
     side: PinSideInput,
+    /// ERC role for the pin. Optional in the JSON; defaults to
+    /// `passive` so existing scripts that didn't set a role keep
+    /// their semantics.
+    #[serde(default)]
+    role: PinRoleInput,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+enum PinRoleInput {
+    #[default]
+    Passive,
+    Input,
+    Output,
+    Bidir,
+    PowerOut,
+    PowerIn,
+}
+
+impl From<PinRoleInput> for pcb_core::PinRole {
+    fn from(v: PinRoleInput) -> Self {
+        match v {
+            PinRoleInput::Passive => Self::Passive,
+            PinRoleInput::Input => Self::Input,
+            PinRoleInput::Output => Self::Output,
+            PinRoleInput::Bidir => Self::Bidir,
+            PinRoleInput::PowerOut => Self::PowerOut,
+            PinRoleInput::PowerIn => Self::PowerIn,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -958,6 +997,7 @@ fn tool_schematic_add_symbol(project: &Project, args: &Value) -> Result<Value, T
                     number: p.number.clone(),
                     name: p.name.clone(),
                     side: p.side.into(),
+                    role: p.role.into(),
                 })
                 .collect();
             SymbolKind::GenericIc { pins }
@@ -2214,6 +2254,11 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: RouteRunInput = serde_json::from_value(args.clone())
         .map_err(|e| ToolError::invalid_params(format!("route.run: {e}")))?;
 
+    // Materialise any class-declared pours BEFORE the router clones
+    // the board — otherwise the router lays redundant traces on what
+    // should have been a pour-only net. Idempotent.
+    let _ = materialize_class_pours(project);
+
     // Build per-net router overrides from the schematic's net classes:
     // for every net that names a class, surface its trace_width and
     // clearance so the router uses them when laying that net's copper
@@ -2434,6 +2479,30 @@ struct SetClassInput {
     trace_width_mm: Option<f64>,
     #[serde(default)]
     clearance_mm: Option<f64>,
+    /// Layer(s) for the auto-pour: "top", "bottom", or "both". When
+    /// set, every net assigned to this class gets a `Pour`
+    /// materialised on the listed layer(s) by `auto-pour` (and
+    /// implicitly by `route`).
+    #[serde(default)]
+    pour: Option<PourLayersInput>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum PourLayersInput {
+    Top,
+    Bottom,
+    Both,
+}
+
+impl PourLayersInput {
+    fn to_layers(self) -> Vec<CopperLayer> {
+        match self {
+            Self::Top => vec![CopperLayer::Top],
+            Self::Bottom => vec![CopperLayer::Bottom],
+            Self::Both => vec![CopperLayer::Top, CopperLayer::Bottom],
+        }
+    }
 }
 
 fn tool_schematic_set_class(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -2446,6 +2515,7 @@ fn tool_schematic_set_class(project: &Project, args: &Value) -> Result<Value, To
         name: input.name.clone(),
         trace_width_mm: input.trace_width_mm,
         clearance_mm: input.clearance_mm,
+        pour_layers: input.pour.map(|p| p.to_layers()).unwrap_or_default(),
     };
     project.set_net_class(class);
     let mut text = format!("class {} set", input.name);
@@ -2459,6 +2529,74 @@ fn tool_schematic_set_class(project: &Project, args: &Value) -> Result<Value, To
         "name": input.name,
         "trace_width_mm": input.trace_width_mm,
         "clearance_mm": input.clearance_mm,
+        "pour_layers": input.pour
+            .map(|p| p.to_layers().into_iter().map(layer_to_str).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    })))
+}
+
+/// Look up every net assigned to a `NetClass` whose `pour_layer` is
+/// set, and add a `Pour { net, layer }` for each. Idempotent (the
+/// project's `add_pour` replaces same-key pours rather than
+/// duplicating). Returns the list of nets that newly got pours, the
+/// list that already had matching pours, and the list of class refs
+/// pointing at undeclared classes (skipped).
+fn materialize_class_pours(project: &Project) -> ClassPourSummary {
+    use std::collections::HashSet;
+    let mut summary = ClassPourSummary::default();
+    let snap = project.read();
+    let sch = snap.schematic();
+    let board = snap.board();
+    let existing: HashSet<(String, CopperLayer)> = board
+        .pours
+        .iter()
+        .map(|p| (p.net.clone(), p.layer))
+        .collect();
+    let mut to_add: Vec<(String, CopperLayer)> = Vec::new();
+    for (net_name, _net) in &sch.nets {
+        let Some(class) = sch.class_for_net(net_name) else { continue };
+        for layer in &class.pour_layers {
+            if existing.contains(&(net_name.clone(), *layer)) {
+                summary.already_present.push(format!("{net_name}/{}", layer_to_str(*layer)));
+            } else {
+                to_add.push((net_name.clone(), *layer));
+            }
+        }
+    }
+    drop(snap);
+    for (net, layer) in to_add {
+        project.add_pour(Pour { net: net.clone(), layer });
+        summary.added.push(format!("{net}/{}", layer_to_str(layer)));
+    }
+    summary
+}
+
+#[derive(Debug, Default)]
+struct ClassPourSummary {
+    added: Vec<String>,
+    already_present: Vec<String>,
+}
+
+fn tool_auto_pour(project: &Project, _args: &Value) -> Result<Value, ToolError> {
+    let summary = materialize_class_pours(project);
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "auto-pour: added {} pour(s), {} already present",
+            summary.added.len(),
+            summary.already_present.len(),
+        ),
+    );
+    let text = format!(
+        "auto-pour: added {} ({}); already present {} ({})",
+        summary.added.len(),
+        if summary.added.is_empty() { "—".to_string() } else { summary.added.join(", ") },
+        summary.already_present.len(),
+        if summary.already_present.is_empty() { "—".to_string() } else { summary.already_present.join(", ") },
+    );
+    Ok(text_result(text).with_data(json!({
+        "added": summary.added,
+        "already_present": summary.already_present,
     })))
 }
 
