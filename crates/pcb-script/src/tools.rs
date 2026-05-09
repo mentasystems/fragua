@@ -143,16 +143,18 @@ PALETTE / PLACEMENT:\n\
                                                  edge_mounted constraint\n\
   move REF X Y\n\
   rotate REF DEG                               — absolute rotation, multiples of 90 recommended\n\
-  auto-place REF [REF...] [iters=N] [seed=N] [max_step=N] [min_step=N] [min_gap=N] [gap_penalty=N]\n\
+  auto-place REF [REF...] [iters=N] [seed=N] [max_step=N] [min_step=N] [min_gap=N] [gap_penalty=N] [congestion=N] [congestion_res=N]\n\
                                                — simulated-annealing placer over the listed refs.\n\
                                                  Pinned refs (everything not listed) stay put.\n\
-                                                 Optimises HPWL plus a soft body-to-body gap\n\
-                                                 penalty; obeys outline + edge_mounted constraints,\n\
-                                                 hard-rejects pad overlap. Defaults: iters=8000\n\
-                                                 (~3 s for ~20 components), seed=clock, max_step=20 mm,\n\
-                                                 min_gap=2.0 mm, gap_penalty=16. Bigger min_gap =\n\
-                                                 more breathing room for the router; bigger\n\
-                                                 gap_penalty = SA enforces the gap more strictly.\n\
+                                                 Optimises HPWL + a soft body-to-body gap penalty\n\
+                                                 + a congestion proxy (how many net pad-bboxes\n\
+                                                 share the same routing cell). Obeys outline +\n\
+                                                 edge_mounted; hard-rejects pad overlap. Defaults:\n\
+                                                 iters=8000 (~3 s for ~20 components), seed=clock,\n\
+                                                 max_step=20 mm, min_gap=2.0 mm, gap_penalty=16,\n\
+                                                 congestion=1, congestion_res=32. Bump congestion\n\
+                                                 if SA produces tight HPWL but the router struggles;\n\
+                                                 set congestion_res=0 to disable the proxy.\n\
 \n\
 ROUTING:\n\
   route [trace_width=N] [clearance=N] [via_drill=N] [via_diameter=N] [via_cost=N] [cell=N]\n\
@@ -2147,6 +2149,10 @@ struct AutoPlaceInput {
     min_gap_mm: Option<f64>,
     #[serde(default)]
     gap_penalty_factor: Option<f64>,
+    #[serde(default)]
+    congestion_penalty_factor: Option<f64>,
+    #[serde(default)]
+    congestion_resolution: Option<f64>,
 }
 
 fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -2160,6 +2166,8 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
     if let Some(v) = input.min_step_mm { opts.min_step_mm = v; }
     if let Some(v) = input.min_gap_mm { opts.min_gap_mm = v; }
     if let Some(v) = input.gap_penalty_factor { opts.gap_penalty_factor = v; }
+    if let Some(v) = input.congestion_penalty_factor { opts.congestion_penalty_factor = v; }
+    if let Some(v) = input.congestion_resolution { opts.congestion_resolution = v.max(0.0) as u32; }
 
     // Place on a clone so the project lock is released quickly. Apply
     // the resulting positions back through the regular `move_footprint_to`
@@ -2204,10 +2212,13 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
     project.log(
         ActivityLevel::Info,
         format!(
-            "auto-place: HPWL {:.1} → {:.1} mm ({:+.1} mm), {} accepted of {} iters, applied {} moves",
+            "auto-place: HPWL {:.1} → {:.1} mm ({:+.1} mm), congestion {:.0} → {:.0} ({:+.0}), {} accepted of {} iters, applied {} moves",
             report.initial_hpwl_mm,
             report.final_hpwl_mm,
             report.final_hpwl_mm - report.initial_hpwl_mm,
+            report.initial_congestion,
+            report.final_congestion,
+            report.final_congestion - report.initial_congestion,
             report.accepted,
             report.iterations,
             applied_moves,
@@ -2215,10 +2226,13 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
     );
 
     let mut text = format!(
-        "auto-place: HPWL {:.1} mm → {:.1} mm ({:+.1} mm), moved {} footprint(s)",
+        "auto-place: HPWL {:.1} mm → {:.1} mm ({:+.1} mm), congestion {:.0} → {:.0} ({:+.0} cells); moved {} footprint(s)",
         report.initial_hpwl_mm,
         report.final_hpwl_mm,
         report.final_hpwl_mm - report.initial_hpwl_mm,
+        report.initial_congestion,
+        report.final_congestion,
+        report.final_congestion - report.initial_congestion,
         applied_moves,
     );
     if !report.skipped.is_empty() {
@@ -2240,6 +2254,8 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
         "initial_hpwl_mm": round2(report.initial_hpwl_mm),
         "final_hpwl_mm": round2(report.final_hpwl_mm),
         "delta_mm": round2(report.final_hpwl_mm - report.initial_hpwl_mm),
+        "initial_congestion": round2(report.initial_congestion),
+        "final_congestion": round2(report.final_congestion),
         "iterations": report.iterations,
         "accepted": report.accepted,
         "moved": report.moved,

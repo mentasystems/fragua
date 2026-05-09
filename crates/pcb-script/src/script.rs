@@ -647,6 +647,8 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 ("min_step", AttrType::NumInto("min_step_mm")),
                 ("min_gap",  AttrType::NumInto("min_gap_mm")),
                 ("gap_penalty", AttrType::NumInto("gap_penalty_factor")),
+                ("congestion", AttrType::NumInto("congestion_penalty_factor")),
+                ("congestion_res", AttrType::NumInto("congestion_resolution")),
             ])?;
             Ok(Cmd { line, tool: "placement.auto".into(), args })
         }

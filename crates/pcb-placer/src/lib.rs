@@ -57,6 +57,21 @@ pub struct PlaceOptions {
     /// 4.0 makes a 0.5 mm shortfall on one pair cost ~1 mm-equivalent
     /// of HPWL, large enough to be felt without dominating routing.
     pub gap_penalty_factor: f64,
+    /// Resolution of the congestion-proxy grid (cells per side) over
+    /// the board outline. The placer rasterises every net's pad bbox
+    /// onto this grid and sums per-cell overflow (= count - 1) as a
+    /// proxy for "how many nets fight over the same routing channel".
+    /// 32 → ~3 mm cells on an 80 mm board; coarse enough to be cheap,
+    /// fine enough to distinguish channels. 0 disables congestion.
+    pub congestion_resolution: u32,
+    /// Score weight on the congestion proxy. Each unit of overflow
+    /// (= one extra net sharing a cell with another) costs this many
+    /// mm-equivalent of HPWL. Default 1.0 makes a placement where 50
+    /// cells are doubly-claimed cost 50 mm — comparable to the wire
+    /// reductions HPWL captures. Tune up if the placer keeps producing
+    /// "tight HPWL but unroutable" layouts; tune down if it spreads
+    /// parts so far apart wire goes back up.
+    pub congestion_penalty_factor: f64,
 }
 
 impl Default for PlaceOptions {
@@ -77,6 +92,13 @@ impl Default for PlaceOptions {
             // small nets — a 1 mm shortfall on one pair costs
             // 16 mm-equivalent of HPWL, well above the noise floor.
             gap_penalty_factor: 16.0,
+            // 32×32 grid maps cleanly to typical SMD boards (50–100 mm
+            // wide → 1.5–3 mm cells, finer than a footprint body).
+            congestion_resolution: 32,
+            // Each shared cell costs ~1 mm of equivalent HPWL —
+            // empirically enough to discourage piling nets in one
+            // corridor without dominating the score.
+            congestion_penalty_factor: 1.0,
         }
     }
 }
@@ -87,6 +109,11 @@ pub struct PlaceReport {
     pub initial_hpwl_mm: f64,
     /// HPWL of the best placement found, mm.
     pub final_hpwl_mm: f64,
+    /// Congestion overflow at the start, summed over the rasterised
+    /// grid. 0 = every cell is touched by at most one net's pad bbox.
+    pub initial_congestion: f64,
+    /// Congestion overflow of the best placement.
+    pub final_congestion: f64,
     /// Number of SA candidate moves tried.
     pub iterations: usize,
     /// Of those, how many were applied (improving moves + accepted-uphill).
@@ -136,6 +163,8 @@ pub fn place(
         return Ok(PlaceReport {
             initial_hpwl_mm: total_hpwl(board),
             final_hpwl_mm: total_hpwl(board),
+            initial_congestion: 0.0,
+            final_congestion: 0.0,
             iterations: 0,
             accepted: 0,
             moved: Vec::new(),
@@ -160,11 +189,18 @@ pub fn place(
     }
 
     let initial_hpwl = total_hpwl(board);
+    let initial_congestion = if opts.congestion_resolution > 0 {
+        congestion_overflow(board, outline, opts.congestion_resolution)
+    } else {
+        0.0
+    };
     let initial_score = initial_hpwl
-        + opts.gap_penalty_factor * total_gap_penalty(board, opts.min_gap_mm);
+        + opts.gap_penalty_factor * total_gap_penalty(board, opts.min_gap_mm)
+        + opts.congestion_penalty_factor * initial_congestion;
     let mut current_score = initial_score;
     let mut best_score = initial_score;
     let mut best_hpwl = initial_hpwl;
+    let mut best_congestion = initial_congestion;
     let mut best_positions: HashMap<Id, Point> = movable_ids
         .iter()
         .map(|id| (*id, board.footprints[id].position))
@@ -229,17 +265,30 @@ pub fn place(
 
         // Score delta: HPWL is local to the nets this footprint
         // touches; the gap penalty is local to the pairs that touch
-        // this footprint. Sum both before and after the move.
+        // this footprint; the congestion proxy depends on every net's
+        // pad bbox overlapping. Recompute the relevant pieces before
+        // and after applying the move.
         let nets = nets_of_id.get(&probe.id).cloned().unwrap_or_default();
         let before_hpwl: f64 = nets.iter().map(|n| net_hpwl(board, n)).sum();
         let before_pen = footprint_gap_penalty(board, probe.id, opts.min_gap_mm);
+        let before_cong = if opts.congestion_resolution > 0 {
+            congestion_overflow(board, outline, opts.congestion_resolution)
+        } else {
+            0.0
+        };
         // Apply the move temporarily to compute the new HPWL on the
         // affected nets.
         apply_move_in_place(board, &move_kind);
         let after_hpwl: f64 = nets.iter().map(|n| net_hpwl(board, n)).sum();
         let after_pen = footprint_gap_penalty(board, probe.id, opts.min_gap_mm);
+        let after_cong = if opts.congestion_resolution > 0 {
+            congestion_overflow(board, outline, opts.congestion_resolution)
+        } else {
+            0.0
+        };
         let delta = (after_hpwl - before_hpwl)
-            + opts.gap_penalty_factor * (after_pen - before_pen);
+            + opts.gap_penalty_factor * (after_pen - before_pen)
+            + opts.congestion_penalty_factor * (after_cong - before_cong);
 
         let accept = if delta <= 0.0 {
             true
@@ -255,6 +304,11 @@ pub fn place(
             if current_score < best_score {
                 best_score = current_score;
                 best_hpwl = total_hpwl(board);
+                best_congestion = if opts.congestion_resolution > 0 {
+                    congestion_overflow(board, outline, opts.congestion_resolution)
+                } else {
+                    0.0
+                };
                 for id in &movable_ids {
                     if let Some(fp) = board.footprints.get(id) {
                         best_positions.insert(*id, fp.position);
@@ -294,6 +348,8 @@ pub fn place(
     Ok(PlaceReport {
         initial_hpwl_mm: initial_hpwl,
         final_hpwl_mm: best_hpwl,
+        initial_congestion,
+        final_congestion: best_congestion,
         iterations: opts.max_iterations,
         accepted,
         moved,
@@ -349,6 +405,76 @@ fn net_hpwl(board: &Board, net: &str) -> f64 {
         return 0.0;
     }
     (max_x - min_x) + (max_y - min_y)
+}
+
+/// Routing-congestion proxy: rasterise every net's pad bounding box
+/// onto a `res × res` grid spanning `outline`, count nets per cell,
+/// and sum `max(0, count - 1)` — the "overflow" of nets sharing a
+/// cell. Higher number = more nets fighting over the same routing
+/// channel = harder for the router to lay clean copper.
+///
+/// This is a coarse proxy, not a real router cost: it doesn't know
+/// about pad rotation, individual trace widths, or the layered grid.
+/// What it captures is the basic "did the placer cluster too many
+/// signals through one bottleneck" failure mode that pure HPWL
+/// minimisation produces. Cheap to compute (O(N_nets × cells)).
+fn congestion_overflow(board: &Board, outline: pcb_core::Rect, res: u32) -> f64 {
+    if res == 0 {
+        return 0.0;
+    }
+    let res_i = res as i32;
+    let ox = outline.min.x.to_mm();
+    let oy = outline.min.y.to_mm();
+    let w = outline.width().to_mm();
+    let h = outline.height().to_mm();
+    if w <= 0.0 || h <= 0.0 {
+        return 0.0;
+    }
+    let cell_w = w / res as f64;
+    let cell_h = h / res as f64;
+
+    // Per-net pad-bbox in mm.
+    let mut net_bbox: HashMap<&str, [f64; 4]> = HashMap::new();
+    for fp in board.footprints.values() {
+        for pad in &fp.pads {
+            let Some(net) = pad.net.as_deref() else { continue };
+            let c = fp.pad_world_center(pad);
+            let x = c.x.to_mm();
+            let y = c.y.to_mm();
+            let entry = net_bbox.entry(net).or_insert([
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+            ]);
+            entry[0] = entry[0].min(x);
+            entry[1] = entry[1].min(y);
+            entry[2] = entry[2].max(x);
+            entry[3] = entry[3].max(y);
+        }
+    }
+
+    let mut counts = vec![0u32; (res * res) as usize];
+    for [x0, y0, x1, y1] in net_bbox.values() {
+        // Single-pad nets contribute nothing to congestion.
+        if x1 - x0 < 1e-6 && y1 - y0 < 1e-6 {
+            continue;
+        }
+        let c0 = (((x0 - ox) / cell_w).floor() as i32).clamp(0, res_i - 1);
+        let r0 = (((y0 - oy) / cell_h).floor() as i32).clamp(0, res_i - 1);
+        let c1 = (((x1 - ox) / cell_w).floor() as i32).clamp(0, res_i - 1);
+        let r1 = (((y1 - oy) / cell_h).floor() as i32).clamp(0, res_i - 1);
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                counts[(r * res_i + c) as usize] += 1;
+            }
+        }
+    }
+
+    counts
+        .iter()
+        .map(|&n| if n > 1 { (n - 1) as f64 } else { 0.0 })
+        .sum()
 }
 
 /// AABB gap in mm: positive = clear separation, negative = overlap
