@@ -70,12 +70,24 @@ const BEND_COST: u32 = 6;
 // `next`. Bias is added before the bend penalty so a costly cell makes
 // the router prefer cheaper alternatives even when no bend is involved.
 //
-// Multi-source for Prim-style Steiner construction: the explicit
-// `start` cell and every same-net `Trace` cell are enqueued at g=0,
-// so later spokes can branch off the existing trunk at the cell
-// closest to `target` instead of walking back to the seed. Other-net
-// `NetPad` cells are NOT sources; the path must reach `target` by
-// routing, not by snapping through neighbouring pads of the same net.
+// Multi-source for Prim-style Steiner construction. Two kinds of
+// source, prioritised by g-penalty:
+//
+//   - Every `Trace(target_net)` cell at g=0. Those are the existing
+//     tree; later spokes branch off the closest cell to the new target.
+//   - The explicit `start` (seed pad) at g=`SEED_FALLBACK_PENALTY`.
+//     Falls back when no trace cell is within ~3 mm of being as close
+//     to the target as the seed is, e.g. when the existing trunk took
+//     a detour that doesn't help reach the next pad. Without this
+//     penalty the seed wins ties on h alone and lays copper parallel
+//     to the trunk; with it disabled entirely (seed not in queue at
+//     all), a bad trunk traps the search and the spoke fails outright.
+//
+// First spoke (no traces yet) sees the seed at g=0 — the penalty only
+// kicks in once a tree exists.
+//
+// Other-net `NetPad` cells are NOT sources; the path must reach `target`
+// by routing, not by snapping through neighbouring pads of the same net.
 pub fn search(
     grid: &Grid,
     start: GridPoint,
@@ -85,6 +97,13 @@ pub fn search(
     via_safe_radius: i32,
     cost_map: &CostMap,
 ) -> Option<AStarResult> {
+    /// Cells, at the default 0.25 mm pitch ≈ 3 mm of free-cell walking.
+    /// A* picks the seed over a trace cell only if the seed is more
+    /// than this many cells closer to the target — strong enough to
+    /// suppress the parallel-trunk artifact but small enough that a
+    /// trace-cell path that's much further away still loses to the seed.
+    const SEED_FALLBACK_PENALTY: u32 = 12;
+
     let h = |p: GridPoint| -> u32 {
         let dc = (p.col - target.col).unsigned_abs();
         let dr = (p.row - target.row).unsigned_abs();
@@ -96,27 +115,24 @@ pub fn search(
     let mut g_score: HashMap<State, u32> = HashMap::new();
     let mut came_from: HashMap<State, State> = HashMap::new();
 
-    let start_state = State { p: start, dir: Dir::Start };
-    g_score.insert(start_state, 0);
-    open.push(Node { f: h(start), g: 0, s: start_state });
-
-    // Add every same-net Trace cell as an additional source: that's
-    // how a later spoke joins the existing tree at its closest point.
+    let mut had_trace_source = false;
     for layer in 0..2u8 {
         for row in 0..grid.rows {
             for col in 0..grid.cols {
                 let p = GridPoint { layer, col, row };
-                if p == start {
-                    continue;
-                }
                 if matches!(grid.get(p), Cell::Trace(n) if n == target_net) {
                     let state = State { p, dir: Dir::Start };
                     g_score.insert(state, 0);
                     open.push(Node { f: h(p), g: 0, s: state });
+                    had_trace_source = true;
                 }
             }
         }
     }
+    let seed_g = if had_trace_source { SEED_FALLBACK_PENALTY } else { 0 };
+    let start_state = State { p: start, dir: Dir::Start };
+    g_score.insert(start_state, seed_g);
+    open.push(Node { f: seed_g + h(start), g: seed_g, s: start_state });
 
     while let Some(Node { s, g, .. }) = open.pop() {
         if s.p == target && matches!(grid.get(s.p), Cell::NetPad(n) if n == target_net) {
