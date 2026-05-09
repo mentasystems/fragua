@@ -12,6 +12,55 @@
 
 use pcb_core::{Board, CopperLayer, Length, Point, Rect};
 
+/// Per-cell extra cost layered on top of the grid for negotiated
+/// congestion. A* adds `at(p)` to the step cost when entering `p`, so
+/// raising the bias on a corridor pushes the next pass's nets to detour
+/// around it. Lives across rip-up-and-reroute iterations and accumulates;
+/// the grid itself is rebuilt each pass.
+#[derive(Debug, Clone)]
+pub struct CostMap {
+    cols: i32,
+    rows: i32,
+    /// Layer-major: index = layer * cols * rows + r * cols + c.
+    extra: Vec<u32>,
+}
+
+impl CostMap {
+    /// Bias for the cell at `p`. Returns 0 for out-of-bounds points so
+    /// callers don't need a separate bounds check.
+    pub fn at(&self, p: GridPoint) -> u32 {
+        if p.col < 0 || p.row < 0 || p.col >= self.cols || p.row >= self.rows || p.layer >= 2 {
+            return 0;
+        }
+        let idx = (p.layer as usize) * (self.cols * self.rows) as usize
+            + (p.row * self.cols + p.col) as usize;
+        self.extra[idx]
+    }
+
+    /// Bump every cell inside the inclusive rectangle `[c0..=c1, r0..=r1]`
+    /// on both layers by `amount`, capped at `max`. Out-of-range columns
+    /// and rows are silently clipped.
+    pub fn bump_box(&mut self, c0: i32, r0: i32, c1: i32, r1: i32, amount: u32, max: u32) {
+        let c0 = c0.max(0);
+        let r0 = r0.max(0);
+        let c1 = c1.min(self.cols - 1);
+        let r1 = r1.min(self.rows - 1);
+        if c1 < c0 || r1 < r0 {
+            return;
+        }
+        let stride = (self.cols * self.rows) as usize;
+        for layer in 0..2usize {
+            for r in r0..=r1 {
+                let row_base = layer * stride + (r * self.cols) as usize;
+                for c in c0..=c1 {
+                    let i = row_base + c as usize;
+                    self.extra[i] = (self.extra[i] + amount).min(max);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cell {
     Free,
@@ -193,6 +242,16 @@ impl Grid {
     pub fn stamp_via(&mut self, p: GridPoint, net: u32, halo: i32) {
         for layer in 0..2u8 {
             self.stamp_cell_with_halo(layer, p.col, p.row, net, halo);
+        }
+    }
+
+    /// Allocate a same-shape `CostMap` for negotiated-congestion routing.
+    /// Identical layer/col/row dims as this grid; all biases start at 0.
+    pub fn new_cost_map(&self) -> CostMap {
+        CostMap {
+            cols: self.cols,
+            rows: self.rows,
+            extra: vec![0; (self.cols * self.rows * 2) as usize],
         }
     }
 

@@ -72,6 +72,17 @@ fn routes_two_two_pin_resistors_sharing_a_net() {
     assert!(report.trace_count >= 1, "report = {report:?}");
     assert!(!board.traces.is_empty());
 
+    // Negotiated congestion can never make a previously-best report
+    // worse — the driver keeps the best across iterations. So even on a
+    // trivially routable case, RR&R must not "rescue" itself by adding
+    // failures: zero failed nets out, period.
+    for (name, outcome) in &report.per_net {
+        assert!(
+            !matches!(outcome, Outcome::Failed { .. }),
+            "trivial board should not have failed nets, but {name} did: {outcome:?}",
+        );
+    }
+
     // The router should report length metrics on every successfully
     // routed net, and at least one iteration must have run.
     assert!(report.iterations >= 1);

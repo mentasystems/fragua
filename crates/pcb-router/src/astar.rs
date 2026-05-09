@@ -10,7 +10,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
-use crate::grid::{Cell, Grid, GridPoint};
+use crate::grid::{Cell, CostMap, Grid, GridPoint};
 
 /// Direction of the last move. `Start` is the entry node before any
 /// move has happened; `Via` lets us model "I just punched through" so
@@ -64,6 +64,11 @@ const BEND_COST: u32 = 6;
 // `via_safe_radius`: in cells, ceil((via_diameter/2 + clearance) / cell).
 // A via flip is rejected if any foreign-net cell sits within this radius
 // on either layer. Pass 0 to disable the check.
+//
+// `cost_map` adds per-cell extra cost for negotiated congestion: A*
+// charges `cost_map.at(next)` on top of the base step cost when crossing
+// `next`. Bias is added before the bend penalty so a costly cell makes
+// the router prefer cheaper alternatives even when no bend is involved.
 pub fn search(
     grid: &Grid,
     start: GridPoint,
@@ -71,6 +76,7 @@ pub fn search(
     via_cost: u32,
     target: GridPoint,
     via_safe_radius: i32,
+    cost_map: &CostMap,
 ) -> Option<AStarResult> {
     let h = |p: GridPoint| -> u32 {
         let dc = (p.col - target.col).unsigned_abs();
@@ -128,6 +134,8 @@ pub fn search(
                 continue;
             }
             let mut step_cost = if move_dir == Dir::Via { via_cost } else { 1 };
+            // Negotiated-congestion bias on the destination cell.
+            step_cost = step_cost.saturating_add(cost_map.at(next_p));
             // "Via in pad" penalty: discourage but don't forbid via
             // flips that land on a same-net pad cell. Fab houses
             // (JLCPCB) require a more expensive via-in-pad-fill

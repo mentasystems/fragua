@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use pcb_core::{Board, CopperLayer, Length, Point, Rect, Trace, Via};
 
 use crate::astar::search;
-use crate::grid::{Grid, GridPoint};
+use crate::grid::{CostMap, Grid, GridPoint};
 
 #[derive(Debug, Clone)]
 pub struct RouteOptions {
@@ -87,6 +87,25 @@ const MAX_RR_ITERATIONS: usize = 3;
 /// hub-to-pads optimum"; below that, reordering rarely helps.
 const BAD_DETOUR_RATIO: f64 = 1.8;
 
+/// Negotiated congestion: per-cell bias added to the corridor around a
+/// failed net's pads on the next iteration. Compared to a base step
+/// cost of 1 per cell, 4 makes the corridor 5× more expensive — strong
+/// enough to push easy nets to detour, weak enough that the bad net
+/// itself (which routes first under RR&R) still uses the corridor.
+const CONGESTION_BUMP_FAILED: u32 = 4;
+/// Lighter bump for a net that succeeded but took a long detour: the
+/// "blame" is fuzzier so the bias is too.
+const CONGESTION_BUMP_INEFFICIENT: u32 = 2;
+/// Cells around a bad net's pad bbox to mark as congested. ~1.5 mm at
+/// the default 0.25 mm cell pitch — about a trace width plus clearance,
+/// so other nets see the whole "corridor" as expensive, not just the
+/// pads themselves.
+const CONGESTION_RADIUS_CELLS: i32 = 6;
+/// Hard cap on accumulated bias per cell. Beyond this the bias would
+/// dominate the heuristic and A* would refuse the cell even when it's
+/// the only path; keep it bounded.
+const CONGESTION_MAX: u32 = 32;
+
 /// Route every net found in the board's pad assignments. Mutates
 /// `board` in place: existing routing is cleared, new routing is laid.
 ///
@@ -117,6 +136,14 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     let mut order: Vec<String> = nets.keys().cloned().collect();
     order.sort_by_key(|n| nets.get(n).map(Vec::len).unwrap_or(0));
 
+    // Cost map shared across iterations: starts at 0, accumulates bias
+    // around the corridors of failed/inefficient nets so the next pass
+    // detours easy nets out of those corridors. Built from a one-shot
+    // grid only for its dims; the actual obstacle grid is built fresh
+    // per pass inside `route_pass`.
+    let region = compute_region(board, opts);
+    let mut cost_map = Grid::new(region, opts.cell).new_cost_map();
+
     let mut best: Option<(Board, RouteReport)> = None;
     let mut last_order: Option<Vec<String>> = None;
     let mut iterations_run = 0;
@@ -131,7 +158,7 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
 
         let mut work = board.clone();
         work.clear_routing();
-        let report = route_pass(&mut work, &nets, &order, opts);
+        let report = route_pass(&mut work, &nets, &order, opts, &cost_map);
 
         let take_it = match &best {
             None => true,
@@ -161,6 +188,28 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
         if failed.is_empty() && inefficient.is_empty() {
             break;
         }
+
+        // Negotiated congestion: bump the corridor around each bad
+        // net's pads so easy nets in the NEXT pass detour around it
+        // and leave the bad net a clear shot.
+        let snap_grid = Grid::new(region, opts.cell);
+        for name in &failed {
+            bump_corridor(
+                &snap_grid,
+                &mut cost_map,
+                nets.get(name).map(Vec::as_slice).unwrap_or(&[]),
+                CONGESTION_BUMP_FAILED,
+            );
+        }
+        for name in &inefficient {
+            bump_corridor(
+                &snap_grid,
+                &mut cost_map,
+                nets.get(name).map(Vec::as_slice).unwrap_or(&[]),
+                CONGESTION_BUMP_INEFFICIENT,
+            );
+        }
+
         let bad: std::collections::HashSet<String> =
             failed.iter().chain(inefficient.iter()).cloned().collect();
         let rest: Vec<String> = order.iter().filter(|n| !bad.contains(*n)).cloned().collect();
@@ -200,31 +249,18 @@ fn count_failed(r: &RouteReport) -> usize {
         .count()
 }
 
-/// One full routing pass: lay every net (in `order`) onto a freshly
-/// cleared `board` and return the per-net outcomes. The board's
-/// routing must already be cleared by the caller.
-fn route_pass(
-    board: &mut Board,
-    nets: &BTreeMap<String, Vec<NetPadInfo>>,
-    order: &[String],
-    opts: &RouteOptions,
-) -> RouteReport {
-    let net_id_of: HashMap<String, u32> = order
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.clone(), i as u32))
-        .collect();
-
-    // Routing region. If the board has an outline, the router stays
-    // *inside* it with an inset that keeps the centre of the widest
-    // copper feature (a via) far enough from Edge.Cuts to satisfy the
-    // DRC's edge clearance check (default 0.3 mm). Without an outline
-    // we fall back to the content bbox expanded by 5 mm so the router
-    // still has slack to find paths.
+/// Routing region. If the board has an outline, the router stays
+/// *inside* it with an inset that keeps the centre of the widest
+/// copper feature (a via) far enough from Edge.Cuts to satisfy the
+/// DRC's edge clearance check (default 0.3 mm). Without an outline we
+/// fall back to the content bbox expanded by 5 mm so the router still
+/// has slack to find paths. Pulled out so `route()` can size the
+/// negotiated-congestion cost map before the first pass.
+fn compute_region(board: &Board, opts: &RouteOptions) -> Rect {
     let edge_clearance = Length::from_mm(0.3);
     let half_widest = Length(opts.trace_width.0.max(opts.via_diameter.0) / 2);
     let outline_inset = edge_clearance + half_widest;
-    let region = match board.outline {
+    match board.outline {
         Some(r) => Rect::from_corners(
             Point::new(r.min.x + outline_inset, r.min.y + outline_inset),
             Point::new(r.max.x - outline_inset, r.max.y - outline_inset),
@@ -236,8 +272,26 @@ fn route_pass(
                 Point::new(Length::from_mm(50.0), Length::from_mm(50.0)),
             ),
         },
-    };
+    }
+}
 
+/// One full routing pass: lay every net (in `order`) onto a freshly
+/// cleared `board` and return the per-net outcomes. The board's
+/// routing must already be cleared by the caller.
+fn route_pass(
+    board: &mut Board,
+    nets: &BTreeMap<String, Vec<NetPadInfo>>,
+    order: &[String],
+    opts: &RouteOptions,
+    cost_map: &CostMap,
+) -> RouteReport {
+    let net_id_of: HashMap<String, u32> = order
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.clone(), i as u32))
+        .collect();
+
+    let region = compute_region(board, opts);
     let mut grid = Grid::new(region, opts.cell);
     let net_id_lookup = |n: &str| net_id_of.get(n).copied();
     grid.stamp_pads(board, &net_id_lookup, opts.clearance);
@@ -356,6 +410,7 @@ fn route_pass(
                 opts.via_cost,
                 spoke_grid,
                 via_safe_radius,
+                cost_map,
             ) else {
                 per_net.push((
                     net_name.clone(),
@@ -403,6 +458,42 @@ fn route_pass(
         total_lower_bound_mm,
         iterations: 0,
     }
+}
+
+/// Snap every pad of a bad net to the grid, take the bbox, expand by
+/// `CONGESTION_RADIUS_CELLS`, and bump the cost map there. We bump the
+/// whole bbox (not just the pad cells) so the corridor that any star
+/// route from these pads would naturally take becomes expensive — easy
+/// nets routed in the next pass detour around it, leaving a clear lane
+/// when the bad net itself runs (it's now first in `order`).
+fn bump_corridor(
+    snap_grid: &Grid,
+    cost_map: &mut CostMap,
+    pads: &[NetPadInfo],
+    amount: u32,
+) {
+    if pads.is_empty() {
+        return;
+    }
+    let mut min_c = i32::MAX;
+    let mut min_r = i32::MAX;
+    let mut max_c = i32::MIN;
+    let mut max_r = i32::MIN;
+    for pad in pads {
+        let gp = snap_grid.snap(pad.center, pad.layer);
+        min_c = min_c.min(gp.col);
+        min_r = min_r.min(gp.row);
+        max_c = max_c.max(gp.col);
+        max_r = max_r.max(gp.row);
+    }
+    cost_map.bump_box(
+        min_c - CONGESTION_RADIUS_CELLS,
+        min_r - CONGESTION_RADIUS_CELLS,
+        max_c + CONGESTION_RADIUS_CELLS,
+        max_r + CONGESTION_RADIUS_CELLS,
+        amount,
+        CONGESTION_MAX,
+    );
 }
 
 /// Collapse the path's grid cells into trace segments + via flips and
