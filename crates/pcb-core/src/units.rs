@@ -27,7 +27,7 @@ pub const MIL: Length = Length(25_400);
 /// dimension in the project. It is `i64` so subtraction (delta vectors)
 /// and signed comparisons work without surprises.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
 pub struct Length(pub i64);
 

@@ -423,11 +423,16 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
         }
 
         "outline" => {
-            need_args(line, tokens, 2, "outline W H")?;
+            // outline W H [radius=R]
+            need_args(line, tokens, 2, "outline W H [radius=R]")?;
             let w = parse_num(&tokens[1], line, "W")?;
             let h = parse_num(&tokens[2], line, "H")?;
-            Ok(Cmd { line, tool: "board.set_outline".into(),
-                     args: json!({"w_mm": w, "h_mm": h}) })
+            let mut args = json!({"w_mm": w, "h_mm": h});
+            apply_kv(&mut args, &tokens[3..], line, &[
+                ("radius", AttrType::NumInto("corner_radius_mm")),
+                ("r",      AttrType::NumInto("corner_radius_mm")),
+            ])?;
+            Ok(Cmd { line, tool: "board.set_outline".into(), args })
         }
 
         "net" => {

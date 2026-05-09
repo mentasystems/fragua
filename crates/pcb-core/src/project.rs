@@ -161,9 +161,20 @@ impl Project {
     }
 
     pub fn set_outline(&self, outline: Rect) {
+        self.set_outline_with_radius(outline, crate::Length::ZERO);
+    }
+
+    /// Set the rectangular outline plus a corner radius. Radius is
+    /// clamped to half the shorter side so the resulting shape is
+    /// always a valid closed rounded rectangle (a radius wider than
+    /// half the board would degenerate the geometry).
+    pub fn set_outline_with_radius(&self, outline: Rect, corner_radius: crate::Length) {
+        let cap = (outline.width().0.min(outline.height().0)) / 2;
+        let radius_clamped = crate::Length(corner_radius.0.max(0).min(cap));
         {
             let mut inner = self.inner.write().expect("project lock poisoned");
             inner.board.outline = Some(outline);
+            inner.board.outline_corner_radius = radius_clamped;
         }
         self.bus.publish(Event::OutlineChanged);
     }

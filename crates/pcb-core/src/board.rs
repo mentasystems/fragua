@@ -329,6 +329,15 @@ pub struct Board {
     /// Optional rectangular outline. `None` means "not set yet"; the
     /// agent or the human assigns one before manufacturing.
     pub outline: Option<Rect>,
+    /// Corner radius of the outline rectangle, in nm. `0` (the
+    /// default) gives sharp corners — the historical behaviour. Any
+    /// positive value rounds all four corners by the same radius;
+    /// the renderer, the Gerber Edge.Cuts emitter, and the router's
+    /// inset all respect it. Capped at half the shorter board side
+    /// when the outline is set; values larger than that wouldn't
+    /// produce a closed shape.
+    #[serde(default, skip_serializing_if = "is_zero_length")]
+    pub outline_corner_radius: Length,
     pub footprints: HashMap<Id, Footprint>,
     /// Insertion order for deterministic rendering and serialisation.
     pub footprint_order: Vec<Id>,
@@ -348,6 +357,14 @@ pub struct Board {
     /// separate from footprint-attached silk.
     #[serde(default)]
     pub silk_texts: Vec<SilkText>,
+}
+
+/// Serde helper: omit the corner-radius field when it's the default
+/// zero, so existing on-disk projects (which never serialised it)
+/// stay byte-identical and new projects with sharp corners don't
+/// gain a noisy `outline_corner_radius: 0` field on disk.
+fn is_zero_length(v: &Length) -> bool {
+    v.0 == 0
 }
 
 /// Minimum body-to-body clearance between two footprints (mm). Anything

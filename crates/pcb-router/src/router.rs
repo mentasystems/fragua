@@ -358,7 +358,18 @@ fn compute_region(board: &Board, opts: &RouteOptions) -> Rect {
         }
     }
     let half_widest = Length(widest / 2);
-    let outline_inset = edge_clearance + half_widest;
+    let mut outline_inset = edge_clearance + half_widest;
+    // Rounded outline cuts inward at each corner by `r × (1 − 1/√2)`
+    // (~0.293 r). The straight sides of the rounded outline still
+    // line up with the rect, so only the corners would otherwise
+    // intrude into the router's region. Easiest fix: shrink the
+    // entire region by that worst-case extra inset — costs a few mm
+    // of routable area near the sides, but guarantees no copper
+    // crosses the rounded edge.
+    if board.outline_corner_radius.0 > 0 {
+        let corner_extra_nm = (board.outline_corner_radius.0 as f64 * 0.293).ceil() as i64;
+        outline_inset = outline_inset + Length(corner_extra_nm);
+    }
     match board.outline {
         Some(r) => Rect::from_corners(
             Point::new(r.min.x + outline_inset, r.min.y + outline_inset),

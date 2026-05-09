@@ -156,6 +156,22 @@ fn line_to(w: &mut impl Write, p: Point) -> io::Result<()> {
     writeln!(w, "X{}Y{}D01*", coord(p.x), coord(p.y))
 }
 
+/// Counter-clockwise circular arc (Gerber `G03`) from the current
+/// pen position to `end`, with the arc's centre offset from the
+/// start by `(i_off, j_off)` relative coords. The caller must have
+/// emitted `G75*` already (multi-quadrant mode) and a `move_to` to
+/// the arc's start point.
+fn arc_to_ccw(w: &mut impl Write, end: Point, i_off: Length, j_off: Length) -> io::Result<()> {
+    writeln!(
+        w,
+        "G03X{}Y{}I{}J{}D01*",
+        coord(end.x),
+        coord(end.y),
+        coord(i_off),
+        coord(j_off),
+    )
+}
+
 fn select(w: &mut impl Write, id: u32) -> io::Result<()> {
     writeln!(w, "D{id}*")
 }
@@ -385,15 +401,59 @@ pub fn write_edge_cuts(board: &Board, w: &mut impl Write) -> io::Result<()> {
     let id = table.intern(Aperture::Round { d: EDGE_STROKE });
     write_apertures(w, &table)?;
     select(w, id)?;
-    let p00 = Point::new(rect.min.x, rect.min.y);
-    let p10 = Point::new(rect.max.x, rect.min.y);
-    let p11 = Point::new(rect.max.x, rect.max.y);
-    let p01 = Point::new(rect.min.x, rect.max.y);
-    move_to(w, p00)?;
-    line_to(w, p10)?;
-    line_to(w, p11)?;
-    line_to(w, p01)?;
-    line_to(w, p00)?;
+
+    // Sharp corners — single rectangle of straight segments.
+    let radius = board.outline_corner_radius;
+    if radius.0 == 0 {
+        let p00 = Point::new(rect.min.x, rect.min.y);
+        let p10 = Point::new(rect.max.x, rect.min.y);
+        let p11 = Point::new(rect.max.x, rect.max.y);
+        let p01 = Point::new(rect.min.x, rect.max.y);
+        move_to(w, p00)?;
+        line_to(w, p10)?;
+        line_to(w, p11)?;
+        line_to(w, p01)?;
+        line_to(w, p00)?;
+        return footer(w);
+    }
+
+    // Rounded corners: 4 straight edges + 4 CCW quarter-arcs.
+    // `G75*` enables multi-quadrant arc mode (the only sane choice for
+    // arbitrary arc spans, including 90°). Without it, fab CAM tools
+    // can read I/J offsets as single-quadrant only and corrupt the
+    // outline.
+    writeln!(w, "G75*")?;
+    let r = radius;
+    let xmin = rect.min.x;
+    let ymin = rect.min.y;
+    let xmax = rect.max.x;
+    let ymax = rect.max.y;
+    // Path traversed CCW (looking at the board from the top): start
+    // on the bottom edge just after the bottom-left arc and walk
+    // counter-clockwise around the perimeter.
+    let p_bottom_start  = Point::new(xmin + r, ymin);
+    let p_bottom_end    = Point::new(xmax - r, ymin);
+    let p_right_start   = Point::new(xmax, ymin + r);
+    let p_right_end     = Point::new(xmax, ymax - r);
+    let p_top_start     = Point::new(xmax - r, ymax);
+    let p_top_end       = Point::new(xmin + r, ymax);
+    let p_left_start    = Point::new(xmin, ymax - r);
+    let p_left_end      = Point::new(xmin, ymin + r);
+
+    move_to(w, p_bottom_start)?;
+    line_to(w, p_bottom_end)?;
+    // Bottom-right arc: centre (xmax - r, ymin + r). Offset from
+    // start = (0, +r).
+    arc_to_ccw(w, p_right_start, Length(0), r)?;
+    line_to(w, p_right_end)?;
+    // Top-right arc: centre (xmax - r, ymax - r). Offset = (-r, 0).
+    arc_to_ccw(w, p_top_start, Length(-r.0), Length(0))?;
+    line_to(w, p_top_end)?;
+    // Top-left arc: centre (xmin + r, ymax - r). Offset = (0, -r).
+    arc_to_ccw(w, p_left_start, Length(0), Length(-r.0))?;
+    line_to(w, p_left_end)?;
+    // Bottom-left arc: centre (xmin + r, ymin + r). Offset = (+r, 0).
+    arc_to_ccw(w, p_bottom_start, r, Length(0))?;
     footer(w)
 }
 

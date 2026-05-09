@@ -61,7 +61,8 @@ pub fn render_svg(board: &Board) -> String {
         // the outline. Anywhere the pour does NOT cover (cutouts,
         // edge clearance) shows this brown so the eye reads it as
         // "bare substrate, no copper".
-        write_substrate_fill(&mut svg, outline);
+        let radius_mm = board.outline_corner_radius.to_mm();
+        write_substrate_fill(&mut svg, outline, radius_mm);
         // Pours sit on the substrate. Each pour is the outline
         // (inset by the edge clearance) MINUS the clearance keepouts
         // around every foreign-net pad / trace / via — same geometry
@@ -69,7 +70,7 @@ pub fn render_svg(board: &Board) -> String {
         for pour in &board.pours {
             write_pour_polygon(&mut svg, board, pour, outline);
         }
-        write_rect_stroke(&mut svg, outline, "#d6905b", 0.4);
+        write_rect_stroke(&mut svg, outline, "#d6905b", 0.4, radius_mm);
         write_outline_dimensions(&mut svg, outline);
     }
 
@@ -693,10 +694,11 @@ const POUR_MIN_ISLAND_MM2: f64 = 30.0;
 /// FR4 substrate fill across the board outline. Sits between the
 /// canvas grid and the pour copper so any spot uncovered by the pour
 /// (clearance voids, edge ring) reads as bare PCB.
-fn write_substrate_fill(svg: &mut String, outline: Rect) {
+fn write_substrate_fill(svg: &mut String, outline: Rect, corner_radius_mm: f64) {
+    let r = corner_radius_mm.max(0.0);
     let _ = write!(
         svg,
-        r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="#5a3a1f" fill-opacity="0.55" pointer-events="none"/>"##,
+        r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" rx="{r:.3}" ry="{r:.3}" fill="#5a3a1f" fill-opacity="0.55" pointer-events="none"/>"##,
         x = outline.min.x.to_mm(),
         y = outline.min.y.to_mm(),
         w = outline.width().to_mm(),
@@ -733,6 +735,10 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
     }
     let w = x1 - x0;
     let h = y1 - y0;
+    // Pour follows the outline's corner curve, inset by the same
+    // edge-clearance amount as everything else. Smaller radius (or
+    // zero, sharp corners) = sharper inner pour corners.
+    let pour_radius = (board.outline_corner_radius.to_mm() - inset).max(0.0);
     let layer_tag = match pour.layer {
         CopperLayer::Top => "t",
         CopperLayer::Bottom => "b",
@@ -940,7 +946,8 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
     //    inset area, masked by the rasterised void above.
     let _ = write!(
         svg,
-        r##"<rect x="{x0:.3}" y="{y0:.3}" width="{w:.3}" height="{h:.3}" fill="#0e1116" fill-opacity="0.78" mask="url(#{mask_id})" pointer-events="none"/>"##,
+        r##"<rect x="{x0:.3}" y="{y0:.3}" width="{w:.3}" height="{h:.3}" rx="{pr:.3}" ry="{pr:.3}" fill="#0e1116" fill-opacity="0.78" mask="url(#{mask_id})" pointer-events="none"/>"##,
+        pr = pour_radius,
     );
 }
 
@@ -1123,10 +1130,11 @@ fn sanitize_id(s: &str) -> String {
     out
 }
 
-fn write_rect_stroke(svg: &mut String, rect: Rect, stroke: &str, width_mm: f64) {
+fn write_rect_stroke(svg: &mut String, rect: Rect, stroke: &str, width_mm: f64, corner_radius_mm: f64) {
+    let r = corner_radius_mm.max(0.0);
     let _ = write!(
         svg,
-        r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="none" stroke="{stroke}" stroke-width="{sw:.3}"/>"##,
+        r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" rx="{r:.3}" ry="{r:.3}" fill="none" stroke="{stroke}" stroke-width="{sw:.3}"/>"##,
         x = rect.min.x.to_mm(),
         y = rect.min.y.to_mm(),
         w = rect.width().to_mm(),

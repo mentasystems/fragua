@@ -295,16 +295,26 @@ fn library_attachment_data_uri(
     Ok(format!("data:{};base64,{}", att.mime, b64))
 }
 
-/// Set the rectangular Edge.Cuts outline of the board.
+/// Set the rectangular Edge.Cuts outline of the board, plus an
+/// optional uniform corner radius (mm). The webview's set-board-size
+/// control uses this; the script verb `outline W H [radius=R]` goes
+/// through the script tool path instead.
 #[tauri::command]
-fn set_board_outline(state: State<'_, AppState>, w_mm: f64, h_mm: f64) -> Result<(), String> {
+fn set_board_outline(
+    state: State<'_, AppState>,
+    w_mm: f64,
+    h_mm: f64,
+    corner_radius_mm: Option<f64>,
+) -> Result<(), String> {
     if w_mm < 1.0 || h_mm < 1.0 {
         return Err("dimensions must be at least 1 mm".to_string());
     }
-    state.project.set_outline(pcb_core::Rect::from_corners(
+    let outline = pcb_core::Rect::from_corners(
         pcb_core::Point::new(pcb_core::Length::from_mm(0.0), pcb_core::Length::from_mm(0.0)),
         pcb_core::Point::new(pcb_core::Length::from_mm(w_mm), pcb_core::Length::from_mm(h_mm)),
-    ));
+    );
+    let radius = pcb_core::Length::from_mm(corner_radius_mm.unwrap_or(0.0).max(0.0));
+    state.project.set_outline_with_radius(outline, radius);
     Ok(())
 }
 

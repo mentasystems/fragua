@@ -84,7 +84,9 @@ PROJECT / READS:\n\
                                                  `fragua PATH` to keep autosaving.\n\
 \n\
 BOARD:\n\
-  outline W H                                  — set Edge.Cuts rectangle in mm\n\
+  outline W H [radius=R]                       — set Edge.Cuts rectangle in mm. Optional uniform\n\
+                                                 corner radius (mm) rounds all four corners; default\n\
+                                                 0 = sharp. Clamped to min(W, H) / 2.\n\
 \n\
 LIBRARY (build first, reuse forever):\n\
   lib KEY [value=V] [rot=N] [edge=true|false] [desc=\"...\"]\n\
@@ -451,6 +453,12 @@ async fn tool_batch(project: &Project, args: &Value) -> Result<Value, ToolError>
 struct SetOutlineInput {
     w_mm: f64,
     h_mm: f64,
+    /// Optional uniform corner radius in mm (default 0 = sharp).
+    /// Clamped by `Project::set_outline_with_radius` to half the
+    /// shorter side, so even a comically-large value produces a
+    /// valid outline (a stadium / pill shape at the limit).
+    #[serde(default)]
+    corner_radius_mm: Option<f64>,
 }
 
 fn tool_board_set_outline(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -460,16 +468,27 @@ fn tool_board_set_outline(project: &Project, args: &Value) -> Result<Value, Tool
         Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
         Point::new(Length::from_mm(input.w_mm), Length::from_mm(input.h_mm)),
     );
-    project.set_outline(outline);
+    let radius = Length::from_mm(input.corner_radius_mm.unwrap_or(0.0).max(0.0));
+    project.set_outline_with_radius(outline, radius);
+    let radius_mm = radius.to_mm();
     project.log(
         ActivityLevel::Info,
-        format!("board.set_outline: {:.1} × {:.1} mm", input.w_mm, input.h_mm),
+        format!(
+            "board.set_outline: {:.1} × {:.1} mm{}",
+            input.w_mm,
+            input.h_mm,
+            if radius_mm > 0.0 { format!(" (radius {radius_mm:.2} mm)") } else { String::new() },
+        ),
     );
-    Ok(text_result(format!(
-        "Board outline set to {:.1} × {:.1} mm",
-        input.w_mm, input.h_mm
-    ))
-    .with_data(json!({"w_mm": input.w_mm, "h_mm": input.h_mm})))
+    let mut text = format!("Board outline set to {:.1} × {:.1} mm", input.w_mm, input.h_mm);
+    if radius_mm > 0.0 {
+        text.push_str(&format!(", corner radius {radius_mm:.2} mm"));
+    }
+    Ok(text_result(text).with_data(json!({
+        "w_mm": input.w_mm,
+        "h_mm": input.h_mm,
+        "corner_radius_mm": radius_mm,
+    })))
 }
 
 fn tool_project_status(project: &Project) -> Result<Value, ToolError> {
