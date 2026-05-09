@@ -69,6 +69,13 @@ const BEND_COST: u32 = 6;
 // charges `cost_map.at(next)` on top of the base step cost when crossing
 // `next`. Bias is added before the bend penalty so a costly cell makes
 // the router prefer cheaper alternatives even when no bend is involved.
+//
+// Multi-source for Prim-style Steiner construction: the explicit
+// `start` cell and every same-net `Trace` cell are enqueued at g=0,
+// so later spokes can branch off the existing trunk at the cell
+// closest to `target` instead of walking back to the seed. Other-net
+// `NetPad` cells are NOT sources; the path must reach `target` by
+// routing, not by snapping through neighbouring pads of the same net.
 pub fn search(
     grid: &Grid,
     start: GridPoint,
@@ -92,6 +99,24 @@ pub fn search(
     let start_state = State { p: start, dir: Dir::Start };
     g_score.insert(start_state, 0);
     open.push(Node { f: h(start), g: 0, s: start_state });
+
+    // Add every same-net Trace cell as an additional source: that's
+    // how a later spoke joins the existing tree at its closest point.
+    for layer in 0..2u8 {
+        for row in 0..grid.rows {
+            for col in 0..grid.cols {
+                let p = GridPoint { layer, col, row };
+                if p == start {
+                    continue;
+                }
+                if matches!(grid.get(p), Cell::Trace(n) if n == target_net) {
+                    let state = State { p, dir: Dir::Start };
+                    g_score.insert(state, 0);
+                    open.push(Node { f: h(p), g: 0, s: state });
+                }
+            }
+        }
+    }
 
     while let Some(Node { s, g, .. }) = open.pop() {
         if s.p == target && matches!(grid.get(s.p), Cell::NetPad(n) if n == target_net) {

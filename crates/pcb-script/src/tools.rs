@@ -2142,8 +2142,24 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
             drc_report.warning_count,
         ),
     );
+    // Surface placement hints in the activity log too: the agent's
+    // most-recent action ends with these so failures lead directly to
+    // a concrete next move.
+    for hint in &report.hints {
+        project.log(ActivityLevel::Warn, format!("route.hint: {hint}"));
+    }
+    let hints_block = if report.hints.is_empty() {
+        String::new()
+    } else {
+        let lines: Vec<String> = report
+            .hints
+            .iter()
+            .map(|h| format!("  - {h}"))
+            .collect();
+        format!("\nhints:\n{}", lines.join("\n"))
+    };
     Ok(text_result(format!(
-        "Routed: {} traces, {} vias, {:.1} mm wire (detour {:.2}× over {:.1} mm lower bound), {} pass(es){}; DRC: {} error(s), {} warning(s)",
+        "Routed: {} traces, {} vias, {:.1} mm wire (detour {:.2}× over {:.1} mm lower bound), {} pass(es){}; DRC: {} error(s), {} warning(s){}",
         report.trace_count,
         report.via_count,
         report.total_length_mm,
@@ -2157,6 +2173,7 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         },
         drc_report.error_count,
         drc_report.warning_count,
+        hints_block,
     ))
     .with_data(json!({
         "trace_count": report.trace_count,
@@ -2166,6 +2183,7 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         "total_detour_ratio": round2(total_detour),
         "iterations": report.iterations,
         "per_net": per_net,
+        "hints": report.hints,
         "drc": serde_json::to_value(&drc_report).unwrap_or(json!({})),
     })))
 }

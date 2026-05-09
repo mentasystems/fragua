@@ -73,6 +73,10 @@ pub struct RouteReport {
     /// before settling on this report. 1 = single pass (no RR&R needed
     /// or RR&R didn't help); 2..=`MAX_RR_ITERATIONS` = RR&R kicked in.
     pub iterations: usize,
+    /// Plain-text suggestions for the agent: which footprints to move
+    /// to fix the still-failing nets. Generated post-hoc from the best
+    /// report — empty when every net routed.
+    pub hints: Vec<String>,
 }
 
 /// Hard cap on rip-up-and-reroute passes. Each pass clears all routing
@@ -127,6 +131,7 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
             total_length_mm: 0.0,
             total_lower_bound_mm: 0.0,
             iterations: 0,
+            hints: Vec::new(),
         };
     }
 
@@ -191,14 +196,18 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
 
         // Negotiated congestion: bump the corridor around each bad
         // net's pads so easy nets in the NEXT pass detour around it
-        // and leave the bad net a clear shot.
+        // and leave the bad net a clear shot. Bias scales with
+        // iteration index — if a net survives its first bump, the
+        // next iteration applies a stronger one (capped at
+        // `CONGESTION_MAX`) until A* finds a way through.
         let snap_grid = Grid::new(region, opts.cell);
+        let bump_factor = iterations_run as u32; // 1, 2, 3...
         for name in &failed {
             bump_corridor(
                 &snap_grid,
                 &mut cost_map,
                 nets.get(name).map(Vec::as_slice).unwrap_or(&[]),
-                CONGESTION_BUMP_FAILED,
+                CONGESTION_BUMP_FAILED * bump_factor,
             );
         }
         for name in &inefficient {
@@ -206,7 +215,7 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
                 &snap_grid,
                 &mut cost_map,
                 nets.get(name).map(Vec::as_slice).unwrap_or(&[]),
-                CONGESTION_BUMP_INEFFICIENT,
+                CONGESTION_BUMP_INEFFICIENT * bump_factor,
             );
         }
 
@@ -218,6 +227,7 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
 
     let (best_work, mut best_report) = best.expect("at least one iteration ran");
     best_report.iterations = iterations_run;
+    best_report.hints = generate_hints(&best_report, &nets);
     // Stamp the winning routing onto the caller's board.
     board.clear_routing();
     for trace in best_work.traces {
@@ -227,6 +237,68 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
         board.add_via(via);
     }
     best_report
+}
+
+/// Look at the report and emit human-readable suggestions for the
+/// agent. For every net that is still failing or whose detour ratio is
+/// pathological (>2× HPWL), pick the *outlier* pad — the one whose
+/// removal would shrink the bbox the most — and suggest moving its
+/// footprint closer to the rest of the net. This is heuristic but
+/// usually right: the failing/detoured nets are the ones with one or
+/// two pads geographically far from the cluster, and moving those is
+/// the lowest-effort fix.
+fn generate_hints(
+    report: &RouteReport,
+    nets: &BTreeMap<String, Vec<NetPadInfo>>,
+) -> Vec<String> {
+    let mut hints = Vec::new();
+    for (net_name, outcome) in &report.per_net {
+        let troubled = match outcome {
+            Outcome::Failed { .. } => true,
+            Outcome::Ok { length_mm, lower_bound_mm, .. }
+                if *lower_bound_mm > 0.0 && length_mm / lower_bound_mm > 2.0 =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if !troubled {
+            continue;
+        }
+        let Some(pads) = nets.get(net_name) else { continue };
+        if pads.len() < 2 {
+            continue;
+        }
+        // Outlier = pad with max sum-Manhattan distance to all other
+        // pads on the net. A central cluster has tight pairwise sums;
+        // the outlier sticks out and dominates the bbox.
+        let outlier = pads
+            .iter()
+            .max_by_key(|p| {
+                pads.iter()
+                    .map(|q| {
+                        (p.center.x.0 - q.center.x.0).unsigned_abs()
+                            + (p.center.y.0 - q.center.y.0).unsigned_abs()
+                    })
+                    .sum::<u64>()
+            });
+        if let Some(o) = outlier {
+            // Reference is "REF.PIN"; the footprint reference is the
+            // bit before the dot. Tell the agent that piece.
+            let fp_ref = o.pad_ref.split_once('.').map_or(o.pad_ref.as_str(), |(r, _)| r);
+            let kind = if matches!(outcome, Outcome::Failed { .. }) {
+                "failed"
+            } else {
+                "detoured"
+            };
+            hints.push(format!(
+                "net {net_name} {kind}: {fp_ref} (pad at {:.1},{:.1} mm) is the outlier — moving it closer to the rest of the net usually frees the corridor",
+                o.center.x.to_mm(),
+                o.center.y.to_mm(),
+            ));
+        }
+    }
+    hints
 }
 
 /// Heuristic: fewer failed nets > shorter total wire > fewer vias.
@@ -354,13 +426,18 @@ fn route_pass(
             ));
             continue;
         }
-        // Pick the geographically central pad as hub: minimum sum of
-        // Manhattan distances to every other pad on the net. Short
-        // spokes are easier to route, and since the FIRST failed spoke
-        // takes the whole net down, a central hub keeps the failure
-        // probability low. Star routing is still tutorial-grade — full
-        // Steiner improvement is future work.
-        let hub_idx = (0..pad_points.len())
+        // Lower bound = HPWL: half-perimeter of the pad bounding box,
+        // mm. The minimum wire length any tree connecting these pads
+        // can use, regardless of topology. Same metric the DRC reports
+        // so router and DRC agree on what "optimal" means.
+        let net_lower_bound_mm = hpwl_mm(pad_points);
+
+        // Pick the geographically central pad as the seed: minimum sum
+        // of Manhattan distances to every other pad. With multi-source
+        // A* the hub is no longer mandatory — any same-net cell is a
+        // search source — but the spoke ordering "closest to seed
+        // first" still helps build a tight Prim-style tree.
+        let seed_idx = (0..pad_points.len())
             .min_by_key(|&i| {
                 pad_points
                     .iter()
@@ -374,38 +451,32 @@ fn route_pass(
                     .sum::<u64>()
             })
             .unwrap_or(0);
-        let hub = pad_points[hub_idx].clone();
-        let hub_grid = grid.snap(hub.center, hub.layer);
+        let seed = pad_points[seed_idx].clone();
+        let seed_grid = grid.snap(seed.center, seed.layer);
 
         let mut net_segments = 0usize;
         let mut net_vias = 0usize;
         let mut net_length_mm = 0.0_f64;
-        let mut net_lower_bound_mm = 0.0_f64;
         let mut failed = false;
-        // Spokes ordered by distance to hub (closest first). Once the
-        // first spokes lay copper near the hub, subsequent (farther)
-        // spokes can join the existing trace anywhere along its run
-        // instead of having to fight back to the hub pad itself.
+        // Spokes ordered by distance to seed (closest first). After
+        // each spoke is laid, multi-source A* will pick whichever
+        // existing same-net cell is closest to the next spoke — so the
+        // tree grows Prim-style, not star.
         let mut spokes_sorted: Vec<NetPadInfo> = pad_points
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != hub_idx)
+            .filter(|(i, _)| *i != seed_idx)
             .map(|(_, p)| p.clone())
             .collect();
         spokes_sorted.sort_by_key(|q| {
-            (hub.center.x.0 - q.center.x.0).unsigned_abs()
-                + (hub.center.y.0 - q.center.y.0).unsigned_abs()
+            (seed.center.x.0 - q.center.x.0).unsigned_abs()
+                + (seed.center.y.0 - q.center.y.0).unsigned_abs()
         });
         for spoke in spokes_sorted {
-            // Lower bound: hub→spoke Manhattan distance. Sum over all
-            // spokes is the optimum total wire for an orthogonal star
-            // tree, which is what the router lays.
-            net_lower_bound_mm += (hub.center.x.to_mm() - spoke.center.x.to_mm()).abs()
-                + (hub.center.y.to_mm() - spoke.center.y.to_mm()).abs();
             let spoke_grid = grid.snap(spoke.center, spoke.layer);
             let Some(result) = search(
                 &grid,
-                hub_grid,
+                seed_grid,
                 net_id,
                 opts.via_cost,
                 spoke_grid,
@@ -416,8 +487,7 @@ fn route_pass(
                     net_name.clone(),
                     Outcome::Failed {
                         reason: format!(
-                            "no path from hub {} to pad {} at ({:.2}, {:.2}) mm",
-                            hub.pad_ref,
+                            "no path to pad {} at ({:.2}, {:.2}) mm",
                             spoke.pad_ref,
                             spoke.center.x.to_mm(),
                             spoke.center.y.to_mm(),
@@ -457,7 +527,31 @@ fn route_pass(
         total_length_mm,
         total_lower_bound_mm,
         iterations: 0,
+        hints: Vec::new(),
     }
+}
+
+/// HPWL (half-perimeter wire length) of the net's pad bounding box, in
+/// mm. The minimum wire any tree connecting these pads can use; matches
+/// the DRC's `RoutingInefficient` lower bound so the two layers report
+/// the same "optimum we're measuring against".
+fn hpwl_mm(pads: &[NetPadInfo]) -> f64 {
+    if pads.len() < 2 {
+        return 0.0;
+    }
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for pad in pads {
+        let x = pad.center.x.to_mm();
+        let y = pad.center.y.to_mm();
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    (max_x - min_x) + (max_y - min_y)
 }
 
 /// Snap every pad of a bad net to the grid, take the bbox, expand by
