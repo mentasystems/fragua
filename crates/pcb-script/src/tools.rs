@@ -266,7 +266,7 @@ struct SaveInput {
 
 /// Write the current project to an arbitrary path. Useful when the app
 /// was launched without a file argument (no autosave): the agent runs a
-/// `save /path/to/board.json` line once it has something worth keeping.
+/// `save /path/to/board.fragua` line once it has something worth keeping.
 fn tool_project_save(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: SaveInput = serde_json::from_value(args.clone())
         .map_err(|e| ToolError::invalid_params(format!("save: {e}")))?;

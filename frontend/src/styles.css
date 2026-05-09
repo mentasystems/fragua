@@ -209,39 +209,6 @@ html, body, #app {
 .activity-log .entry.error .level { color: #f85149; }
 .activity-log .entry .msg { color: var(--text); word-break: break-word; }
 
-@keyframes pcb-spawn {
-  0%   { filter: drop-shadow(0 0 8px #ffd166) brightness(2.0); opacity: 0.55; }
-  35%  { filter: drop-shadow(0 0 4px #ffd166) brightness(1.5); opacity: 1; }
-  100% { filter: none; opacity: 1; }
-}
-[data-board-ref].spawn { animation: pcb-spawn 600ms ease-out; transform-box: fill-box; transform-origin: center; }
-
-/* Brush-stroke trace draw: pathLength="1" normalises every line so a
-   single dasharray/dashoffset rule paints the trace from start to end. */
-@keyframes trace-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
-line[data-trace-id].trace-spawn {
-  stroke-dasharray: 1;
-  stroke-dashoffset: 1;
-  animation: trace-draw 150ms linear forwards;
-}
-
-@keyframes via-pop {
-  0%   { transform: scale(0.2); opacity: 0; }
-  60%  { transform: scale(1.15); opacity: 1; }
-  100% { transform: scale(1); opacity: 1; }
-}
-g[data-via-id].via-spawn {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: via-pop 150ms ease-out;
-}
-
-.activity-log .entry { animation: log-fade-in 300ms ease-out; }
-@keyframes log-fade-in {
-  0%   { opacity: 0; transform: translateX(-4px); }
-  100% { opacity: 1; transform: translateX(0); }
-}
-
 .library-pane {
   grid-area: library;
   display: flex;

@@ -16,7 +16,8 @@ Fragua — AI-native PCB design tool.
 
 USAGE
   fragua                 open with no project loaded (in-memory only)
-  fragua <file.json>     load that file; autosave to it on every edit
+  fragua <file.fragua>   load that file; autosave to it on every edit
+                         (legacy `.json` files are also accepted)
 
 LOCAL API
   Stateless HTTP on http://127.0.0.1:7878 (override: FRAGUA_API_ADDR).
@@ -32,7 +33,7 @@ LOCAL API
                                 + an unsaved-session warning if any
   POST /save             write the current project to disk (atomic)
                          and bind autosave to that path
-                         body:  {\"path\": \"/abs/or/rel/file.json\"}
+                         body:  {\"path\": \"/abs/or/rel/file.fragua\"}
                          reply: `Saved to <path>`
   GET  /health           `ok`
 
@@ -43,7 +44,7 @@ LOCAL API
 
     curl -s http://127.0.0.1:7878/save \\
       -H 'content-type: application/json' \\
-      -d '{\"path\": \"/tmp/board.json\"}'
+      -d '{\"path\": \"/tmp/board.fragua\"}'
 
   The script language is the surface for every design action (lib, sym,
   net, palette, place, route, drc, export, ...). `POST /save` is the
@@ -90,11 +91,7 @@ struct OutlinePayload {
 
 #[tauri::command]
 fn project_state(state: State<'_, AppState>) -> ProjectStatePayload {
-    // Render the VISIBLE mirror (lags `live` by the animation cadence)
-    // — that's what the user sees on the canvas. The agent's own
-    // read-tools (`view.snapshot`, `view.summary`) read live for an
-    // accurate, instant view of state after a script runs.
-    let snap = state.project.read_visible();
+    let snap = state.project.read();
     let palette: Vec<PalettePayload> = snap
         .palette()
         .iter()
@@ -550,10 +547,11 @@ pub fn run() {
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     // CLI: `fragua` (no args) → empty in-memory project, no autosave.
-    // `fragua <file.json>` → load that file (or start empty if missing
-    // / unreadable) and autosave back to it. The autosave target lives
-    // on the project itself, so a later `POST /save` (or `save PATH`
-    // verb) rebinds it without restart.
+    // `fragua <file.fragua>` → load that file (or start empty if missing
+    // / unreadable) and autosave back to it. Legacy `.json` files load
+    // too — the format on disk is JSON regardless of extension. The
+    // autosave target lives on the project itself, so a later
+    // `POST /save` (or `save PATH` verb) rebinds it without restart.
     let cli_path = std::env::args_os().nth(1).map(std::path::PathBuf::from);
     let project = match cli_path {
         Some(path) => Project::load_from_path(&path).unwrap_or_else(|| {
@@ -575,7 +573,6 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             spawn_event_pump(handle, project.clone());
-            spawn_animation_pump(project.clone());
             spawn_autosave(project.clone());
             spawn_http_api(project, api_addr.clone());
             Ok(())
@@ -604,25 +601,6 @@ pub fn run() {
 /// Subscribe to the project event bus and forward every event into the
 /// webview as `pcb://event`. Errors (lagged subscriber, send failure)
 /// are non-fatal — the next event will catch up.
-/// Drive the project's animation mirror: every `ANIMATION_TICK_MS`,
-/// pop one Mutation from the pending queue, apply it to `visible`,
-/// and emit the corresponding Event. The agent never blocks on this
-/// — mutations land in `live` instantly; only the UI's view (which
-/// reads `visible`) catches up frame-by-frame.
-fn spawn_animation_pump(project: Project) {
-    use std::time::Duration;
-    const TICK: Duration = Duration::from_millis(150);
-    tauri::async_runtime::spawn(async move {
-        loop {
-            tokio::time::sleep(TICK).await;
-            // Drain whatever is pending — but only one per tick so the
-            // animation paces. If the agent has queued up a long burst,
-            // the queue catches up gradually.
-            project.tick();
-        }
-    });
-}
-
 fn spawn_event_pump(handle: tauri::AppHandle, project: Project) {
     let mut rx = project.events().subscribe();
     tauri::async_runtime::spawn(async move {

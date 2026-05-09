@@ -4,10 +4,9 @@
 //! All mutating methods publish an `Event` so subscribers (UI, MCP, the
 //! router) see changes regardless of where the change originated.
 
-use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,61 +16,16 @@ use crate::geometry::{Point, Rect};
 use crate::units::Length;
 use crate::schematic::{Net, Schematic, Symbol};
 
-/// One mutation captured by the project's deferred queue. Each entry
-/// carries the FULL data needed to re-apply the change to the
-/// `visible` state mirror at animation cadence — so the canvas
-/// advances frame-by-frame even though the agent's mutation already
-/// landed in `live`. The pump (`tick`) pops one of these per frame,
-/// applies it to `visible`, and broadcasts the corresponding `Event`
-/// for subscribers (UI, autosave). The agent never observes this
-/// queue — it sees `live` immediately.
-#[derive(Debug, Clone)]
-enum Mutation {
-    AddFootprint(Footprint),
-    MoveFootprint { id: Id, position: Point },
-    RotateFootprint { id: Id, rotation: f32 },
-    RemoveFootprint(Id),
-    SetOutline(Option<Rect>),
-    AddTrace(Trace),
-    RemoveTrace(Id),
-    AddVia(Via),
-    RemoveVia(Id),
-    AddPour(Pour),
-    RemovePour { net: String, layer: CopperLayer },
-    AddSilkLine(SilkLine),
-    AddSilkText(SilkText),
-    ClearRouting,
-    ClearNetRouting { net: String },
-    AddSymbol(Symbol),
-    SetNet(Net),
-    PaletteAdd(Footprint),
-    PaletteTake { reference: String },
-    PaletteClear,
-    ResetBoard,
-    Activity { level: ActivityLevel, message: String },
-}
-
-/// Cheap-to-clone handle around the shared project state.
-///
-/// Two parallel states:
-///   - `live`: the truth — every mutation lands here immediately, the
-///     agent sees it on its next read, no animation lag.
-///   - `visible`: mirror that the UI renders. Lags `live` by the
-///     animation cadence; advanced frame-by-frame by `tick()` which
-///     pops one Mutation and applies it.
+/// Cheap-to-clone handle around the shared project state. Mutations
+/// land synchronously on `inner` and the matching `Event` is published
+/// on the bus immediately — UI subscribers see whatever the agent did
+/// at the speed at which the agent did it.
 ///
 /// Cloning a `Project` clones the `Arc`s — every clone reads and writes
 /// the same underlying state and event bus.
 #[derive(Debug, Clone)]
 pub struct Project {
-    /// Latest committed state. Mutating methods update this
-    /// synchronously and queue a `Mutation` for the visible mirror.
     inner: Arc<RwLock<ProjectInner>>,
-    /// Animation mirror. Advanced by `tick()`. UI renders from here.
-    visible: Arc<RwLock<ProjectInner>>,
-    /// FIFO queue of mutations pending replay onto `visible`. The
-    /// animation pump drains one per cadence tick.
-    pending: Arc<Mutex<VecDeque<Mutation>>>,
     bus: EventBus,
     /// User-driven component library, persisted to `~/.pcb-library/`.
     /// Shared across every `Project` clone so the same in-memory state
@@ -106,205 +60,19 @@ impl Project {
             Err(_) => crate::library::Library::open_at(std::env::temp_dir().join("pcb-library"))
                 .expect("library: temp fallback also failed"),
         };
-        let name: String = name.into();
-        // Both live and visible start identical and empty; mutations
-        // queue Mutation entries that the pump replays onto visible.
-        let make_inner = || ProjectInner {
-            name: name.clone(),
-            board: Board::new(),
-            schematic: Schematic::new(),
-            palette: Vec::new(),
-        };
         let proj = Self {
-            inner: Arc::new(RwLock::new(make_inner())),
-            visible: Arc::new(RwLock::new(make_inner())),
-            pending: Arc::new(Mutex::new(VecDeque::new())),
+            inner: Arc::new(RwLock::new(ProjectInner {
+                name: name.into(),
+                board: Board::new(),
+                schematic: Schematic::new(),
+                palette: Vec::new(),
+            })),
             bus: EventBus::new(),
             library: Arc::new(library),
             save_path: Arc::new(RwLock::new(None)),
         };
         proj.bus.publish(Event::ProjectChanged);
         proj
-    }
-
-    /// Push a mutation onto the deferred queue. Mutations are cheap
-    /// (an enum variant + cloned data); the queue is unbounded — if
-    /// the agent fires faster than the pump drains, the queue grows
-    /// transiently and animation runs longer to catch up.
-    fn queue(&self, m: Mutation) {
-        self.pending.lock().expect("pending lock poisoned").push_back(m);
-    }
-
-    /// Advance the animation mirror by one mutation, if any pending.
-    /// Returns `true` if a mutation was applied. The Tauri host calls
-    /// this from a background task at the configured cadence (default
-    /// 500 ms).
-    pub fn tick(&self) -> bool {
-        let m = match self.pending.lock().expect("pending lock poisoned").pop_front() {
-            Some(m) => m,
-            None => return false,
-        };
-        let mut visible = self.visible.write().expect("visible lock poisoned");
-        match m {
-            Mutation::AddFootprint(fp) => {
-                let id = fp.id;
-                let reference = fp.reference.clone();
-                visible.board.add_footprint(fp);
-                drop(visible);
-                self.bus.publish(Event::FootprintAdded { id, reference });
-            }
-            Mutation::MoveFootprint { id, position } => {
-                visible.board.move_footprint(id, position);
-                drop(visible);
-                self.bus.publish(Event::FootprintMoved { id, position });
-            }
-            Mutation::RotateFootprint { id, rotation } => {
-                if let Some(fp) = visible.board.footprints.get_mut(&id) {
-                    fp.rotation = rotation;
-                }
-                let position = visible.board.footprints.get(&id).map(|fp| fp.position);
-                drop(visible);
-                if let Some(position) = position {
-                    self.bus.publish(Event::FootprintMoved { id, position });
-                }
-            }
-            Mutation::RemoveFootprint(id) => {
-                visible.board.remove_footprint(id);
-                drop(visible);
-                self.bus.publish(Event::FootprintRemoved { id });
-            }
-            Mutation::SetOutline(outline) => {
-                visible.board.outline = outline;
-                drop(visible);
-                self.bus.publish(Event::OutlineChanged);
-            }
-            Mutation::AddTrace(trace) => {
-                visible.board.add_trace(trace);
-                let trace_count = visible.board.traces.len();
-                let via_count = visible.board.vias.len();
-                drop(visible);
-                self.bus.publish(Event::RoutingChanged { trace_count, via_count });
-            }
-            Mutation::RemoveTrace(id) => {
-                visible.board.traces.retain(|t| t.id != id);
-                let trace_count = visible.board.traces.len();
-                let via_count = visible.board.vias.len();
-                drop(visible);
-                self.bus.publish(Event::RoutingChanged { trace_count, via_count });
-            }
-            Mutation::AddVia(via) => {
-                visible.board.add_via(via);
-                let trace_count = visible.board.traces.len();
-                let via_count = visible.board.vias.len();
-                drop(visible);
-                self.bus.publish(Event::RoutingChanged { trace_count, via_count });
-            }
-            Mutation::RemoveVia(id) => {
-                visible.board.vias.retain(|v| v.id != id);
-                let trace_count = visible.board.traces.len();
-                let via_count = visible.board.vias.len();
-                drop(visible);
-                self.bus.publish(Event::RoutingChanged { trace_count, via_count });
-            }
-            Mutation::AddPour(pour) => {
-                visible.board.add_pour(pour);
-                let count = visible.board.pours.len();
-                drop(visible);
-                self.bus.publish(Event::PoursChanged { count });
-            }
-            Mutation::RemovePour { net, layer } => {
-                visible.board.remove_pour(&net, layer);
-                let count = visible.board.pours.len();
-                drop(visible);
-                self.bus.publish(Event::PoursChanged { count });
-            }
-            Mutation::AddSilkLine(line) => {
-                visible.board.add_silk_line(line);
-                let line_count = visible.board.silk_lines.len();
-                let text_count = visible.board.silk_texts.len();
-                drop(visible);
-                self.bus.publish(Event::SilkChanged { line_count, text_count });
-            }
-            Mutation::AddSilkText(text) => {
-                visible.board.add_silk_text(text);
-                let line_count = visible.board.silk_lines.len();
-                let text_count = visible.board.silk_texts.len();
-                drop(visible);
-                self.bus.publish(Event::SilkChanged { line_count, text_count });
-            }
-            Mutation::ClearRouting => {
-                visible.board.clear_routing();
-                drop(visible);
-                self.bus.publish(Event::RoutingChanged { trace_count: 0, via_count: 0 });
-            }
-            Mutation::ClearNetRouting { net, .. } => {
-                visible.board.traces.retain(|t| t.net != net);
-                visible.board.vias.retain(|v| v.net != net);
-                let trace_count = visible.board.traces.len();
-                let via_count = visible.board.vias.len();
-                drop(visible);
-                self.bus.publish(Event::RoutingChanged { trace_count, via_count });
-            }
-            Mutation::AddSymbol(symbol) => {
-                let id = symbol.id;
-                let reference = symbol.reference.clone();
-                visible.schematic.add_symbol(symbol);
-                drop(visible);
-                self.bus.publish(Event::SymbolAdded { id, reference });
-            }
-            Mutation::SetNet(net) => {
-                let name = net.name.clone();
-                let connection_count = net.connections.len();
-                let _ = visible.schematic.set_net(net);
-                drop(visible);
-                self.bus.publish(Event::NetChanged { name, connection_count });
-            }
-            Mutation::PaletteAdd(fp) => {
-                visible.palette.push(fp);
-                let count = visible.palette.len();
-                drop(visible);
-                self.bus.publish(Event::PaletteChanged { count });
-            }
-            Mutation::PaletteTake { reference } => {
-                visible.palette.retain(|f| f.reference != reference);
-                let count = visible.palette.len();
-                drop(visible);
-                self.bus.publish(Event::PaletteChanged { count });
-            }
-            Mutation::PaletteClear => {
-                visible.palette.clear();
-                drop(visible);
-                self.bus.publish(Event::PaletteChanged { count: 0 });
-            }
-            Mutation::ResetBoard => {
-                let outline = visible.board.outline;
-                let salvaged: Vec<Footprint> = visible.board
-                    .footprints_in_order()
-                    .cloned()
-                    .map(|mut fp| {
-                        fp.position = Point::new(Length::from_mm(-100.0), Length::from_mm(-100.0));
-                        fp
-                    })
-                    .collect();
-                visible.board = Board::new();
-                visible.board.outline = outline;
-                visible.palette.extend(salvaged);
-                drop(visible);
-                self.bus.publish(Event::ProjectChanged);
-            }
-            Mutation::Activity { level, message } => {
-                drop(visible);
-                self.bus.publish(Event::Activity { level, message });
-            }
-        }
-        true
-    }
-
-    /// How many mutations are still queued waiting to animate. UIs can
-    /// show this as a "lag" indicator.
-    #[must_use]
-    pub fn pending_count(&self) -> usize {
-        self.pending.lock().expect("pending lock poisoned").len()
     }
 
     /// Read-only access to the user's component library. Mutations go
@@ -330,34 +98,24 @@ impl Project {
     /// Activity log helper used everywhere we want the UI's activity
     /// panel to show what happened, with a severity tag.
     pub fn log(&self, level: ActivityLevel, message: impl Into<String>) {
-        self.queue(Mutation::Activity { level, message: message.into() });
+        self.bus.publish(Event::Activity { level, message: message.into() });
     }
 
-    /// Read the LIVE state — the truth, no animation lag. Use for the
-    /// agent's read-only tools so it sees the most-recent commit, not
-    /// the lagging visible mirror.
+    /// Read the project state.
     pub fn read(&self) -> ProjectSnapshot<'_> {
         ProjectSnapshot {
             guard: self.inner.read().expect("project lock poisoned"),
         }
     }
 
-    /// Read the VISIBLE mirror — what the UI should render. Lags the
-    /// live state by the animation cadence; tracks the order in which
-    /// mutations were committed.
-    pub fn read_visible(&self) -> ProjectSnapshot<'_> {
-        ProjectSnapshot {
-            guard: self.visible.read().expect("visible lock poisoned"),
-        }
-    }
-
     pub fn add_footprint(&self, footprint: Footprint) -> Id {
         let id = footprint.id;
+        let reference = footprint.reference.clone();
         {
             let mut inner = self.inner.write().expect("project lock poisoned");
-            inner.board.add_footprint(footprint.clone());
+            inner.board.add_footprint(footprint);
         }
-        self.queue(Mutation::AddFootprint(footprint));
+        self.bus.publish(Event::FootprintAdded { id, reference });
         id
     }
 
@@ -367,7 +125,7 @@ impl Project {
             inner.board.move_footprint(id, position)
         };
         if moved {
-            self.queue(Mutation::MoveFootprint { id, position });
+            self.bus.publish(Event::FootprintMoved { id, position });
         }
         moved
     }
@@ -378,7 +136,7 @@ impl Project {
             inner.board.remove_footprint(id).is_some()
         };
         if removed {
-            self.queue(Mutation::RemoveFootprint(id));
+            self.bus.publish(Event::FootprintRemoved { id });
         }
         removed
     }
@@ -388,77 +146,77 @@ impl Project {
             let mut inner = self.inner.write().expect("project lock poisoned");
             inner.board.outline = Some(outline);
         }
-        self.queue(Mutation::SetOutline(Some(outline)));
+        self.bus.publish(Event::OutlineChanged);
     }
 
     pub fn add_trace(&self, trace: Trace) -> Id {
         let id = trace.id;
-        {
+        let (trace_count, via_count) = {
             let mut inner = self.inner.write().expect("project lock poisoned");
-            inner.board.add_trace(trace.clone());
-        }
-        self.queue(Mutation::AddTrace(trace));
+            inner.board.add_trace(trace);
+            (inner.board.traces.len(), inner.board.vias.len())
+        };
+        self.bus.publish(Event::RoutingChanged { trace_count, via_count });
         id
     }
 
     pub fn add_via(&self, via: Via) -> Id {
         let id = via.id;
-        {
+        let (trace_count, via_count) = {
             let mut inner = self.inner.write().expect("project lock poisoned");
-            inner.board.add_via(via.clone());
-        }
-        self.queue(Mutation::AddVia(via));
+            inner.board.add_via(via);
+            (inner.board.traces.len(), inner.board.vias.len())
+        };
+        self.bus.publish(Event::RoutingChanged { trace_count, via_count });
         id
     }
 
     /// Add a copper pour. Replaces any existing pour for the same
     /// `(net, layer)` so a second call is idempotent.
     pub fn add_pour(&self, pour: Pour) {
-        {
+        let count = {
             let mut inner = self.inner.write().expect("project lock poisoned");
-            inner.board.add_pour(pour.clone());
-        }
-        self.queue(Mutation::AddPour(pour));
+            inner.board.add_pour(pour);
+            inner.board.pours.len()
+        };
+        self.bus.publish(Event::PoursChanged { count });
     }
 
     /// Append a silk line to the board.
     pub fn add_silk_line(&self, line: SilkLine) {
-        {
+        let (line_count, text_count) = {
             let mut inner = self.inner.write().expect("project lock poisoned");
-            inner.board.add_silk_line(line.clone());
-        }
-        self.queue(Mutation::AddSilkLine(line));
+            inner.board.add_silk_line(line);
+            (inner.board.silk_lines.len(), inner.board.silk_texts.len())
+        };
+        self.bus.publish(Event::SilkChanged { line_count, text_count });
     }
 
     /// Append a silk text item to the board.
     pub fn add_silk_text(&self, text: SilkText) {
-        {
+        let (line_count, text_count) = {
             let mut inner = self.inner.write().expect("project lock poisoned");
-            inner.board.add_silk_text(text.clone());
-        }
-        self.queue(Mutation::AddSilkText(text));
+            inner.board.add_silk_text(text);
+            (inner.board.silk_lines.len(), inner.board.silk_texts.len())
+        };
+        self.bus.publish(Event::SilkChanged { line_count, text_count });
     }
 
     /// Remove a pour by `(net, layer)`. Returns true if one was removed.
     pub fn remove_pour(&self, net: &str, layer: CopperLayer) -> bool {
-        let removed = {
+        let (removed, count) = {
             let mut inner = self.inner.write().expect("project lock poisoned");
-            inner.board.remove_pour(net, layer)
+            let removed = inner.board.remove_pour(net, layer);
+            (removed, inner.board.pours.len())
         };
         if removed {
-            self.queue(Mutation::RemovePour {
-                net: net.to_string(),
-                layer,
-            });
+            self.bus.publish(Event::PoursChanged { count });
         }
         removed
     }
 
     /// Drop everything: schematic, palette, footprints, traces, vias.
     /// Useful between demo runs so state doesn't accumulate across calls.
-    /// Reset is INSTANT in both states (also drains the pending queue) —
-    /// otherwise the user's "wipe and start over" would be followed by a
-    /// long animation of every previous component being un-added.
     pub fn reset(&self) {
         {
             let mut inner = self.inner.write().expect("project lock poisoned");
@@ -466,13 +224,6 @@ impl Project {
             inner.schematic = Schematic::new();
             inner.palette.clear();
         }
-        {
-            let mut visible = self.visible.write().expect("visible lock poisoned");
-            visible.board = Board::new();
-            visible.schematic = Schematic::new();
-            visible.palette.clear();
-        }
-        self.pending.lock().expect("pending lock poisoned").clear();
         self.bus.publish(Event::ProjectChanged);
     }
 
@@ -495,33 +246,36 @@ impl Project {
             inner.board.outline = outline;
             inner.palette.extend(salvaged);
         }
-        self.queue(Mutation::ResetBoard);
+        self.bus.publish(Event::ProjectChanged);
     }
 
     /// Append a footprint to the palette. References must be unique
     /// across palette + board.
     pub fn palette_add(&self, footprint: Footprint) -> Result<(), String> {
-        let mut inner = self.inner.write().expect("project lock poisoned");
-        let already = inner
-            .board
-            .footprints
-            .values()
-            .any(|f| f.reference == footprint.reference)
-            || inner.palette.iter().any(|f| f.reference == footprint.reference);
-        if already {
-            return Err(format!("reference {} already in palette or board", footprint.reference));
-        }
-        inner.palette.push(footprint.clone());
-        drop(inner);
-        self.queue(Mutation::PaletteAdd(footprint));
+        let count = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            let already = inner
+                .board
+                .footprints
+                .values()
+                .any(|f| f.reference == footprint.reference)
+                || inner.palette.iter().any(|f| f.reference == footprint.reference);
+            if already {
+                return Err(format!("reference {} already in palette or board", footprint.reference));
+            }
+            inner.palette.push(footprint);
+            inner.palette.len()
+        };
+        self.bus.publish(Event::PaletteChanged { count });
         Ok(())
     }
 
     pub fn palette_clear(&self) {
-        let mut inner = self.inner.write().expect("project lock poisoned");
-        inner.palette.clear();
-        drop(inner);
-        self.queue(Mutation::PaletteClear);
+        {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.palette.clear();
+        }
+        self.bus.publish(Event::PaletteChanged { count: 0 });
     }
 
     /// Send any board footprint whose body bounding-box pokes outside
@@ -530,35 +284,40 @@ impl Project {
     /// gets reclaimed too.
     pub fn unplace_out_of_bounds(&self) -> Vec<String> {
         let mut moved_refs = Vec::new();
-        let mut moved_pairs: Vec<(Id, Footprint)> = Vec::new();
-        let mut inner = self.inner.write().expect("project lock poisoned");
-        let Some(outline) = inner.board.outline else {
-            return moved_refs;
-        };
-        let ids: Vec<Id> = inner
-            .board
-            .footprints
-            .iter()
-            .filter(|(_, fp)| {
-                let Some(bbox) = fp.bounds() else { return false; };
-                bbox.min.x.0 < outline.min.x.0
-                    || bbox.max.x.0 > outline.max.x.0
-                    || bbox.min.y.0 < outline.min.y.0
-                    || bbox.max.y.0 > outline.max.y.0
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ids {
-            if let Some(fp) = inner.board.remove_footprint(id) {
-                moved_refs.push(fp.reference.clone());
-                inner.palette.push(fp.clone());
-                moved_pairs.push((id, fp));
+        let mut moved_ids: Vec<Id> = Vec::new();
+        let palette_count;
+        {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            let Some(outline) = inner.board.outline else {
+                return moved_refs;
+            };
+            let ids: Vec<Id> = inner
+                .board
+                .footprints
+                .iter()
+                .filter(|(_, fp)| {
+                    let Some(bbox) = fp.bounds() else { return false; };
+                    bbox.min.x.0 < outline.min.x.0
+                        || bbox.max.x.0 > outline.max.x.0
+                        || bbox.min.y.0 < outline.min.y.0
+                        || bbox.max.y.0 > outline.max.y.0
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            for id in ids {
+                if let Some(fp) = inner.board.remove_footprint(id) {
+                    moved_refs.push(fp.reference.clone());
+                    inner.palette.push(fp);
+                    moved_ids.push(id);
+                }
             }
+            palette_count = inner.palette.len();
         }
-        drop(inner);
-        for (id, fp) in moved_pairs {
-            self.queue(Mutation::RemoveFootprint(id));
-            self.queue(Mutation::PaletteAdd(fp));
+        for id in moved_ids {
+            self.bus.publish(Event::FootprintRemoved { id });
+        }
+        if !moved_refs.is_empty() {
+            self.bus.publish(Event::PaletteChanged { count: palette_count });
         }
         moved_refs
     }
@@ -589,17 +348,15 @@ impl Project {
                 "{reference} is edge-mounted but {reason} — pick a position whose bbox touches the board outline",
             ));
         }
-        // Commit: remove from palette + add to board on the live state.
-        // Queue the two mutations in the same order so the visible
-        // mirror sees palette-take then board-add.
         let mut fp = inner.palette.remove(idx);
         fp.position = position;
         let id = fp.id;
-        let added = fp.clone();
+        let reference_string = fp.reference.clone();
         let _ = inner.board.add_footprint(fp);
+        let palette_count = inner.palette.len();
         drop(inner);
-        self.queue(Mutation::PaletteTake { reference: reference.to_string() });
-        self.queue(Mutation::AddFootprint(added));
+        self.bus.publish(Event::PaletteChanged { count: palette_count });
+        self.bus.publish(Event::FootprintAdded { id, reference: reference_string });
         Ok(id)
     }
 
@@ -627,11 +384,14 @@ impl Project {
                 "{reference} is edge-mounted but after rotation {reason}",
             ));
         }
-        if let Some(fp) = inner.board.footprints.get_mut(&id) {
+        let position = if let Some(fp) = inner.board.footprints.get_mut(&id) {
             fp.rotation = rotation_deg;
-        }
+            fp.position
+        } else {
+            return Err(format!("no board footprint named {reference}"));
+        };
         drop(inner);
-        self.queue(Mutation::RotateFootprint { id, rotation: rotation_deg });
+        self.bus.publish(Event::FootprintMoved { id, position });
         Ok(id)
     }
 
@@ -666,49 +426,59 @@ impl Project {
             return Err(format!("move_footprint failed for {reference}"));
         }
         drop(inner);
-        self.queue(Mutation::MoveFootprint { id, position });
+        self.bus.publish(Event::FootprintMoved { id, position });
         Ok(id)
     }
 
     /// Drop every trace and via belonging to one net. Returns the
     /// number of items removed.
     pub fn clear_net_routing(&self, net: &str) -> usize {
-        let removed = {
+        let (removed, trace_count, via_count) = {
             let mut inner = self.inner.write().expect("project lock poisoned");
             let before = inner.board.traces.len() + inner.board.vias.len();
             inner.board.traces.retain(|t| t.net != net);
             inner.board.vias.retain(|v| v.net != net);
-            before - (inner.board.traces.len() + inner.board.vias.len())
+            let trace_count = inner.board.traces.len();
+            let via_count = inner.board.vias.len();
+            (before - (trace_count + via_count), trace_count, via_count)
         };
         if removed > 0 {
-            self.queue(Mutation::ClearNetRouting { net: net.to_string() });
+            self.bus.publish(Event::RoutingChanged { trace_count, via_count });
         }
         removed
     }
 
     /// Remove a single trace by id. Returns whether anything was removed.
     pub fn delete_trace(&self, id: Id) -> bool {
-        let removed = {
+        let (removed, trace_count, via_count) = {
             let mut inner = self.inner.write().expect("project lock poisoned");
             let before = inner.board.traces.len();
             inner.board.traces.retain(|t| t.id != id);
-            inner.board.traces.len() != before
+            (
+                inner.board.traces.len() != before,
+                inner.board.traces.len(),
+                inner.board.vias.len(),
+            )
         };
         if removed {
-            self.queue(Mutation::RemoveTrace(id));
+            self.bus.publish(Event::RoutingChanged { trace_count, via_count });
         }
         removed
     }
 
     pub fn delete_via(&self, id: Id) -> bool {
-        let removed = {
+        let (removed, trace_count, via_count) = {
             let mut inner = self.inner.write().expect("project lock poisoned");
             let before = inner.board.vias.len();
             inner.board.vias.retain(|v| v.id != id);
-            inner.board.vias.len() != before
+            (
+                inner.board.vias.len() != before,
+                inner.board.traces.len(),
+                inner.board.vias.len(),
+            )
         };
         if removed {
-            self.queue(Mutation::RemoveVia(id));
+            self.bus.publish(Event::RoutingChanged { trace_count, via_count });
         }
         removed
     }
@@ -720,16 +490,17 @@ impl Project {
             let mut inner = self.inner.write().expect("project lock poisoned");
             inner.board.clear_routing();
         }
-        self.queue(Mutation::ClearRouting);
+        self.bus.publish(Event::RoutingChanged { trace_count: 0, via_count: 0 });
     }
 
     pub fn add_symbol(&self, symbol: Symbol) -> Id {
         let id = symbol.id;
+        let reference = symbol.reference.clone();
         {
             let mut inner = self.inner.write().expect("project lock poisoned");
-            inner.schematic.add_symbol(symbol.clone());
+            inner.schematic.add_symbol(symbol);
         }
-        self.queue(Mutation::AddSymbol(symbol));
+        self.bus.publish(Event::SymbolAdded { id, reference });
         id
     }
 
@@ -764,8 +535,10 @@ impl Project {
         // None`, even though the schematic was correct — the router
         // and the DRC then both saw those pads as unrouted.
         Self::propagate_net_to_pads(&mut inner, &net);
+        let name = net.name.clone();
+        let connection_count = net.connections.len();
         drop(inner);
-        self.queue(Mutation::SetNet(net));
+        self.bus.publish(Event::NetChanged { name, connection_count });
         Ok(())
     }
 
@@ -836,16 +609,13 @@ impl Project {
             Err(_) => crate::library::Library::open_at(std::env::temp_dir().join("pcb-library"))
                 .ok()?,
         };
-        let make_inner = || ProjectInner {
-            name: file.name.clone(),
-            board: file.board.clone(),
-            schematic: file.schematic.clone(),
-            palette: file.palette.clone(),
-        };
         let proj = Self {
-            inner: Arc::new(RwLock::new(make_inner())),
-            visible: Arc::new(RwLock::new(make_inner())),
-            pending: Arc::new(Mutex::new(VecDeque::new())),
+            inner: Arc::new(RwLock::new(ProjectInner {
+                name: file.name,
+                board: file.board,
+                schematic: file.schematic,
+                palette: file.palette,
+            })),
             bus: EventBus::new(),
             library: Arc::new(library),
             save_path: Arc::new(RwLock::new(Some(path.to_path_buf()))),
@@ -872,7 +642,14 @@ impl Project {
                     .map_err(|e| format!("project: mkdir {}: {e}", parent.display()))?;
             }
         }
-        let tmp = path.with_extension("json.tmp");
+        // Append `.tmp` to the full filename so the temp file lives next to
+        // the target regardless of the user-chosen extension (`.fragua`,
+        // `.json`, …) and never collides with another sibling.
+        let tmp: PathBuf = {
+            let mut s = path.as_os_str().to_owned();
+            s.push(".tmp");
+            PathBuf::from(s)
+        };
         let bytes = serde_json::to_vec_pretty(&file)
             .map_err(|e| format!("project: serialise: {e}"))?;
         fs::write(&tmp, &bytes)

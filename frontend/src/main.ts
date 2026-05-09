@@ -610,20 +610,15 @@ async function refreshLibrary() {
   }
 }
 
-// Animation pacing now lives on the BACKEND — it advances the visible
-// state mirror one mutation per `ANIMATION_TICK_MS` and emits the
-// matching event each time. The frontend just paints whatever arrives;
-// no queueing here. Activity / Library / Project events come straight
-// through the bus (not through the mirror) since they don't change the
-// canvas, so they show up instantly which is fine.
+// Every backend mutation publishes an event immediately and we just
+// repaint from `project_state`. No queueing, no animation — what the
+// agent did appears the instant it lands.
 async function playEvent(data: AnyEvent) {
   if (data.kind === "Activity") {
     appendActivity(data.level, data.message);
     return;
   }
   if (data.kind === "LibraryChanged") {
-    // Library updates are independent of the board canvas; refresh
-    // only the side panel so the view doesn't jump to "board".
     await refreshLibrary();
     return;
   }
@@ -639,53 +634,6 @@ async function playEvent(data: AnyEvent) {
   if (isBoardEvent && view !== "board") setView("board");
   else if (isSchematicEvent && view !== "schematic") setView("schematic");
   await refresh();
-  // Spawn flash on the footprint that just appeared. The DOM is fresh
-  // after refresh() — find the matching <g data-board-ref> and tag it.
-  if (data.kind === "FootprintAdded" && data.reference) {
-    flashSpawn(`[data-board-ref="${cssEscape(data.reference)}"]`);
-  }
-  // Animate brand-new traces and vias: the render emits stable
-  // `data-trace-id` / `data-via-id` attributes; anything we haven't
-  // seen yet gets the spawn class so the trace draws in like a brush
-  // stroke and the via fades/scales in.
-  if (data.kind === "RoutingChanged") animateNewCopper();
-  if (data.kind === "ProjectChanged") {
-    seenTraceIds.clear();
-    seenViaIds.clear();
-  }
-}
-
-const seenTraceIds = new Set<string>();
-const seenViaIds = new Set<string>();
-
-function animateNewCopper() {
-  document.querySelectorAll<SVGLineElement>("line[data-trace-id]").forEach((el) => {
-    const id = el.getAttribute("data-trace-id");
-    if (!id || seenTraceIds.has(id)) return;
-    seenTraceIds.add(id);
-    el.classList.add("trace-spawn");
-  });
-  document.querySelectorAll<SVGGElement>("g[data-via-id]").forEach((el) => {
-    const id = el.getAttribute("data-via-id");
-    if (!id || seenViaIds.has(id)) return;
-    seenViaIds.add(id);
-    el.classList.add("via-spawn");
-  });
-}
-
-function flashSpawn(selector: string) {
-  const node = document.querySelector(selector);
-  if (!node) return;
-  node.classList.remove("spawn"); // restart if already running
-  // Force reflow so the next add triggers the keyframes again.
-  void (node as HTMLElement).getBoundingClientRect();
-  node.classList.add("spawn");
-}
-
-function cssEscape(s: string): string {
-  // Just enough escaping for the references we generate (alphanum + a
-  // few symbols); good enough so we don't pull in CSS.escape polyfills.
-  return s.replace(/(["\\])/g, "\\$1");
 }
 
 async function start() {
