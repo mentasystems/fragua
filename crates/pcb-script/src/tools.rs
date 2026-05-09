@@ -47,23 +47,29 @@ trailing key=value pairs override defaults; `#` starts a comment.\n\
 \n\
 === EXAMPLE ===\
 reset\n\
-outline 90 30\n\
+outline 90 30 radius=2                    # rounded corners\n\
+\n\
+class ground pour=both                    # GND on top + bottom plane\n\
+class power width=0.4                     # +3V3 with wider traces\n\
 \n\
 sym U1 ic key=esp32_s3_zero desc=\"ESP32 main MCU; USB-C edge\"\n\
-  pin 1 L V5\n\
-  pin 2 L GND\n\
-  pin 3 L 3V3\n\
-sym C1 capacitor key=c_0603 value=100nF desc=\"HF decoupling near U2.VCC\"\n\
+  pin 1 L V5     role=power_in\n\
+  pin 2 L GND    role=power_in\n\
+  pin 3 L 3V3    role=power_in\n\
+  pin 4 L TX     role=output\n\
+sym C1 capacitor key=c_0603 value=100nF desc=\"HF decoupling near U1.3V3\"\n\
 \n\
-net GND U1.GND U2.GND_1 C1.2\n\
-net +3V3 U1.3V3 U2.VCC C1.1\n\
+net GND  U1.GND U2.GND_1 C1.2 class=ground\n\
+net +3V3 U1.3V3 U2.VCC   C1.1 class=power\n\
+\n\
+erc                                       # catch netlist bugs early\n\
 \n\
 palette U1 esp32_s3_zero rot=90\n\
 palette C1 c_0603 value=100nF\n\
 place U1 11.5 15 90\n\
 place C1 48 14\n\
-route\n\
-drc\n\
+auto-place C1 seed=42                     # SA on the parts you don't pin\n\
+route                                     # auto-pour materialises ground first\n\
 === END EXAMPLE ===\n\
 \n\
 === ACTIONS (verb args) ===\n\
@@ -119,7 +125,13 @@ LIBRARY (build first, reuse forever):\n\
 \n\
 SCHEMATIC:\n\
   sym REF KIND [key=K] [value=V] [rot=N] [x=N] [y=N] [desc=\"...\"]\n\
-    pin NUMBER SIDE [NAME]                     — only for KIND=ic; SIDE = L|R|T|B (or full names)\n\
+    pin NUMBER SIDE [NAME] [role=ROLE]         — only for KIND=ic; SIDE = L|R|T|B (or full names).\n\
+                                                 ROLE = passive (default) | input (in) | output (out)\n\
+                                                 | bidir (io) | power_out (power, pwr) | power_in (pwr_in).\n\
+                                                 ERC uses roles to catch shorts the geometry can't: 2+\n\
+                                                 outputs on one net = error, PowerIn pins on a net with no\n\
+                                                 PowerOut source = warning, Input pin with no driver = warning.\n\
+                                                 Discretes (R, C, L, LED, D) are always passive, no need to set.\n\
                                                  KIND aliases: ic, r, c, l, led, d\n\
   net NAME PIN1 PIN2 ... [class=NAME]          — PIN = REF.PIN_NUMBER or REF.PIN_NAME (case-insensitive).\n\
                                                  `class` attaches a net class (see below) so the\n\
@@ -213,24 +225,52 @@ VALIDATION / EXPORT:\n\
 - Footprints need ≥0.5 mm body-to-body gap (enforced); edge-mounted parts must touch the outline.\n\
 \n\
 === DESIGN STRATEGY (how to fix things) ===\n\
-The router is A* per-net with no copper fill. When `route` reports `not all\n\
-nets routed` or `drc` reports `unconnected_pad` warnings on a star net (GND,\n\
-+3V3), the placement is trapping the hub: existing signal traces saturate the\n\
-corridor the hub needs. Resolve it BY MOVING COMPONENTS, not by hand-routing\n\
-through the conflict.\n\
+The pipeline runs ERC → placement → routing → DRC. Each layer catches\n\
+a different bug class; running them in order saves cycles vs jumping\n\
+straight to `route` and debugging the failures.\n\
 \n\
-Workflow when warnings appear:\n\
-  1. `nets`                    — see which pads are stranded.\n\
-  2. Move 1-2 components       — `move REF X Y` (or `rotate REF DEG`) to open\n\
-                                 a clear horizontal/vertical corridor along an\n\
-                                 unused band of the board (typically y near\n\
-                                 the outline edge or between component rows).\n\
-  3. `clear-route` then `route` — re-route everything from the new placement.\n\
-  4. `drc`                     — verify; loop if needed.\n\
+1. `erc` — schematic-side validation (after `sym`/`net`, before `place`).\n\
+   Catches floating pin/net, duplicate pin, empty net, orphan symbol,\n\
+   and (with `pin ... role=...` set) multiple drivers, unpowered\n\
+   power nets, undriven inputs. Fix Errors before continuing.\n\
 \n\
-Hand-routing (`trace`, `via`) only works for short bridges in known-empty\n\
-zones; on a populated board you will almost always hit `trace_trace_clearance`\n\
-errors. Re-place first, route second.
+2. Power planes — declare BEFORE routing, not after:\n\
+     class ground pour=both\n\
+     net GND ... class=ground\n\
+   `pour=both` lays a GND plane on top + bottom; the router skips\n\
+   the net entirely (every GND pad connects through the pour) and\n\
+   ERC won't fire UnpoweredPowerNet because the pour counts as a\n\
+   source. Drops ~15-25 % of total wire on a typical design.\n\
+   `class power width=0.4 clearance=0.3` for +3V3/+5V if you want\n\
+   wider rails — the router and DRC honour it per net.\n\
+\n\
+3. `auto-place REF1 REF2 ...` — when you have a rough placement and\n\
+   want SA to optimise. Score = HPWL + gap penalty + congestion\n\
+   proxy. The default `min_gap=2` keeps parts far enough apart that\n\
+   the router has corridors. Reproducible with `seed=N`.\n\
+\n\
+4. `route` runs the auto-router (RR&R + negotiated congestion +\n\
+   Steiner-style multi-source A*), then runs DRC inline. Its output\n\
+   includes per-net detour ratio (actual / HPWL) and `route.hint`\n\
+   warnings naming the outlier component on every detoured/failed\n\
+   net — that's the part to move next.\n\
+\n\
+When `route` still reports failures or hint warnings:\n\
+  a. Read the hints — each one names the outlier component and its\n\
+     coords. Move that part toward the rest of its net.\n\
+  b. `auto-place <outlier_ref>` if you can't decide where; SA will\n\
+     pull it in.\n\
+  c. `clear-route` + `route` again. Loop until 0 hints.\n\
+\n\
+Hand-routing (`trace`, `via`) only works for short bridges in\n\
+known-empty zones; on a populated board you will almost always hit\n\
+`trace_trace_clearance` errors. Re-place first, route second.\n\
+\n\
+Rounded boards: declare `outline W H radius=R` BEFORE placing\n\
+components. The router's region inset accounts for the corner\n\
+curve; placing parts on sharp corners and then adding `radius`\n\
+later will leave them outside the routable region (DRC catches it,\n\
+but it's wasted work).
 ";
 
 #[must_use]
