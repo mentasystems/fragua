@@ -10,8 +10,8 @@ pub use schematic::render_schematic_svg;
 use std::fmt::Write;
 
 use pcb_core::{
-    hershey, silk_clip, Board, CopperLayer, Footprint, FootprintSilk, Pad, Point, Rect, SilkAnchor,
-    SilkLayer, SilkText, Trace, Via,
+    hershey, silk_clip, Board, CopperLayer, Footprint, FootprintSilk, Length, Pad, Point, Rect,
+    SilkAnchor, SilkLayer, SilkText, Trace, Via,
 };
 
 /// Margin (in board nm) added around the content bounding box when no
@@ -147,7 +147,7 @@ fn write_silk_layer(svg: &mut String, board: &Board, side: SilkLayer) {
         write_silk_text(svg, txt, /*owner_pads=*/ &[]);
     }
     for fp in board.footprints_in_order() {
-        write_footprint_silk(svg, fp, side);
+        write_footprint_silk(svg, fp, side, board.outline);
     }
     svg.push_str("</g>");
 }
@@ -156,7 +156,9 @@ fn write_silk_layer(svg: &mut String, board: &Board, side: SilkLayer) {
 /// every stroke that targets `side`. Silk segments whose midpoint
 /// falls inside any same-footprint pad bbox are skipped — fab houses
 /// mask silk over solder pads, and the rendering should reflect that.
-fn write_footprint_silk(svg: &mut String, fp: &Footprint, side: SilkLayer) {
+/// `outline` (when set) is used to relocate silk text whose nominal
+/// position would land outside the board, so labels stay on copper.
+fn write_footprint_silk(svg: &mut String, fp: &Footprint, side: SilkLayer, outline: Option<Rect>) {
     // World-space pad rects for the pad-overlap suppression check.
     let pad_rects: Vec<Rect> = fp
         .pads
@@ -196,9 +198,20 @@ fn write_footprint_silk(svg: &mut String, fp: &Footprint, side: SilkLayer) {
             );
             let world = fp.local_to_world(local_anchor);
             let size = pcb_core::Length::from_mm(0.9);
+            // Body in world coords for the relocate fallback.
+            let world_body = world_body_rect(fp);
+            let safe = safe_silk_text_pos(
+                world,
+                primary,
+                size,
+                fp.rotation,
+                SilkAnchor::Middle,
+                world_body,
+                outline,
+            );
             let text = SilkText {
                 layer: default_side,
-                position: world,
+                position: safe,
                 text: primary.to_string(),
                 size,
                 rotation: fp.rotation,
@@ -241,12 +254,26 @@ fn write_footprint_silk(svg: &mut String, fp: &Footprint, side: SilkLayer) {
                 }
                 let world = fp.local_to_world(position);
                 let resolved = fp.resolve_silk_text(text);
+                let total_rotation = rotation + fp.rotation;
+                // Library-authored silk text can spill off the board
+                // when a footprint sits near the edge — relocate to a
+                // body-relative fallback if so.
+                let world_body = world_body_rect(fp);
+                let safe = safe_silk_text_pos(
+                    world,
+                    &resolved,
+                    size,
+                    total_rotation,
+                    anchor,
+                    world_body,
+                    outline,
+                );
                 let st = SilkText {
                     layer,
-                    position: world,
+                    position: safe,
                     text: resolved,
                     size,
-                    rotation: rotation + fp.rotation,
+                    rotation: total_rotation,
                     anchor,
                     width,
                 };
@@ -266,6 +293,107 @@ fn write_silk_segment(svg: &mut String, a: Point, b: Point, width_mm: f64) {
         y2 = b.y.to_mm(),
         w = width_mm,
     );
+}
+
+/// Approximate AABB the rendered silk text would occupy in world
+/// coords. Used to detect labels that would spill off the board and
+/// to find a safer anchor for them. The Hershey font is fixed-pitch:
+/// every character takes `ADVANCE_UNITS / CAP_HEIGHT_UNITS` ≈ 0.75
+/// of `size_mm` in horizontal advance.
+fn silk_text_bbox(
+    text: &str,
+    pos: Point,
+    size: Length,
+    rotation_deg: f32,
+    anchor: SilkAnchor,
+) -> Option<Rect> {
+    if text.is_empty() {
+        return None;
+    }
+    let chars = text.chars().count() as f64;
+    let w_mm = chars * 0.75 * size.to_mm();
+    let h_mm = size.to_mm();
+    let (x0, x1) = match anchor {
+        SilkAnchor::Start => (0.0, w_mm),
+        SilkAnchor::Middle => (-w_mm / 2.0, w_mm / 2.0),
+        SilkAnchor::End => (-w_mm, 0.0),
+    };
+    // Baseline at y=0; cap top at y=h_mm.
+    let local = [(x0, 0.0), (x1, 0.0), (x1, h_mm), (x0, h_mm)];
+    let theta = f64::from(rotation_deg).to_radians();
+    let cos = theta.cos();
+    let sin = theta.sin();
+    let px = pos.x.to_mm();
+    let py = pos.y.to_mm();
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for (lx, ly) in local {
+        let wx = px + lx * cos - ly * sin;
+        let wy = py + lx * sin + ly * cos;
+        min_x = min_x.min(wx);
+        min_y = min_y.min(wy);
+        max_x = max_x.max(wx);
+        max_y = max_y.max(wy);
+    }
+    Some(Rect::from_corners(
+        Point::new(pcb_core::Length::from_mm(min_x), pcb_core::Length::from_mm(min_y)),
+        Point::new(pcb_core::Length::from_mm(max_x), pcb_core::Length::from_mm(max_y)),
+    ))
+}
+
+/// True if `inner` sits fully inside `outer` (touching counts).
+fn rect_inside(inner: Rect, outer: Rect) -> bool {
+    inner.min.x.0 >= outer.min.x.0
+        && inner.min.y.0 >= outer.min.y.0
+        && inner.max.x.0 <= outer.max.x.0
+        && inner.max.y.0 <= outer.max.y.0
+}
+
+/// Pick the best position for a silk label so its bbox stays inside
+/// the board outline. Tries the requested `pos` first; if that bbox
+/// would clip the outline, walks a small set of alternatives (above
+/// the body, below it) and returns the first one that fits. Falls
+/// back to the original `pos` when nothing fits — the renderer
+/// always emits the text, even if part of it ends up off-board.
+fn safe_silk_text_pos(
+    pos: Point,
+    text: &str,
+    size: Length,
+    rotation_deg: f32,
+    anchor: SilkAnchor,
+    body: Option<Rect>,
+    outline: Option<Rect>,
+) -> Point {
+    let Some(outline) = outline else { return pos };
+    let Some(body) = body else { return pos };
+    let pad = pcb_core::Length::from_mm(0.6);
+    if let Some(bb) = silk_text_bbox(text, pos, size, rotation_deg, anchor) {
+        if rect_inside(bb, outline) {
+            return pos;
+        }
+    }
+    // Candidate anchor points (in world coords) ordered by visual
+    // preference: above body, below body, then horizontally-offset
+    // alternatives. The first whose rendered bbox fits wins.
+    let bx_mid = pcb_core::Length((body.min.x.0 + body.max.x.0) / 2);
+    let by_mid = pcb_core::Length((body.min.y.0 + body.max.y.0) / 2);
+    let candidates = [
+        Point::new(bx_mid, body.max.y + pad),
+        Point::new(bx_mid, body.min.y - pad - size),
+        Point::new(body.max.x + pad, by_mid),
+        Point::new(body.min.x - pad, by_mid),
+    ];
+    for cand in candidates {
+        let Some(bb) = silk_text_bbox(text, cand, size, rotation_deg, anchor) else {
+            continue;
+        };
+        if rect_inside(bb, outline) {
+            return cand;
+        }
+    }
+    pos
 }
 
 fn write_silk_text(svg: &mut String, txt: &SilkText, suppress_in: &[Rect]) {
@@ -448,34 +576,15 @@ fn write_footprint(svg: &mut String, fp: &Footprint, pours: &[pcb_core::Pour]) {
     // SVG `<text>` because it is metadata (run-time only) and the
     // Hershey vectorisation hurts readability at the small font size
     // we use for it.
-    let body = body_rect(fp);
     let _ = write!(
         svg,
         r##"<g transform="scale(1,-1)" pointer-events="none">"##,
     );
-    // Below the body: reference + value (e.g. "BK1 · 9V→5V"). Lets
-    // multiple instances of the same library part be told apart.
-    let mut sub = String::new();
-    if !fp.reference.is_empty() && !fp.key.is_empty() {
-        sub.push_str(&fp.reference);
-    }
-    if !fp.value.is_empty() {
-        if !sub.is_empty() {
-            sub.push_str(" · ");
-        }
-        sub.push_str(&fp.value);
-    }
-    if !sub.is_empty() {
-        let val_y = body
-            .map(|r| r.max.y.to_mm() + 1.2)
-            .unwrap_or(1.2);
-        let _ = write!(
-            svg,
-            r##"<text x="0" y="{y:.3}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="0.7" fill="#8b949e">{v}</text>"##,
-            y = -val_y,
-            v = escape(&sub),
-        );
-    }
+    // The "REF · VALUE" caption used to live here as a plain SVG
+    // <text> below the body. It overlapped the silk-text labels
+    // emitted by the silkscreen pipeline (`{REF}`/`{KEY}` templates)
+    // and showed redundant information; the silk pipeline now owns
+    // the visible identifier on the board.
     // Pad labels — prefer the human pin NAME (e.g. "VBAT", "MOSI",
     // "GND") and fall back to the bare pad number when no name is
     // set. Skipped on tiny pads so the text does not bleed outside
@@ -515,6 +624,19 @@ fn body_rect(fp: &Footprint) -> Option<Rect> {
             pad.size.0,
             pad.size.1,
         )
+    });
+    let first = iter.next()?;
+    Some(iter.fold(first, Rect::union).expand(pcb_core::Length::from_mm(0.4)))
+}
+
+/// World-coord bounding box of the footprint body (pad bbox + 0.4 mm
+/// margin), suitable for relocating silk labels relative to the
+/// placed part. Returns `None` when the footprint has no pads.
+fn world_body_rect(fp: &Footprint) -> Option<Rect> {
+    let mut iter = fp.pads.iter().map(|pad| {
+        let c = fp.pad_world_center(pad);
+        let (w, h) = fp.pad_world_size(pad);
+        Rect::from_center(c, w, h)
     });
     let first = iter.next()?;
     Some(iter.fold(first, Rect::union).expand(pcb_core::Length::from_mm(0.4)))
