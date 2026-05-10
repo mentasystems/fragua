@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name (e.g. v0.1.0). Created if missing."
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+            bin: fragua
+          - label: macos-x64
+            os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+            bin: fragua
+          - label: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+            bin: fragua
+          - label: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+            bin: fragua.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Linux deps for Tauri
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Build frontend
+        run: |
+          npm --prefix frontend ci || npm --prefix frontend install
+          npm --prefix frontend run build
+
+      - name: Build fragua
+        run: cargo build --release --bin fragua --target ${{ matrix.target }}
+
+      - name: Stage artifacts (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          stage="fragua-${tag}-${{ matrix.label }}"
+          mkdir "$stage"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$stage/"
+          cp README.md LICENSE "$stage/"
+          tar -czf "${stage}.tar.gz" "$stage"
+          shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256"
+          ls -la "${stage}.tar.gz"*
+
+      - name: Stage artifacts (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "${{ github.event.inputs.tag }}" }
+          $stage = "fragua-$tag-${{ matrix.label }}"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}" $stage
+          Copy-Item README.md, LICENSE $stage
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+          (Get-FileHash -Algorithm SHA256 "$stage.zip").Hash.ToLower() + "  $stage.zip" |
+            Out-File -Encoding ascii "$stage.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fragua-${{ matrix.label }}
+          path: |
+            fragua-*-${{ matrix.label }}.tar.gz
+            fragua-*-${{ matrix.label }}.tar.gz.sha256
+            fragua-*-${{ matrix.label }}.zip
+            fragua-*-${{ matrix.label }}.zip.sha256
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/fragua-*.tar.gz
+            dist/fragua-*.tar.gz.sha256
+            dist/fragua-*.zip
+            dist/fragua-*.zip.sha256

@@ -47,6 +47,22 @@ End-to-end agent loop, schematic → board → fab-ready zip:
 
 `cargo test --workspace` is green.
 
+## Install
+
+One-liner (macOS arm64/x64, Linux x64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kidandcat/fragua/master/scripts/install.sh | sh
+```
+
+Drops the `fragua` binary in `/usr/local/bin` (or `~/.local/bin` if it
+can't write there). Windows users: grab `fragua-<ver>-windows-x64.zip`
+from the [releases page](https://github.com/kidandcat/fragua/releases/latest).
+
+Then just tell your AI to design the hardware using the `fragua` CLI —
+it launches the window, exposes the HTTP script API on
+`127.0.0.1:7878`, and the agent drives the rest.
+
 ## Run it
 
 ```sh
