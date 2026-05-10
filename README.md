@@ -1,9 +1,15 @@
-# pcb (fragua)
+# fragua
+
+[![CI](https://github.com/kidandcat/fragua/actions/workflows/ci.yml/badge.svg)](https://github.com/kidandcat/fragua/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-d6905b.svg)](LICENSE)
+[![Landing](https://img.shields.io/badge/landing-kidandcat.github.io%2Ffragua-d6905b)](https://kidandcat.github.io/fragua/)
 
 AI-native PCB design tool. The agent does the work, the human watches and steers.
 
-- See [VISION.md](VISION.md) for what we are building and why.
-- See [ARCHITECTURE.md](ARCHITECTURE.md) for the stack and crate layout.
+- 🌐 Landing: <https://kidandcat.github.io/fragua/>
+- 🧭 [VISION.md](VISION.md) — what we are building and why
+- 🏗️ [ARCHITECTURE.md](ARCHITECTURE.md) — the stack and crate layout
+- 🤝 [CONTRIBUTING.md](CONTRIBUTING.md) — how to help
 
 ## Status
 
