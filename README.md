@@ -1,26 +1,45 @@
-# pcb
+# pcb (fragua)
 
 AI-native PCB design tool. The agent does the work, the human watches and steers.
 
 - See [VISION.md](VISION.md) for what we are building and why.
-- See [ARCHITECTURE.md](ARCHITECTURE.md) for the stack, layout, and phases.
+- See [ARCHITECTURE.md](ARCHITECTURE.md) for the stack and crate layout.
 
 ## Status
 
-Phase 1 MVP — agent and human share a live `Project`:
+End-to-end agent loop, schematic → board → fab-ready zip:
 
-- `pcb-core`: project model (footprints, pads, layers), nm fixed-point
-  geometry, tokio broadcast event bus.
-- `pcb-render`: `Board` → SVG (Y-up coordinate system, dark theme).
-- `pcb-mcp`: JSON-RPC 2.0 server with `project.status`, `placement.add`,
-  `view.snapshot`. Both stdio and TCP transports, plus a stdio-to-TCP
-  bridge so Claude Code can connect to a running Tauri host.
-- `src-tauri` + `frontend`: Tauri 2 desktop shell. Owns the canonical
-  `Project`, runs the MCP TCP server on `127.0.0.1:7878`, re-emits
-  project events to the webview. Frontend renders the live SVG and an
-  activity log.
+- `pcb-core`: project model (schematic, board, library, pours), nm
+  fixed-point geometry, tokio broadcast event bus, JSON persistence
+  (`.fragua` files; legacy `.json` still loads).
+- `pcb-script`: line-oriented agent DSL — `lib`, `sym`, `net`, `class`,
+  `palette`, `place`, `auto-place`, `route`, `erc`, `drc`, `auto-pour`,
+  `pack`. The full reference is printed at app launch and served at
+  `GET /`.
+- `pcb-router`: A* on a 2-layer grid + rip-up-and-reroute + negotiated
+  congestion + Steiner-ish multi-source. Honours per-net `NetClass`
+  for trace width / clearance.
+- `pcb-placer`: simulated annealing on HPWL + soft gap penalty +
+  rasterised pad-bbox congestion proxy.
+- `pcb-drc`: pad/trace clearance, drill, edge clearance, narrow trace,
+  routing efficiency. Per-net class overrides supported.
+- `pcb-erc`: floating pin/net, duplicate pin, orphan symbol, phantom
+  net; role-based: multiple drivers, unpowered power net, undriven
+  input. Heuristic: missing decoupling cap, missing I²C pull-up.
+- `pcb-fab`: `Provider { Jlcpcb, Pcbway, Generic }` + manufacturing-DRC
+  (min trace, drill, annular ring, board size) + per-provider BOM and
+  CPL formats + `pack(...)` that ships a single ready-to-upload `.zip`.
+- `pcb-gerber`: RS-274X writer (rounded outlines emit arcs), Excellon
+  drill files, BOM + pick-and-place CSV.
+- `pcb-render`: Board → SVG. Substrate (with rounded corners), copper,
+  silkscreen (Hershey strokes; auto-relocation when a label would
+  spill off the outline), DRC marker overlay.
+- `src-tauri` + `frontend`: Tauri 2 shell. Hosts a stateless local HTTP
+  API on `127.0.0.1:7878` (`POST /script`, `POST /save`, `GET /` for
+  the script reference). Frontend pans/zooms an SVG of the live state
+  and surfaces the activity log.
 
-`cargo test` and the e2e MCP TCP smoke test pass.
+`cargo test --workspace` is green.
 
 ## Run it
 
@@ -29,26 +48,69 @@ Phase 1 MVP — agent and human share a live `Project`:
 npm --prefix frontend install
 npm --prefix frontend run build
 
-# Run the desktop app (release uses the built frontend).
-cargo run --release -p pcb-app --bin pcb-app
+# Run the desktop app.
+cargo run --release --bin fragua
+
+# …or open an existing project:
+cargo run --release --bin fragua /path/to/project.fragua
 ```
 
-The app opens a window and starts an MCP server on `127.0.0.1:7878`.
+The window opens and the local HTTP API starts on `127.0.0.1:7878`.
 
-## Connect Claude Code
+## Drive it from an agent
+
+Stateless HTTP — every request is independent. From any tool that can
+make HTTP calls (Claude Code, GPT, a shell loop):
 
 ```sh
-# After `cargo build --release` produced the bridge binary:
-claude mcp add pcb -- ./target/release/pcb-mcp-bridge
+# Discover the full action surface.
+curl -s http://127.0.0.1:7878/
+
+# Run a multi-line script.
+curl -s http://127.0.0.1:7878/script \
+  -H 'content-type: application/json' \
+  -d '{"script": "outline 80 30 radius=2\nstatus"}'
+
+# Persist when launched without a file argument.
+curl -s http://127.0.0.1:7878/save \
+  -H 'content-type: application/json' \
+  -d '{"path": "/tmp/board.fragua"}'
 ```
 
-Claude launches the bridge, the bridge proxies stdio ↔ TCP to the running
-app, and the agent and the UI now share one project.
+Replies are `text/plain`: per-line outcomes in the form
+`[L<n> ok|FAIL <tool>] <text>`, plus a warning when the session is
+memory-only.
 
-## Standalone (no GUI)
+## End-to-end recipe
 
-For headless use — CI, scripts, or when the agent is the only client:
+```text
+class ground pour=both
+class power width=0.4
 
-```sh
-./target/release/pcb-mcp-stdio
+sym U1 ic key=esp32_s3_zero
+  pin 1 L 3V3 role=power_in
+  pin 2 L GND role=power_in
+  ...
+sym C1 capacitor key=c_0603 lcsc=C14663
+sym R1 resistor key=r_0603 lcsc=C25804
+
+net GND  U1.GND C1.2 R1.2 class=ground
+net +3V3 U1.3V3 C1.1 class=power
+
+erc
+
+palette U1 esp32_s3_zero
+palette C1 c_0603 value=100nF
+palette R1 r_0603 value=10k
+place U1 25 15
+place C1 35 15
+place R1 35 25
+
+auto-place R1 C1 seed=42
+route
+pack fab=jlcpcb out=/tmp
 ```
+
+The final line writes `/tmp/<project>-jlcpcb.zip` ready to upload.
+</content>
+</invoke>

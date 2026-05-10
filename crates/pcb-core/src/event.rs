@@ -1,6 +1,6 @@
 //! Project change events.
 //!
-//! The MCP server, the Tauri frontend bridge, and any future router/DRC
+//! The HTTP script API, the Tauri frontend bridge, and any future router/DRC
 //! background tasks all subscribe here. A `tokio::sync::broadcast`
 //! channel gives us cheap fan-out with backpressure: slow subscribers
 //! get `Lagged` errors instead of blocking publishers.

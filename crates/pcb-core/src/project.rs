@@ -1,8 +1,9 @@
 //! `Project` — the live, mutable state every other component reads
 //! from and writes to.
 //!
-//! All mutating methods publish an `Event` so subscribers (UI, MCP, the
-//! router) see changes regardless of where the change originated.
+//! All mutating methods publish an `Event` so subscribers (UI, the
+//! HTTP script API, the router) see changes regardless of where the
+//! change originated.
 
 use std::fs;
 use std::path::{Path, PathBuf};

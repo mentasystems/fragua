@@ -1,12 +1,11 @@
-//! Tiny line-oriented DSL for `script` — the only tool the MCP catalog
-//! advertises. The agent writes a multi-line program; the parser turns
-//! each line into an existing internal tool call which `dispatch`
-//! executes in order.
+//! Tiny line-oriented DSL for the local HTTP script API. The agent
+//! writes a multi-line program; the parser turns each line into an
+//! existing internal tool call which `dispatch` executes in order.
 //!
 //! Why a DSL: a 30-line JSON `ops` array bloats context and burns
 //! tokens. An equivalent script is closer to 30 short lines of plain
-//! text, no bracket noise. The catalog stays at one tool, so the agent
-//! only loads ONE schema.
+//! text, no bracket noise. The agent talks to a single endpoint
+//! (`POST /script`) and only needs the verb reference at `GET /`.
 //!
 //! Grammar in one paragraph: each non-empty, non-comment line is a
 //! command — `verb arg1 arg2 ... key=value ...`. Strings with spaces

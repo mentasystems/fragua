@@ -1,7 +1,7 @@
 # pcb — Architecture
 
 This document maps VISION.md onto a concrete Rust workspace, an
-in-process data flow, and a phased implementation order.
+in-process data flow, and the implementation as it stands.
 
 ## Process model
 
@@ -9,8 +9,9 @@ One process. One Tauri app. Inside it:
 
 - A **shared in-memory project** (`pcb-core::Project`) — single source of
   truth for the schematic, board, nets, design rules, and routing state.
-- An **MCP server** task — speaks MCP over stdio and/or SSE, exposes tools
-  that read and mutate the project.
+- A **local HTTP API task** (`POST /script` on `127.0.0.1:7878`,
+  `text/plain` responses) — agents and humans run script verbs through
+  this single endpoint; the server is stateless beyond the live project.
 - A **Tauri command surface** — JS-callable handlers that read the same
   project and stream change events to the frontend.
 - A **frontend** (Vite + TS) — renders the project, listens for change
@@ -24,17 +25,20 @@ of source, emits a change event consumed by the UI.
 ## Workspace layout
 
 ```
-/Users/jairo/pcb/
+pcb/
 ├── Cargo.toml             workspace manifest
 ├── rust-toolchain.toml    pinned toolchain
 ├── crates/
 │   ├── pcb-core/          project model, geometry, units, ids, change events
-│   ├── pcb-router/        autorouting (grid + geometric, ours)
-│   ├── pcb-drc/           design rule check (geometry-based, ours)
-│   ├── pcb-gerber/        RS-274X + Excellon writer (ours)
-│   ├── pcb-render/        SVG/PNG render of the board (ours)
-│   └── pcb-mcp/           MCP server, tool definitions
-├── src-tauri/             Tauri binary crate (host)
+│   ├── pcb-router/        autorouting (A* + RR&R + negotiated congestion)
+│   ├── pcb-placer/        simulated-annealing footprint placer
+│   ├── pcb-drc/           design rule check (geometry-based)
+│   ├── pcb-erc/           electrical rule check (schematic-side)
+│   ├── pcb-fab/           fab provider abstraction (JLCPCB / PCBWay / Generic)
+│   ├── pcb-gerber/        RS-274X + Excellon writer + BOM/CPL CSV
+│   ├── pcb-render/        SVG render of the board (substrate, copper, silk)
+│   └── pcb-script/        line-oriented DSL + tool dispatch + reference docs
+├── src-tauri/             Tauri binary crate (host + HTTP API)
 ├── frontend/              Vite + TypeScript UI
 ├── VISION.md
 ├── ARCHITECTURE.md
@@ -45,112 +49,136 @@ of source, emits a change event consumed by the UI.
 
 ### `pcb-core`
 The model. Owns:
-- Units (mils/mm, fixed-point internal representation).
-- Geometry primitives (point, segment, polygon, arc).
-- `Project { schematic, board, rules }`.
-- `Schematic { symbols, nets, wires }`.
-- `Board { layer_stack, footprints, traces, vias, zones, outline }`.
-- `Component library` — we ship our own; KiCad libraries can be a *reference*
-  for shapes but we re-author what we need internally.
-- A change-event bus so `pcb-mcp`, the UI, and `pcb-router` can subscribe.
+- Units (mm, fixed-point internal representation, `Length(i64)` in nm).
+- Geometry primitives (point, segment, rect).
+- `Project { schematic, board, library, save_path }` plus an event bus.
+- `Schematic { symbols, nets, net_classes }` — symbols carry pins with
+  electrical roles (Passive / Input / Output / Bidir / PowerOut / PowerIn).
+- `Board { footprints, traces, vias, pours, silk, outline,
+  outline_corner_radius }`.
+- `Library` — disk-backed component catalogue with attachments
+  (photos / datasheets), `lcsc_id` and `mpn` fields for fab BOMs.
+- `Hershey` stroke font for silkscreen text.
 
-No I/O on the critical path. File import/export lives in submodules but
-is optional — the canonical project lives in memory.
+No I/O on the critical path. File save/load lives behind `Project::load_from_path`
+/ `save_to_path` and is content-based (JSON), so legacy `.json` and the
+canonical `.fragua` extension both load.
 
 ### `pcb-router`
-Auto-routing. Receives a `Board` snapshot + ratsnest, produces traces and
-vias, streams progress events. Phase 1 is grid-based A*/Lee on two layers
-with via cost; later we evolve toward a geometric/rip-up-and-retry router.
+Auto-routing. Receives a `Board`, produces traces and vias.
+- Multi-source A* with bend penalty and via cost.
+- Rip-up-and-reroute driver: re-orders failed/inefficient nets to the
+  front, accumulates per-cell congestion bias across iterations.
+- Steiner-style construction: same-net `Trace` cells are sources at g=0
+  so later spokes branch off the existing trunk.
+- Per-net `NetOverride` for `trace_width` / `clearance` from net classes.
+
+### `pcb-placer`
+Simulated-annealing footprint placer. Score = HPWL + soft body-to-body
+gap penalty + congestion-overflow proxy (rasterised pad-bbox grid).
+Caller passes the list of refs that may move; everything else stays
+pinned. Edge-mounted parts are constrained to the outline.
 
 ### `pcb-drc`
-Design rule check. Pure geometry over a `Board`: clearance, track width,
-drill sizes, via annular ring, edge clearance, unconnected nets. Emits
-violations with positions so the UI can highlight them.
+Geometric design rule check over a `Board`: clearance (per-net via
+`NetOverride`), track width, drill sizes, via annular ring, edge
+clearance, unconnected pads, routing efficiency (`actual / HPWL`).
+Emits violations with positions so the UI can highlight them.
+
+### `pcb-erc`
+Schematic-side validation. Strict checks: floating pin/net, duplicate
+pin, empty net, orphan symbol, phantom net (board pad on a net the
+schematic doesn't declare). Role-based: multiple drivers, unpowered
+power net, undriven input. Heuristic (opt-in): missing decoupling cap
+near a PowerIn pin, missing pull-up on I²C nets.
+
+### `pcb-fab`
+Fab-house provider abstraction. `Provider { Jlcpcb, Pcbway, Generic }`
+with per-house `FabRules` (min trace, drill, annular, board size),
+BOM and CPL formatters, and a `pack(project, provider, out_dir)` entry
+point that runs ERC + DRC + manufacturing-DRC and ships a single
+`.zip` ready to upload.
 
 ### `pcb-gerber`
-Manufacturing output. Writes one Gerber file per copper/mask/silk/paste
-layer (RS-274X), Excellon drill files (plated and non-plated), CSV BOM,
-and pick-and-place CSV. Pure writer, no parser needed.
+Manufacturing output. Writes one Gerber file per copper/mask/silk/edge
+layer (RS-274X), Excellon drill files (plated and non-plated), generic
+BOM and pick-and-place CSV. Pure writer, no parser. Rounded outlines
+emit straight segments + CCW quarter-arcs (`G75*` multi-quadrant).
 
 ### `pcb-render`
-Board rendering. Produces SVG (preferred — the frontend can style and
-animate it) and optional PNG. Used by MCP tools that need to attach a
-visual, and by the UI as a fallback.
+Board rendering. Produces SVG (the frontend can pan/zoom and
+attach interactive handlers). Renders substrate (with rounded corners),
+copper layers, vias, pads with labels, silk strokes (footprint-attached
+and board-level), DRC marker overlay. Silk text whose bbox would clip
+the outline is auto-relocated to a body-relative fallback.
 
-### `pcb-mcp`
-The MCP server. Tools are thin: each one validates inputs, mutates
-`Project` through `pcb-core` APIs, and returns a result. The agent does
-the reasoning; tools are mechanical.
-
-Initial tool set (will grow):
-- `project.new` / `project.open` / `project.save`
-- `schematic.add_symbol`, `schematic.add_wire`, `schematic.delete`
-- `board.set_outline`, `board.set_layer_stack`, `board.set_rules`
-- `placement.add`, `placement.move`, `placement.lock`
-- `route.run`, `route.stop`
-- `drc.run`
-- `output.gerber`, `output.bom`, `output.pick_place`
-- `view.snapshot` — returns SVG of current board state for the agent
+### `pcb-script`
+The agent surface. Single line-oriented DSL: `verb args [kv=val]`,
+indented sub-lines for blocks (`lib`/`sym`). The parser produces
+`Cmd { tool, args }` records; `dispatch` routes them through the rest
+of the workspace. The `script_reference()` string printed at startup
+and served at `GET /` documents every verb, the example flow, and the
+recommended pipeline (ERC → power planes → auto-place → route → pack).
 
 ### `src-tauri`
-Tauri binary. Owns the `Project`, spawns the MCP server, registers Tauri
-commands for the frontend, forwards change events.
+Tauri binary. Owns the `Project`, hosts the HTTP API on
+`127.0.0.1:7878` (3 endpoints: `GET /` for the script reference,
+`POST /script` for the agent's tool calls, `POST /save` to bind autosave),
+registers Tauri commands for the frontend, forwards events.
 
 ### `frontend`
-TypeScript + Vite. The board canvas is the centerpiece — likely SVG for
-v0 (easy to style, accessible, easy to animate), with a path to WebGL if
-we hit perf limits on large boards. Side panels: agent activity log,
-component tree, DRC violations, design rule editor. Pen-tool overlay for
-annotations is a separate canvas layer that captures strokes and feeds
-them back to the agent as image attachments via MCP.
+TypeScript + Vite. SVG canvas as the centrepiece (pan/zoom, click to
+inspect a component). Side panels: activity log, library, palette,
+DRC violation list. Default panes are hidden; the topbar tabs flip
+them open.
 
 ## Data flow: a typical agent action
 
-1. Agent calls MCP tool `placement.add` with a footprint and position.
-2. `pcb-mcp` validates and calls `pcb-core::Project::add_placement`.
-3. `Project` emits `Event::PlacementAdded`.
-4. Tauri's event bridge forwards the event to the frontend.
-5. Frontend updates the canvas; the human sees the new component appear.
-6. If the human drags it, the frontend calls a Tauri command, which calls
-   `Project::move_placement`, which emits `Event::PlacementMoved` — and
-   the agent, watching the project state through MCP, sees the override.
+1. Agent sends `POST /script` with a multi-line script body.
+2. The HTTP handler in `src-tauri` dispatches each line via
+   `pcb_script::tools::dispatch`.
+3. Each dispatched tool validates inputs and calls a `Project` mutator.
+4. `Project` emits the matching `Event` (e.g. `FootprintAdded`).
+5. The Tauri event pump forwards each event to the webview as `pcb://event`.
+6. The frontend re-fetches `project_state` via a Tauri command and repaints.
+7. If the human drags a footprint, the frontend calls
+   `move_footprint(reference, x, y)` via Tauri, which goes through the
+   same `Project::move_footprint_to` API the script tool uses; the agent
+   sees the new position on the next `view`/`snap`/`status` call.
 
-## Implementation phases
+## Where we ended up vs the original plan
 
-**Phase 0 — skeleton (where we are now)**
-Workspace, empty crates, docs. `cargo check` passes.
+The plan documented an MCP server as the primary surface. We ran it that
+way for a while, then dropped it: the agent the user runs (Claude Code)
+already has tool-call + slash-command primitives, and a stateless local
+HTTP endpoint replying in `text/plain` was easier for it to use than the
+MCP framing. The endpoint lives on the same `127.0.0.1:7878` port the
+MCP server used, just speaks plain HTTP now.
 
-**Phase 1 — minimum viable loop**
-- `pcb-core` skeleton (Project, basic geometry, change events).
-- `pcb-mcp` with `project.new`, `placement.add`, `view.snapshot`.
-- Tauri shell that hosts the MCP server and renders the project.
-- Frontend with an SVG canvas that listens to change events.
-- Agent can: create a project, drop a few components, see them rendered.
+The script DSL exists for the same reason — small surface area, one verb
+per concept, deterministic parsing. The agent reasons about the design;
+the script just commits each step.
 
-**Phase 2 — schematic + nets**
-- Schematic data model + a starter symbol library (we author ours).
-- MCP tools to build a schematic.
-- Frontend schematic view.
+## Implementation phases (historical, for context)
 
-**Phase 3 — gerbers + BOM**
-- `pcb-gerber` writes a complete fab pack from a placed-only board.
-- Lets us validate the pipeline end-to-end before tackling the router.
+The work landed roughly in this order:
 
-**Phase 4 — DRC**
-- `pcb-drc` with the core geometric checks.
-- Frontend overlay for violations.
+1. Skeleton + pcb-core data model.
+2. Stateless HTTP API replacing the original MCP server.
+3. Pcb-gerber → first end-to-end fab pack from a placed-only board.
+4. Pcb-drc with the core geometric checks.
+5. Pcb-router (initial: per-net A*; today: RR&R + negotiated congestion +
+   Steiner-ish multi-source).
+6. Footprint silk + library attachments + photos.
+7. Net classes + per-net trace_width / clearance.
+8. Pin roles + role-based ERC checks (multiple drivers, unpowered nets).
+9. Pcb-placer (simulated annealing on HPWL + gap penalty + congestion).
+10. Pcb-fab provider abstraction + manufacturing-DRC + zip pack flow
+    (JLCPCB / PCBWay / Generic).
+11. Rounded board outlines + silk-text relocation.
+12. Heuristic ERC checks (decoupling caps, I²C pull-ups).
 
-**Phase 5 — autorouter v0**
-- Grid-based A*/Lee, two layers, basic vias.
-- Streamed progress to the UI.
-
-**Phase 6 — interaction tools**
-- Drag-to-move with router re-plan.
-- Pen-tool annotation surface.
-- Pin/lock components.
-
-**Phase 7+ — autorouter evolution, multi-layer, advanced DRC, polish.**
-
-We pick this order because each phase produces something the human can
-*see working* end-to-end, even if narrow. We never have a 6-month
-construction phase with nothing to demo.
+Each step kept the human-visible end-to-end demo working — no long
+construction phase with nothing to show.
+</content>
+</invoke>

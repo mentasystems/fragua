@@ -2,7 +2,7 @@
 //!
 //! Owns the canonical `Project` (board + design rules + future schematic),
 //! the geometry primitives every other crate operates on, and the change
-//! event bus that lets the MCP server, the UI, and the router all
+//! event bus that lets the HTTP script API, the UI, and the router all
 //! observe and react to mutations.
 //!
 //! See `ARCHITECTURE.md` for the full responsibility map.

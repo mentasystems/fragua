@@ -146,7 +146,7 @@ function setView(v: View) {
 // All control surface lives behind the agent now. Tabs stay clickable
 // so the human can flip between the board and the schematic to watch,
 // but every action (place, move, route, DRC, export, reset) goes
-// through MCP — no UI buttons.
+// through the local HTTP script API — no UI buttons.
 els.tabBoard.addEventListener("click", () => setView("board"));
 els.tabSch.addEventListener("click", () => setView("schematic"));
 
@@ -510,7 +510,7 @@ function paintPalette(state: ProjectState) {
     chip.querySelector(".chip-ref")!.textContent = item.reference;
     chip.querySelector(".chip-val")!.textContent = item.value || item.library;
     // Read-only render: the palette is informational. Placement is
-    // agent-driven via MCP (`place REF X Y` in the script).
+    // agent-driven via the script API (`place REF X Y` in the script).
     els.palette.appendChild(chip);
   }
 }

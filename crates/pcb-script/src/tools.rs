@@ -393,10 +393,10 @@ struct BatchOp {
     args: Value,
 }
 
-/// Run many tool calls sequentially in one MCP round-trip. Each op is
-/// `{tool, args}`; the result mirrors the per-op outcome so the agent
-/// can react granularly. `batch` itself is rejected as an op (no
-/// nesting).
+/// Run many tool calls sequentially in a single API request. Each op
+/// is `{tool, args}`; the result mirrors the per-op outcome so the
+/// agent can react granularly. `batch` itself is rejected as an op
+/// (no nesting).
 #[derive(Debug, Deserialize)]
 struct ScriptInput {
     script: String,
@@ -2845,8 +2845,10 @@ fn tool_output_fab_pack(project: &Project, args: &Value) -> Result<Value, ToolEr
     })))
 }
 
-/// Builds the MCP tool result envelope. The text content is what the
-/// agent sees; `with_data` attaches structured metadata for the UI bridge.
+/// Builds the tool result envelope returned to the script API caller.
+/// The text content is what the agent sees verbatim; `with_data`
+/// attaches structured metadata that the UI bridge or follow-up tool
+/// calls can read.
 struct ToolResult {
     text: String,
     data: Option<Value>,

@@ -13,7 +13,7 @@ use crate::geometry::{Point, Rect};
 use crate::units::Length;
 
 /// Stable identifier for any item the human or agent can address by name
-/// across MCP calls and UI events.
+/// across script-API calls and UI events.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
 )]
@@ -25,8 +25,8 @@ impl Id {
         Self(Uuid::new_v4())
     }
 
-    /// Parse a UUID string. Used by MCP tool inputs that accept ids
-    /// as strings.
+    /// Parse a UUID string. Used by script-tool inputs that accept
+    /// ids as strings (e.g. `delete-trace ID`).
     pub fn parse(s: &str) -> Result<Self, String> {
         Uuid::parse_str(s).map(Self).map_err(|e| e.to_string())
     }
