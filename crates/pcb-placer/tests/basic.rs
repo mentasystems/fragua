@@ -11,6 +11,7 @@ fn pad(num: &str, off_x: f64, off_y: f64, net: Option<&str>) -> Pad {
         size: (Length::from_mm(1.0), Length::from_mm(1.2)),
         layer: CopperLayer::Top,
         net: net.map(str::to_string),
+        drill: None,
     }
 }
 

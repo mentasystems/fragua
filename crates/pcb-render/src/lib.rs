@@ -667,6 +667,13 @@ fn write_pad(svg: &mut String, pad: &Pad, pours: &[pcb_core::Pour]) {
         x = cx - w / 2.0,
         y = cy - h / 2.0,
     );
+    if let Some(drill) = pad.drill {
+        let r = drill.to_mm() / 2.0;
+        let _ = write!(
+            svg,
+            r##"<circle cx="{cx:.3}" cy="{cy:.3}" r="{r:.3}" fill="#0e1116" pointer-events="none"/>"##,
+        );
+    }
 }
 
 

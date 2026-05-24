@@ -73,6 +73,10 @@ pub struct LibraryPad {
     pub y_mm: f64,
     pub w_mm: f64,
     pub h_mm: f64,
+    /// Optional plated through-hole drill diameter, mm. `None` = SMD.
+    /// `Some(d)` = perforated pad (hybrid SMD + PTH).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drill_mm: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -150,9 +150,10 @@ pub enum FootprintSilk {
     },
 }
 
-/// A pad on a footprint. Phase 1: rectangular SMD pads only — round
-/// pads, ovals, and through-hole follow when we start consuming a real
-/// component library.
+/// A pad on a footprint. Rectangular copper. Optionally perforated:
+/// `drill = Some(d)` turns the pad into a hybrid SMD+through-hole
+/// landing — useful when you want the freedom to populate either the
+/// SMD or the through-hole variant of a part on the same footprint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pad {
     /// Footprint-local pad number (e.g. "1", "2", "GND").
@@ -169,6 +170,12 @@ pub struct Pad {
     pub layer: CopperLayer,
     /// Net this pad belongs to. `None` until the netlist is synced.
     pub net: Option<String>,
+    /// Optional plated through-hole drill diameter. `None` = pure SMD
+    /// pad. `Some(d)` = perforated pad: copper rectangle on top with a
+    /// centred PTH of diameter `d`. The Excellon writer emits these as
+    /// PTH drills; the renderer draws the hole over the pad fill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drill: Option<Length>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

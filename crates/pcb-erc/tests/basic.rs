@@ -53,6 +53,7 @@ fn board_with_phantom_pad(net: &str) -> Board {
             size: (Length::from_mm(1.0), Length::from_mm(1.0)),
             layer: CopperLayer::Top,
             net: Some(net.to_string()),
+            drill: None,
         }],
         key: String::new(),
         description: String::new(),

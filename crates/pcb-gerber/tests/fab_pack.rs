@@ -27,6 +27,7 @@ fn footprint(reference: &str, value: &str, x_mm: f64, y_mm: f64) -> Footprint {
                 size: (Length::from_mm(1.0), Length::from_mm(1.2)),
                 layer: CopperLayer::Top,
                 net: None,
+                drill: None,
             },
             Pad {
                 number: "2".into(),
@@ -35,6 +36,7 @@ fn footprint(reference: &str, value: &str, x_mm: f64, y_mm: f64) -> Footprint {
                 size: (Length::from_mm(1.0), Length::from_mm(1.2)),
                 layer: CopperLayer::Top,
                 net: None,
+                drill: None,
             },
         ],
         key: String::new(),

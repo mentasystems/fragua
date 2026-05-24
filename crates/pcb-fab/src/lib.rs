@@ -259,6 +259,53 @@ pub fn manufacturing_drc(board: &Board, provider: Provider) -> FabReport {
         }
     }
 
+    // Perforated pads (hybrid SMD + PTH) are subject to the same drill
+    // and annular-ring rules as vias. The "annular ring" on a
+    // rectangular pad is the smallest copper-to-hole distance, i.e.
+    // (short_side − drill) / 2 — if the drill eats into more than that,
+    // the fab will tear the pad open.
+    for fp in board.footprints_in_order() {
+        for pad in &fp.pads {
+            let Some(drill) = pad.drill else { continue };
+            let d = drill.to_mm();
+            let net = pad.net.clone().unwrap_or_default();
+            if d + 1e-6 < rules.min_drill_mm {
+                report.push(FabViolation {
+                    kind: FabViolationKind::SmallDrillForFab,
+                    severity: Severity::Error,
+                    message: format!(
+                        "pad {}/{} drilled at {:.3} mm; {} requires ≥ {:.3} mm",
+                        fp.reference,
+                        pad.number,
+                        d,
+                        provider.name(),
+                        rules.min_drill_mm,
+                    ),
+                    involved: vec![net.clone()],
+                });
+            }
+            let short = pad.size.0.to_mm().min(pad.size.1.to_mm());
+            let ring = (short - d) / 2.0;
+            if ring + 1e-6 < rules.min_annular_ring_mm {
+                report.push(FabViolation {
+                    kind: FabViolationKind::ThinAnnularRing,
+                    severity: Severity::Error,
+                    message: format!(
+                        "pad {}/{} has {:.3} mm copper around its drill (drill {:.3} / short side {:.3}); {} requires ≥ {:.3} mm",
+                        fp.reference,
+                        pad.number,
+                        ring,
+                        d,
+                        short,
+                        provider.name(),
+                        rules.min_annular_ring_mm,
+                    ),
+                    involved: vec![net],
+                });
+            }
+        }
+    }
+
     if let Some(outline) = board.outline {
         let w = outline.width().to_mm();
         let h = outline.height().to_mm();

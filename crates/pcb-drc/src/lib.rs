@@ -667,6 +667,27 @@ fn check_small_drills(board: &Board, opts: &DrcOptions, report: &mut DrcReport) 
             });
         }
     }
+    for fp in board.footprints_in_order() {
+        for pad in &fp.pads {
+            let Some(drill) = pad.drill else { continue };
+            let d = drill.to_mm();
+            if d + 1e-6 < min_d {
+                let c = fp.pad_world_center(pad);
+                let net = pad.net.clone().unwrap_or_default();
+                report.push(Violation {
+                    kind: ViolationKind::SmallDrill,
+                    severity: Severity::Warning,
+                    message: format!(
+                        "pad {}/{} drilled at {d:.3} mm < min {min_d:.3} mm",
+                        fp.reference, pad.number,
+                    ),
+                    x_mm: c.x.to_mm(),
+                    y_mm: c.y.to_mm(),
+                    involved: vec![net],
+                });
+            }
+        }
+    }
 }
 
 // -- Geometry helpers ---------------------------------------------

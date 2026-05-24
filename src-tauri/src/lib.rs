@@ -527,6 +527,7 @@ fn add_demo_resistor(state: State<'_, AppState>) {
                 size: (Length::from_mm(1.0), Length::from_mm(1.2)),
                 layer: CopperLayer::Top,
                 net: None,
+                drill: None,
             },
             Pad {
                 number: "2".into(),
@@ -535,6 +536,7 @@ fn add_demo_resistor(state: State<'_, AppState>) {
                 size: (Length::from_mm(1.0), Length::from_mm(1.2)),
                 layer: CopperLayer::Top,
                 net: None,
+                drill: None,
             },
         ],
         key: String::new(),

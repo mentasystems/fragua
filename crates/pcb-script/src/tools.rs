@@ -599,6 +599,10 @@ struct PadInput {
     layer: LayerInput,
     #[serde(default)]
     net: Option<String>,
+    /// Plated through-hole drill diameter in mm. Omit for a pure SMD
+    /// pad. Set to make a perforated (hybrid SMD + PTH) pad.
+    #[serde(default)]
+    drill_mm: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -666,6 +670,7 @@ fn tool_placement_add(project: &Project, args: &Value) -> Result<Value, ToolErro
             size: (Length::from_mm(p.w_mm), Length::from_mm(p.h_mm)),
             layer: p.layer.into(),
             net: p.net,
+            drill: p.drill_mm.map(Length::from_mm),
         })
         .collect();
 
@@ -1291,6 +1296,7 @@ fn tool_palette_add(project: &Project, args: &Value) -> Result<Value, ToolError>
                         size: (Length::from_mm(pad_plan.w_mm), Length::from_mm(pad_plan.h_mm)),
                         layer: pad_plan.layer.into(),
                         net,
+                        drill: pad_plan.drill_mm.map(Length::from_mm),
                     }
                 })
                 .collect();
@@ -1502,6 +1508,9 @@ struct LibraryCreatePadInput {
     y_mm: f64,
     w_mm: f64,
     h_mm: f64,
+    /// Plated through-hole drill diameter in mm. Omit for SMD.
+    #[serde(default)]
+    drill_mm: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1610,6 +1619,7 @@ fn tool_library_create(project: &Project, args: &Value) -> Result<Value, ToolErr
         y_mm: p.y_mm,
         w_mm: p.w_mm,
         h_mm: p.h_mm,
+        drill_mm: p.drill_mm,
     }).collect();
     let silk: Vec<LibrarySilk> = input.silk.into_iter().map(Into::into).collect();
     let entry = pcb_core::LibraryEntry {
@@ -1779,6 +1789,7 @@ fn tool_palette_add_from_library(project: &Project, args: &Value) -> Result<Valu
                 size: (Length::from_mm(p.w_mm), Length::from_mm(p.h_mm)),
                 layer: input.layer.into(),
                 net,
+                drill: p.drill_mm.map(Length::from_mm),
             }
         }).collect();
         // edge_mounted: schematic doesn't have this yet; just inherit
@@ -2002,6 +2013,9 @@ struct PadPlan {
     h_mm: f64,
     #[serde(default = "default_layer")]
     layer: LayerInput,
+    /// Plated through-hole drill diameter in mm. Omit for SMD.
+    #[serde(default)]
+    drill_mm: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
