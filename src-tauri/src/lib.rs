@@ -35,6 +35,13 @@ LOCAL API
                          and bind autosave to that path
                          body:  {\"path\": \"/abs/or/rel/file.fragua\"}
                          reply: `Saved to <path>`
+  GET  /screenshot       PNG render of the current project state, for
+                         headless agent verification. No OS permissions
+                         needed — rasterises the same SVG the webview
+                         shows. Query params:
+                           view=board|schematic  (default: board)
+                           width=<px>            (default: 1600, max 8192)
+                         reply: binary PNG (Content-Type: image/png)
   GET  /health           `ok`
 
   Examples:
@@ -892,6 +899,14 @@ mod http {
 
     use crate::USAGE;
 
+    /// Intermediate result from `handle_screenshot`'s synchronous
+    /// render block. Kept outside the function so clippy doesn't
+    /// complain about items declared after statements.
+    enum Rendered {
+        Bytes(Result<Vec<u8>, String>),
+        UnknownView,
+    }
+
     pub async fn serve_one(mut sock: TcpStream, project: Project) -> std::io::Result<()> {
         let (head, body_start) = match read_head(&mut sock).await? {
             Some(parts) => parts,
@@ -927,7 +942,14 @@ mod http {
         }
         body.truncate(content_length);
 
-        match (method, path) {
+        // Split path from query string for routes that take params
+        // (`/screenshot?view=board&width=2000`).
+        let (route, query) = match path.split_once('?') {
+            Some((r, q)) => (r, q),
+            None => (path, ""),
+        };
+
+        match (method, route) {
             ("GET", "/") => {
                 let reference = pcb_script::tools::script_reference();
                 let mut out = String::new();
@@ -937,10 +959,96 @@ mod http {
                 write_text(&mut sock, 200, "OK", &out).await
             }
             ("GET", "/health") => write_text(&mut sock, 200, "OK", "ok\n").await,
+            ("GET", "/screenshot") => handle_screenshot(&mut sock, &project, query).await,
             ("POST", "/script") => handle_script(&mut sock, &project, &body).await,
             ("POST", "/save") => handle_save(&mut sock, &project, &body).await,
             _ => write_text(&mut sock, 404, "Not Found", "unknown route\n").await,
         }
+    }
+
+    /// `GET /screenshot[?view=board|schematic][&width=<px>]` — rasterise
+    /// the project's current SVG to a PNG and return it inline. The
+    /// SVG is regenerated from the live `Project`, so the response is
+    /// always up to date with whatever the script last mutated.
+    ///
+    /// We deliberately re-render the model rather than capturing the
+    /// webview's actual pixels: on macOS, screen-capture APIs require
+    /// the user to grant Accessibility permission to the `fragua`
+    /// binary, which breaks the "agent boots a fresh build and verifies
+    /// its work" loop. Re-rendering the same SVG is what the user sees
+    /// anyway (minus any human pan/zoom state).
+    async fn handle_screenshot(
+        sock: &mut TcpStream,
+        project: &Project,
+        query: &str,
+    ) -> std::io::Result<()> {
+        let params = parse_query(query);
+        let view = params
+            .iter()
+            .find(|(k, _)| k == "view")
+            .map_or("board", |(_, v)| v.as_str());
+        let width: u32 = params
+            .iter()
+            .find(|(k, _)| k == "width")
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(pcb_render::DEFAULT_PNG_WIDTH);
+
+        // Render the PNG synchronously in a scoped block so the
+        // `ProjectSnapshot` (an `RwLockReadGuard`) is dropped before any
+        // `.await` — the guard is `!Send`, which would otherwise make
+        // this future un-spawnable on the multi-threaded runtime.
+        let rendered = {
+            let snap = project.read();
+            match view {
+                "board" => Rendered::Bytes(pcb_render::render_board_png(snap.board(), width)),
+                "schematic" | "sch" => {
+                    Rendered::Bytes(pcb_render::render_schematic_png(snap.schematic(), width))
+                }
+                _ => Rendered::UnknownView,
+            }
+        };
+        let png_result = match rendered {
+            Rendered::Bytes(r) => r,
+            Rendered::UnknownView => {
+                return write_text(
+                    sock,
+                    400,
+                    "Bad Request",
+                    &format!("unknown view `{view}`; expected `board` or `schematic`\n"),
+                )
+                .await;
+            }
+        };
+
+        match png_result {
+            Ok(bytes) => {
+                project.log(
+                    pcb_core::ActivityLevel::Info,
+                    format!("api.screenshot: {view} {} bytes", bytes.len()),
+                );
+                write_status(sock, 200, "OK", "image/png", &bytes).await
+            }
+            Err(e) => write_text(sock, 500, "Internal Server Error", &format!("render: {e}\n"))
+                .await,
+        }
+    }
+
+    /// Parse `k1=v1&k2=v2` into pairs. No percent-decoding — our keys
+    /// and values are ASCII identifiers / integers. Unknown shapes (no
+    /// `=`, trailing `&`) are silently skipped.
+    fn parse_query(q: &str) -> Vec<(String, String)> {
+        if q.is_empty() {
+            return Vec::new();
+        }
+        q.split('&')
+            .filter_map(|pair| {
+                let (k, v) = pair.split_once('=')?;
+                if k.is_empty() {
+                    return None;
+                }
+                Some((k.to_string(), v.to_string()))
+            })
+            .collect()
     }
 
     async fn handle_save(

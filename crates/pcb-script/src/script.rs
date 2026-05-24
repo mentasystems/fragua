@@ -498,6 +498,32 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 args: json!({"path": path}),
             })
         }
+        "screenshot" => {
+            // screenshot PATH [view=board|schematic] [width=PX]
+            // Rasterises the current board (or schematic) to a PNG on
+            // disk. The same content is also served over
+            // `GET /screenshot` on the HTTP API; this verb is the
+            // inline form so a script can mutate-then-snap in one
+            // round trip.
+            need_args(
+                line,
+                tokens,
+                1,
+                "screenshot PATH [view=board|schematic] [width=PX]",
+            )?;
+            let mut args = json!({"path": tokens[1]});
+            apply_kv(
+                &mut args,
+                &tokens[2..],
+                line,
+                &[("view", AttrType::Str), ("width", AttrType::Num)],
+            )?;
+            Ok(Cmd {
+                line,
+                tool: "project.screenshot".into(),
+                args,
+            })
+        }
         "pour" => {
             // pour NET LAYER  (LAYER = top|bottom)
             need_args(line, tokens, 2, "pour NET LAYER")?;

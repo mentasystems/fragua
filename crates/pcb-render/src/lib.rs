@@ -4,7 +4,12 @@
 //! it is trivial for the agent to attach as visual context. PNG comes
 //! later if/when we hit perf or fidelity needs.
 
+pub mod png;
 pub mod schematic;
+pub use png::{
+    render_board_png, render_library_entry_png, render_schematic_png, svg_to_png,
+    DEFAULT_PNG_WIDTH, MAX_PNG_DIMENSION,
+};
 pub use schematic::render_schematic_svg;
 
 use std::fmt::Write;

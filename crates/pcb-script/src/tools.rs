@@ -88,6 +88,13 @@ PROJECT / READS:\n\
                                                  Use this when fragua was launched with no file\n\
                                                  argument (no autosave); afterwards re-launch with\n\
                                                  `fragua PATH` to keep autosaving.\n\
+  screenshot PATH [view=board|schematic]       — rasterise the current project to a PNG on disk.\n\
+            [width=PX]                           Same content the webview shows (board SVG or\n\
+                                                 schematic SVG), rendered headlessly via resvg —\n\
+                                                 no OS permission needed. Default view=board,\n\
+                                                 width=1600 (max 8192). Also exposed as\n\
+                                                 `GET /screenshot[?view=...&width=...]` returning\n\
+                                                 `image/png` for direct curl.\n\
 \n\
 BOARD:\n\
   outline W H [radius=R]                       — set Edge.Cuts rectangle in mm. Optional uniform\n\
@@ -302,6 +309,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "project.status" => tool_project_status(project),
         "project.reset" => tool_project_reset(project),
         "project.save" => tool_project_save(project, args),
+        "project.screenshot" => tool_screenshot(project, args),
         "board.set_outline" => tool_board_set_outline(project, args),
         "placement.add" => tool_placement_add(project, args),
         "view.snapshot" => tool_view_snapshot(project),
@@ -379,6 +387,71 @@ fn tool_project_save(project: &Project, args: &Value) -> Result<Value, ToolError
         format!("project.save: wrote {}", written.display()),
     );
     Ok(text_result(format!("Saved to {}", written.display())).into())
+}
+
+#[derive(Debug, Deserialize)]
+struct ScreenshotInput {
+    /// Where to write the PNG. Created/truncated; parent dirs must
+    /// already exist.
+    path: String,
+    /// Which surface to render: `board` (default) or `schematic`.
+    #[serde(default)]
+    view: Option<String>,
+    /// Image width in pixels (height follows the SVG aspect ratio).
+    /// Defaults to `pcb_render::DEFAULT_PNG_WIDTH`. Accepted as a
+    /// number so the script-DSL `width=2000` (parsed as f64) round-trips
+    /// cleanly without needing an integer-typed `AttrType`.
+    #[serde(default)]
+    width: Option<f64>,
+}
+
+/// Rasterise the current project to a PNG file on disk. This is the
+/// script-side counterpart to `GET /screenshot` on the HTTP API — the
+/// agent uses it inline (`screenshot path=/tmp/x.png`) so a single
+/// script run can mutate the board, screenshot it, then keep going.
+fn tool_screenshot(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: ScreenshotInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("screenshot: {e}")))?;
+    if input.path.trim().is_empty() {
+        return Err(ToolError::invalid_params("screenshot: path is empty"));
+    }
+    let view = input.view.as_deref().unwrap_or("board");
+    let width = input.width.map_or(pcb_render::DEFAULT_PNG_WIDTH, |w| {
+        w.round().clamp(1.0, f64::from(pcb_render::MAX_PNG_DIMENSION)) as u32
+    });
+
+    let snap = project.read();
+    let png_result = match view {
+        "board" => pcb_render::render_board_png(snap.board(), width),
+        "schematic" | "sch" => pcb_render::render_schematic_png(snap.schematic(), width),
+        other => {
+            return Err(ToolError::invalid_params(format!(
+                "screenshot: unknown view `{other}` (use `board` or `schematic`)"
+            )));
+        }
+    };
+    drop(snap);
+    let png = png_result
+        .map_err(|e| ToolError::invalid_params(format!("screenshot: render: {e}")))?;
+
+    let path = std::path::PathBuf::from(&input.path);
+    std::fs::write(&path, &png).map_err(|e| {
+        ToolError::invalid_params(format!("screenshot: write {}: {e}", path.display()))
+    })?;
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "screenshot: wrote {} ({} bytes, view={view}, width={width})",
+            path.display(),
+            png.len()
+        ),
+    );
+    Ok(text_result(format!(
+        "Wrote {view} screenshot ({bytes} bytes) to {p}",
+        bytes = png.len(),
+        p = path.display()
+    ))
+    .into())
 }
 
 #[derive(Debug, Deserialize)]
