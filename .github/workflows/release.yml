@@ -29,7 +29,11 @@ jobs:
             archive: tar.gz
             bin: fragua
           - label: macos-x64
-            os: macos-13
+            # macOS Intel runners (macos-13) are being EOL'd and the
+            # queue often times out at 24h. Cross-compile from an
+            # Apple Silicon runner instead — the x86_64 target ships
+            # with the toolchain and the binary is pure Rust here.
+            os: macos-14
             target: x86_64-apple-darwin
             archive: tar.gz
             bin: fragua
