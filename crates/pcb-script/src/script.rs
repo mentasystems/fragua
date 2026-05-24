@@ -33,7 +33,10 @@ pub struct ParseError {
 
 impl ParseError {
     fn at(line: usize, msg: impl Into<String>) -> Self {
-        Self { line, message: msg.into() }
+        Self {
+            line,
+            message: msg.into(),
+        }
     }
 }
 
@@ -102,14 +105,17 @@ fn tokenise(body: &str, line_no: usize) -> Result<Vec<String>, ParseError> {
         let mut tok = String::new();
         if c == '"' {
             chars.next(); // consume opening quote
-            // Quoted strings allow escaped \" and \\.
+                          // Quoted strings allow escaped \" and \\.
             loop {
                 match chars.next() {
                     Some('"') => break,
                     Some('\\') => match chars.next() {
                         Some(esc) => tok.push(esc),
                         None => {
-                            return Err(ParseError::at(line_no, "unterminated escape inside \"..\""))
+                            return Err(ParseError::at(
+                                line_no,
+                                "unterminated escape inside \"..\"",
+                            ))
                         }
                     },
                     Some(c) => tok.push(c),
@@ -225,10 +231,14 @@ impl Block {
                 }
                 let mut pin = json!({"number": number, "side": side});
                 if !name.is_empty() {
-                    pin.as_object_mut().unwrap().insert("name".into(), Value::String(name));
+                    pin.as_object_mut()
+                        .unwrap()
+                        .insert("name".into(), Value::String(name));
                 }
                 if let Some(r) = role {
-                    pin.as_object_mut().unwrap().insert("role".into(), Value::String(r));
+                    pin.as_object_mut()
+                        .unwrap()
+                        .insert("role".into(), Value::String(r));
                 }
                 self.pins.push(pin);
                 Ok(())
@@ -239,7 +249,11 @@ impl Block {
                 // verb so the agent doesn't have to learn two
                 // syntaxes.
                 let args = parse_silk_line(line, tokens)?;
-                let layer_str = args.get("layer").and_then(Value::as_str).unwrap_or("top").to_string();
+                let layer_str = args
+                    .get("layer")
+                    .and_then(Value::as_str)
+                    .unwrap_or("top")
+                    .to_string();
                 let mut entry = json!({
                     "kind": "line",
                     "layer": layer_str,
@@ -257,8 +271,16 @@ impl Block {
             }
             ("lib", "silk-text") => {
                 let args = parse_silk_text(line, tokens)?;
-                let layer_str = args.get("layer").and_then(Value::as_str).unwrap_or("top").to_string();
-                let anchor_str = args.get("anchor").and_then(Value::as_str).unwrap_or("middle").to_string();
+                let layer_str = args
+                    .get("layer")
+                    .and_then(Value::as_str)
+                    .unwrap_or("top")
+                    .to_string();
+                let anchor_str = args
+                    .get("anchor")
+                    .and_then(Value::as_str)
+                    .unwrap_or("middle")
+                    .to_string();
                 let entry = json!({
                     "kind": "text",
                     "layer": layer_str,
@@ -297,7 +319,9 @@ impl Block {
                     "x_mm": x, "y_mm": y, "w_mm": w, "h_mm": h,
                 });
                 if !name.is_empty() {
-                    pad.as_object_mut().unwrap().insert("name".into(), Value::String(name));
+                    pad.as_object_mut()
+                        .unwrap()
+                        .insert("name".into(), Value::String(name));
                 }
                 self.pads.push(pad);
                 Ok(())
@@ -327,19 +351,31 @@ impl Block {
                     "reference": reference,
                     "kind": kind,
                 });
-                apply_kv(&mut args, &tokens[3..], line, &[
-                    ("key", AttrType::Str), ("value", AttrType::Str),
-                    ("rot", AttrType::NumInto("rotation")),
-                    ("rotation", AttrType::Num),
-                    ("x", AttrType::NumInto("x_mm")),
-                    ("y", AttrType::NumInto("y_mm")),
-                    ("desc", AttrType::StrInto("description")),
-                    ("description", AttrType::Str),
-                ])?;
+                apply_kv(
+                    &mut args,
+                    &tokens[3..],
+                    line,
+                    &[
+                        ("key", AttrType::Str),
+                        ("value", AttrType::Str),
+                        ("rot", AttrType::NumInto("rotation")),
+                        ("rotation", AttrType::Num),
+                        ("x", AttrType::NumInto("x_mm")),
+                        ("y", AttrType::NumInto("y_mm")),
+                        ("desc", AttrType::StrInto("description")),
+                        ("description", AttrType::Str),
+                    ],
+                )?;
                 if kind == "generic_ic" {
-                    args.as_object_mut().unwrap().insert("pins".into(), Value::Array(self.pins));
+                    args.as_object_mut()
+                        .unwrap()
+                        .insert("pins".into(), Value::Array(self.pins));
                 }
-                Ok(Cmd { line, tool: "schematic.add_symbol".into(), args })
+                Ok(Cmd {
+                    line,
+                    tool: "schematic.add_symbol".into(),
+                    args,
+                })
             }
             "lib" => {
                 // lib KEY [value=V] [rot=DEG] [edge=true|false] [desc="..."]
@@ -354,26 +390,37 @@ impl Block {
                     ));
                 }
                 let mut args = json!({"key": key, "pads": self.pads, "silk": self.silk});
-                apply_kv(&mut args, &tokens[2..], line, &[
-                    ("value", AttrType::StrInto("default_value")),
-                    ("default_value", AttrType::Str),
-                    ("rot", AttrType::NumInto("default_rotation_deg")),
-                    ("default_rotation_deg", AttrType::Num),
-                    ("edge", AttrType::BoolInto("edge_mounted")),
-                    ("edge_mounted", AttrType::Bool),
-                    ("desc", AttrType::StrInto("description")),
-                    ("description", AttrType::Str),
-                    ("lcsc", AttrType::StrInto("lcsc_id")),
-                    ("lcsc_id", AttrType::Str),
-                    ("mpn", AttrType::Str),
-                ])?;
+                apply_kv(
+                    &mut args,
+                    &tokens[2..],
+                    line,
+                    &[
+                        ("value", AttrType::StrInto("default_value")),
+                        ("default_value", AttrType::Str),
+                        ("rot", AttrType::NumInto("default_rotation_deg")),
+                        ("default_rotation_deg", AttrType::Num),
+                        ("edge", AttrType::BoolInto("edge_mounted")),
+                        ("edge_mounted", AttrType::Bool),
+                        ("desc", AttrType::StrInto("description")),
+                        ("description", AttrType::Str),
+                        ("lcsc", AttrType::StrInto("lcsc_id")),
+                        ("lcsc_id", AttrType::Str),
+                        ("mpn", AttrType::Str),
+                    ],
+                )?;
                 // `description` is required by library.create — synthesise an empty
                 // string if the agent didn't provide one (the tool will reject empty
                 // descriptions only if the schema declares them required).
                 if !args.as_object().unwrap().contains_key("description") {
-                    args.as_object_mut().unwrap().insert("description".into(), json!(""));
+                    args.as_object_mut()
+                        .unwrap()
+                        .insert("description".into(), json!(""));
                 }
-                Ok(Cmd { line, tool: "library.create".into(), args })
+                Ok(Cmd {
+                    line,
+                    tool: "library.create".into(),
+                    args,
+                })
             }
             _ => unreachable!(),
         }
@@ -385,43 +432,105 @@ impl Block {
 fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
     let verb = tokens[0].as_str();
     match verb {
-        "reset"        => Ok(Cmd { line, tool: "project.reset".into(), args: json!({}) }),
-        "status"       => Ok(Cmd { line, tool: "project.status".into(), args: json!({}) }),
-        "view"         => Ok(Cmd { line, tool: "view.summary".into(), args: json!({}) }),
-        "snap"         => Ok(Cmd { line, tool: "view.snapshot".into(), args: json!({}) }),
-        "sch"          => Ok(Cmd { line, tool: "schematic.snapshot".into(), args: json!({}) }),
-        "sch-status"   => Ok(Cmd { line, tool: "schematic.status".into(), args: json!({}) }),
-        "nets"         => Ok(Cmd { line, tool: "net.status".into(), args: json!({}) }),
-        "list-lib"     => Ok(Cmd { line, tool: "library.list".into(), args: json!({}) }),
-        "list-palette" => Ok(Cmd { line, tool: "palette.list".into(), args: json!({}) }),
-        "clear-palette" => Ok(Cmd { line, tool: "palette.clear".into(), args: json!({}) }),
-        "clear-route"  => Ok(Cmd { line, tool: "route.clear".into(), args: json!({}) }),
+        "reset" => Ok(Cmd {
+            line,
+            tool: "project.reset".into(),
+            args: json!({}),
+        }),
+        "status" => Ok(Cmd {
+            line,
+            tool: "project.status".into(),
+            args: json!({}),
+        }),
+        "view" => Ok(Cmd {
+            line,
+            tool: "view.summary".into(),
+            args: json!({}),
+        }),
+        "snap" => Ok(Cmd {
+            line,
+            tool: "view.snapshot".into(),
+            args: json!({}),
+        }),
+        "sch" => Ok(Cmd {
+            line,
+            tool: "schematic.snapshot".into(),
+            args: json!({}),
+        }),
+        "sch-status" => Ok(Cmd {
+            line,
+            tool: "schematic.status".into(),
+            args: json!({}),
+        }),
+        "nets" => Ok(Cmd {
+            line,
+            tool: "net.status".into(),
+            args: json!({}),
+        }),
+        "list-lib" => Ok(Cmd {
+            line,
+            tool: "library.list".into(),
+            args: json!({}),
+        }),
+        "list-palette" => Ok(Cmd {
+            line,
+            tool: "palette.list".into(),
+            args: json!({}),
+        }),
+        "clear-palette" => Ok(Cmd {
+            line,
+            tool: "palette.clear".into(),
+            args: json!({}),
+        }),
+        "clear-route" => Ok(Cmd {
+            line,
+            tool: "route.clear".into(),
+            args: json!({}),
+        }),
         "save" => {
             // save PATH  — write the project JSON to PATH (atomic).
             need_args(line, tokens, 1, "save PATH")?;
             let path = tokens[1..].join(" ");
-            Ok(Cmd { line, tool: "project.save".into(), args: json!({"path": path}) })
+            Ok(Cmd {
+                line,
+                tool: "project.save".into(),
+                args: json!({"path": path}),
+            })
         }
         "pour" => {
             // pour NET LAYER  (LAYER = top|bottom)
             need_args(line, tokens, 2, "pour NET LAYER")?;
-            Ok(Cmd { line, tool: "pour.add".into(),
-                args: json!({"net": tokens[1], "layer": tokens[2]}) })
+            Ok(Cmd {
+                line,
+                tool: "pour.add".into(),
+                args: json!({"net": tokens[1], "layer": tokens[2]}),
+            })
         }
         "clear-pour" => {
             // clear-pour NET LAYER
             need_args(line, tokens, 2, "clear-pour NET LAYER")?;
-            Ok(Cmd { line, tool: "pour.remove".into(),
-                args: json!({"net": tokens[1], "layer": tokens[2]}) })
+            Ok(Cmd {
+                line,
+                tool: "pour.remove".into(),
+                args: json!({"net": tokens[1], "layer": tokens[2]}),
+            })
         }
 
         "silk-line" => {
             let args = parse_silk_line(line, tokens)?;
-            Ok(Cmd { line, tool: "silk.add_line".into(), args })
+            Ok(Cmd {
+                line,
+                tool: "silk.add_line".into(),
+                args,
+            })
         }
         "silk-text" => {
             let args = parse_silk_text(line, tokens)?;
-            Ok(Cmd { line, tool: "silk.add_text".into(), args })
+            Ok(Cmd {
+                line,
+                tool: "silk.add_text".into(),
+                args,
+            })
         }
 
         "outline" => {
@@ -430,11 +539,20 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
             let w = parse_num(&tokens[1], line, "W")?;
             let h = parse_num(&tokens[2], line, "H")?;
             let mut args = json!({"w_mm": w, "h_mm": h});
-            apply_kv(&mut args, &tokens[3..], line, &[
-                ("radius", AttrType::NumInto("corner_radius_mm")),
-                ("r",      AttrType::NumInto("corner_radius_mm")),
-            ])?;
-            Ok(Cmd { line, tool: "board.set_outline".into(), args })
+            apply_kv(
+                &mut args,
+                &tokens[3..],
+                line,
+                &[
+                    ("radius", AttrType::NumInto("corner_radius_mm")),
+                    ("r", AttrType::NumInto("corner_radius_mm")),
+                ],
+            )?;
+            Ok(Cmd {
+                line,
+                tool: "board.set_outline".into(),
+                args,
+            })
         }
 
         "net" => {
@@ -452,60 +570,99 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 pins.push(Value::String(t.clone()));
             }
             let mut args = json!({"net": name, "pins": pins});
-            apply_kv(&mut args, &tokens[kv_start..], line, &[
-                ("class", AttrType::Str),
-            ])?;
-            Ok(Cmd { line, tool: "schematic.connect".into(), args })
+            apply_kv(
+                &mut args,
+                &tokens[kv_start..],
+                line,
+                &[("class", AttrType::Str)],
+            )?;
+            Ok(Cmd {
+                line,
+                tool: "schematic.connect".into(),
+                args,
+            })
         }
         "class" => {
             // class NAME [width=N] [clearance=N] [pour=top|bottom]
-            need_args(line, tokens, 1, "class NAME [width=N] [clearance=N] [pour=top|bottom]")?;
+            need_args(
+                line,
+                tokens,
+                1,
+                "class NAME [width=N] [clearance=N] [pour=top|bottom]",
+            )?;
             let mut args = json!({"name": tokens[1]});
-            apply_kv(&mut args, &tokens[2..], line, &[
-                ("width",     AttrType::NumInto("trace_width_mm")),
-                ("clearance", AttrType::NumInto("clearance_mm")),
-                ("pour",      AttrType::Str),
-            ])?;
-            Ok(Cmd { line, tool: "schematic.set_class".into(), args })
+            apply_kv(
+                &mut args,
+                &tokens[2..],
+                line,
+                &[
+                    ("width", AttrType::NumInto("trace_width_mm")),
+                    ("clearance", AttrType::NumInto("clearance_mm")),
+                    ("pour", AttrType::Str),
+                ],
+            )?;
+            Ok(Cmd {
+                line,
+                tool: "schematic.set_class".into(),
+                args,
+            })
         }
         "auto-pour" => {
             // No args: walk the schematic and materialise pours for
             // every net whose class declares a `pour_layer`.
-            Ok(Cmd { line, tool: "pour.auto".into(), args: json!({}) })
+            Ok(Cmd {
+                line,
+                tool: "pour.auto".into(),
+                args: json!({}),
+            })
         }
 
         "find-lib" => {
             need_args(line, tokens, 1, "find-lib KEY")?;
-            Ok(Cmd { line, tool: "library.find".into(),
-                     args: json!({"key": tokens[1]}) })
+            Ok(Cmd {
+                line,
+                tool: "library.find".into(),
+                args: json!({"key": tokens[1]}),
+            })
         }
         "delete-lib" => {
             need_args(line, tokens, 1, "delete-lib KEY")?;
-            Ok(Cmd { line, tool: "library.delete".into(),
-                     args: json!({"key": tokens[1]}) })
+            Ok(Cmd {
+                line,
+                tool: "library.delete".into(),
+                args: json!({"key": tokens[1]}),
+            })
         }
         "detach" => {
             need_args(line, tokens, 2, "detach KEY ATTACHMENT_ID")?;
-            Ok(Cmd { line, tool: "library.delete_attachment".into(),
-                     args: json!({"key": tokens[1], "attachment_id": tokens[2]}) })
+            Ok(Cmd {
+                line,
+                tool: "library.delete_attachment".into(),
+                args: json!({"key": tokens[1], "attachment_id": tokens[2]}),
+            })
         }
         "attach" => {
             // attach KEY KIND PATH [mime=MIME] [filename=NAME]
-            need_args(line, tokens, 3, "attach KEY KIND PATH [mime=...] [filename=...]")?;
+            need_args(
+                line,
+                tokens,
+                3,
+                "attach KEY KIND PATH [mime=...] [filename=...]",
+            )?;
             let key = tokens[1].clone();
             let kind = tokens[2].clone();
             let path = tokens[3].clone();
             // Read + base64-encode the file. Mime auto-detected from the
             // path extension unless overridden.
-            let bytes = std::fs::read(&path).map_err(|e| ParseError::at(
-                line, format!("attach: cannot read {path}: {e}"),
-            ))?;
+            let bytes = std::fs::read(&path)
+                .map_err(|e| ParseError::at(line, format!("attach: cannot read {path}: {e}")))?;
             use base64::Engine;
             let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
             let filename = std::path::Path::new(&path)
                 .file_name()
                 .and_then(|s| s.to_str())
-                .unwrap_or(&path).to_string();
+                .unwrap_or(&path)
+                .to_string();
             let mime = guess_mime(&path);
             let mut args = json!({
                 "key": key,
@@ -514,24 +671,39 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 "mime": mime,
                 "data_base64": data_base64,
             });
-            apply_kv(&mut args, &tokens[4..], line, &[
-                ("mime", AttrType::Str),
-                ("filename", AttrType::Str),
-            ])?;
-            Ok(Cmd { line, tool: "library.attach".into(), args })
+            apply_kv(
+                &mut args,
+                &tokens[4..],
+                line,
+                &[("mime", AttrType::Str), ("filename", AttrType::Str)],
+            )?;
+            Ok(Cmd {
+                line,
+                tool: "library.attach".into(),
+                args,
+            })
         }
 
         "palette" => {
             // palette REF KEY [rot=DEG] [value=V] [layer=top|bottom]
             need_args(line, tokens, 2, "palette REF KEY [rot=...] [value=...]")?;
             let mut args = json!({"reference": tokens[1], "key": tokens[2]});
-            apply_kv(&mut args, &tokens[3..], line, &[
-                ("rot", AttrType::NumInto("rotation")),
-                ("rotation", AttrType::Num),
-                ("value", AttrType::Str),
-                ("layer", AttrType::Str),
-            ])?;
-            Ok(Cmd { line, tool: "palette.add_from_library".into(), args })
+            apply_kv(
+                &mut args,
+                &tokens[3..],
+                line,
+                &[
+                    ("rot", AttrType::NumInto("rotation")),
+                    ("rotation", AttrType::Num),
+                    ("value", AttrType::Str),
+                    ("layer", AttrType::Str),
+                ],
+            )?;
+            Ok(Cmd {
+                line,
+                tool: "palette.add_from_library".into(),
+                args,
+            })
         }
 
         "place" => {
@@ -544,48 +716,75 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
             // the rotation included; otherwise plain place_from_palette.
             if tokens.len() > 4 {
                 let rot = parse_num(&tokens[4], line, "ROT")? as f32;
-                Ok(Cmd { line, tool: "placement.batch".into(),
+                Ok(Cmd {
+                    line,
+                    tool: "placement.batch".into(),
                     args: json!({"items": [{
                         "reference": reference, "x_mm": x, "y_mm": y, "rotation": rot
-                    }]}) })
+                    }]}),
+                })
             } else {
-                Ok(Cmd { line, tool: "placement.place_from_palette".into(),
-                    args: json!({"reference": reference, "x_mm": x, "y_mm": y}) })
+                Ok(Cmd {
+                    line,
+                    tool: "placement.place_from_palette".into(),
+                    args: json!({"reference": reference, "x_mm": x, "y_mm": y}),
+                })
             }
         }
 
         "move" => {
             need_args(line, tokens, 3, "move REF X Y")?;
-            Ok(Cmd { line, tool: "placement.move".into(), args: json!({
-                "reference": tokens[1],
-                "x_mm": parse_num(&tokens[2], line, "X")?,
-                "y_mm": parse_num(&tokens[3], line, "Y")?,
-            }) })
+            Ok(Cmd {
+                line,
+                tool: "placement.move".into(),
+                args: json!({
+                    "reference": tokens[1],
+                    "x_mm": parse_num(&tokens[2], line, "X")?,
+                    "y_mm": parse_num(&tokens[3], line, "Y")?,
+                }),
+            })
         }
         "rotate" => {
             need_args(line, tokens, 2, "rotate REF DEG")?;
-            Ok(Cmd { line, tool: "placement.rotate".into(), args: json!({
-                "reference": tokens[1],
-                "degrees": parse_num(&tokens[2], line, "DEG")?,
-            }) })
+            Ok(Cmd {
+                line,
+                tool: "placement.rotate".into(),
+                args: json!({
+                    "reference": tokens[1],
+                    "degrees": parse_num(&tokens[2], line, "DEG")?,
+                }),
+            })
         }
 
         "route" => {
             // optional kv: trace_width, clearance, via_drill, via_diameter, via_cost, cell
             let mut args = json!({});
-            apply_kv(&mut args, &tokens[1..], line, &[
-                ("trace_width", AttrType::NumInto("trace_width_mm")),
-                ("clearance",   AttrType::NumInto("clearance_mm")),
-                ("via_drill",   AttrType::NumInto("via_drill_mm")),
-                ("via_diameter",AttrType::NumInto("via_diameter_mm")),
-                ("via_cost",    AttrType::Num),
-                ("cell",        AttrType::NumInto("cell_mm")),
-            ])?;
-            Ok(Cmd { line, tool: "route.run".into(), args })
+            apply_kv(
+                &mut args,
+                &tokens[1..],
+                line,
+                &[
+                    ("trace_width", AttrType::NumInto("trace_width_mm")),
+                    ("clearance", AttrType::NumInto("clearance_mm")),
+                    ("via_drill", AttrType::NumInto("via_drill_mm")),
+                    ("via_diameter", AttrType::NumInto("via_diameter_mm")),
+                    ("via_cost", AttrType::Num),
+                    ("cell", AttrType::NumInto("cell_mm")),
+                ],
+            )?;
+            Ok(Cmd {
+                line,
+                tool: "route.run".into(),
+                args,
+            })
         }
         "clear-net" => {
             need_args(line, tokens, 1, "clear-net NET")?;
-            Ok(Cmd { line, tool: "route.clear_net".into(), args: json!({"net": tokens[1]}) })
+            Ok(Cmd {
+                line,
+                tool: "route.clear_net".into(),
+                args: json!({"net": tokens[1]}),
+            })
         }
         "trace" => {
             // trace top|bottom NET X1 Y1 X2 Y2 [width=N]
@@ -598,10 +797,17 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 "y2_mm": parse_num(&tokens[6], line, "Y2")?,
                 "width_mm": 0.25,
             });
-            apply_kv(&mut args, &tokens[7..], line, &[
-                ("width", AttrType::NumInto("width_mm")),
-            ])?;
-            Ok(Cmd { line, tool: "route.add_trace".into(), args })
+            apply_kv(
+                &mut args,
+                &tokens[7..],
+                line,
+                &[("width", AttrType::NumInto("width_mm"))],
+            )?;
+            Ok(Cmd {
+                line,
+                tool: "route.add_trace".into(),
+                args,
+            })
         }
         "via" => {
             // via NET X Y [drill=N] [diameter=N]
@@ -613,24 +819,46 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 "drill_mm": 0.30,
                 "diameter_mm": 0.60,
             });
-            apply_kv(&mut args, &tokens[4..], line, &[
-                ("drill",    AttrType::NumInto("drill_mm")),
-                ("diameter", AttrType::NumInto("diameter_mm")),
-            ])?;
-            Ok(Cmd { line, tool: "route.add_via".into(), args })
+            apply_kv(
+                &mut args,
+                &tokens[4..],
+                line,
+                &[
+                    ("drill", AttrType::NumInto("drill_mm")),
+                    ("diameter", AttrType::NumInto("diameter_mm")),
+                ],
+            )?;
+            Ok(Cmd {
+                line,
+                tool: "route.add_via".into(),
+                args,
+            })
         }
         "delete-trace" => {
             need_args(line, tokens, 1, "delete-trace ID")?;
-            Ok(Cmd { line, tool: "route.delete_trace".into(), args: json!({"id": tokens[1]}) })
+            Ok(Cmd {
+                line,
+                tool: "route.delete_trace".into(),
+                args: json!({"id": tokens[1]}),
+            })
         }
         "delete-via" => {
             need_args(line, tokens, 1, "delete-via ID")?;
-            Ok(Cmd { line, tool: "route.delete_via".into(), args: json!({"id": tokens[1]}) })
+            Ok(Cmd {
+                line,
+                tool: "route.delete_via".into(),
+                args: json!({"id": tokens[1]}),
+            })
         }
 
         "auto-place" => {
             // auto-place REF [REF...] [iters=N] [seed=N] [max_step=N] [min_step=N]
-            need_args(line, tokens, 1, "auto-place REF [REF...] [iters=N] [seed=N] [max_step=N]")?;
+            need_args(
+                line,
+                tokens,
+                1,
+                "auto-place REF [REF...] [iters=N] [seed=N] [max_step=N]",
+            )?;
             // Positional refs end at the first token containing `=`. Refs
             // can't contain `=` (alphanumeric + `.` + `_` only), so this
             // split is unambiguous.
@@ -644,54 +872,90 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 refs.push(t.clone());
             }
             if refs.is_empty() {
-                return Err(ParseError::at(line, "auto-place: at least one footprint reference required".to_string()));
+                return Err(ParseError::at(
+                    line,
+                    "auto-place: at least one footprint reference required".to_string(),
+                ));
             }
             let mut args = json!({ "refs": refs });
-            apply_kv(&mut args, &tokens[kv_start..], line, &[
-                ("iters",    AttrType::Num),
-                ("seed",     AttrType::Num),
-                ("max_step", AttrType::NumInto("max_step_mm")),
-                ("min_step", AttrType::NumInto("min_step_mm")),
-                ("min_gap",  AttrType::NumInto("min_gap_mm")),
-                ("gap_penalty", AttrType::NumInto("gap_penalty_factor")),
-                ("congestion", AttrType::NumInto("congestion_penalty_factor")),
-                ("congestion_res", AttrType::NumInto("congestion_resolution")),
-            ])?;
-            Ok(Cmd { line, tool: "placement.auto".into(), args })
+            apply_kv(
+                &mut args,
+                &tokens[kv_start..],
+                line,
+                &[
+                    ("iters", AttrType::Num),
+                    ("seed", AttrType::Num),
+                    ("max_step", AttrType::NumInto("max_step_mm")),
+                    ("min_step", AttrType::NumInto("min_step_mm")),
+                    ("min_gap", AttrType::NumInto("min_gap_mm")),
+                    ("gap_penalty", AttrType::NumInto("gap_penalty_factor")),
+                    ("congestion", AttrType::NumInto("congestion_penalty_factor")),
+                    ("congestion_res", AttrType::NumInto("congestion_resolution")),
+                ],
+            )?;
+            Ok(Cmd {
+                line,
+                tool: "placement.auto".into(),
+                args,
+            })
         }
 
         "drc" => {
             let mut args = json!({});
-            apply_kv(&mut args, &tokens[1..], line, &[
-                ("clearance", AttrType::NumInto("min_clearance_mm")),
-                ("edge",      AttrType::NumInto("edge_clearance_mm")),
-                ("trace_width", AttrType::NumInto("min_trace_width_mm")),
-                ("drill",     AttrType::NumInto("min_drill_mm")),
-            ])?;
-            Ok(Cmd { line, tool: "drc.run".into(), args })
+            apply_kv(
+                &mut args,
+                &tokens[1..],
+                line,
+                &[
+                    ("clearance", AttrType::NumInto("min_clearance_mm")),
+                    ("edge", AttrType::NumInto("edge_clearance_mm")),
+                    ("trace_width", AttrType::NumInto("min_trace_width_mm")),
+                    ("drill", AttrType::NumInto("min_drill_mm")),
+                ],
+            )?;
+            Ok(Cmd {
+                line,
+                tool: "drc.run".into(),
+                args,
+            })
         }
         "erc" => {
             // No options yet; the report is whatever every rule
             // surfaced. Schema-stable so the agent can rely on it.
-            Ok(Cmd { line, tool: "erc.run".into(), args: json!({}) })
+            Ok(Cmd {
+                line,
+                tool: "erc.run".into(),
+                args: json!({}),
+            })
         }
         "export" => {
             need_args(line, tokens, 1, "export DIR [name=STEM]")?;
             let mut args = json!({"out_dir": tokens[1]});
-            apply_kv(&mut args, &tokens[2..], line, &[
-                ("name", AttrType::Str),
-            ])?;
-            Ok(Cmd { line, tool: "output.fab_pack".into(), args })
+            apply_kv(&mut args, &tokens[2..], line, &[("name", AttrType::Str)])?;
+            Ok(Cmd {
+                line,
+                tool: "output.fab_pack".into(),
+                args,
+            })
         }
         "pack" => {
             // pack [fab=jlcpcb|pcbway|generic] [out=PATH]
             // Default: fab=jlcpcb, out=~/Downloads.
             let mut args = json!({});
-            apply_kv(&mut args, &tokens[1..], line, &[
-                ("fab", AttrType::Str),
-                ("out", AttrType::StrInto("out_dir")),
-            ])?;
-            Ok(Cmd { line, tool: "fab.pack".into(), args })
+            apply_kv(
+                &mut args,
+                &tokens[1..],
+                line,
+                &[
+                    ("fab", AttrType::Str),
+                    ("out", AttrType::StrInto("out_dir")),
+                ],
+            )?;
+            Ok(Cmd {
+                line,
+                tool: "fab.pack".into(),
+                args,
+            })
         }
 
         other => Err(ParseError::at(line, format!("unknown verb `{other}`"))),
@@ -713,15 +977,23 @@ fn parse_silk_line(line: usize, tokens: &[String]) -> Result<Value, ParseError> 
         "y2_mm": parse_num(&tokens[5], line, "Y2")?,
         "width_mm": 0.15,
     });
-    apply_kv(&mut args, &tokens[6..], line, &[
-        ("width", AttrType::NumInto("width_mm")),
-    ])?;
+    apply_kv(
+        &mut args,
+        &tokens[6..],
+        line,
+        &[("width", AttrType::NumInto("width_mm"))],
+    )?;
     Ok(args)
 }
 
 fn parse_silk_text(line: usize, tokens: &[String]) -> Result<Value, ParseError> {
     // silk-text LAYER X Y "TEXT" [size=1.2] [rot=0] [anchor=middle] [width=...]
-    need_args(line, tokens, 4, "silk-text LAYER X Y TEXT [size=...] [rot=...] [anchor=start|middle|end] [width=...]")?;
+    need_args(
+        line,
+        tokens,
+        4,
+        "silk-text LAYER X Y TEXT [size=...] [rot=...] [anchor=start|middle|end] [width=...]",
+    )?;
     let mut args = json!({
         "layer": tokens[1],
         "x_mm": parse_num(&tokens[2], line, "X")?,
@@ -731,20 +1003,28 @@ fn parse_silk_text(line: usize, tokens: &[String]) -> Result<Value, ParseError> 
         "rotation": 0.0,
         "anchor": "middle",
     });
-    apply_kv(&mut args, &tokens[5..], line, &[
-        ("size",   AttrType::NumInto("size_mm")),
-        ("rot",    AttrType::NumInto("rotation")),
-        ("anchor", AttrType::Str),
-        ("width",  AttrType::NumInto("width_mm")),
-    ])?;
+    apply_kv(
+        &mut args,
+        &tokens[5..],
+        line,
+        &[
+            ("size", AttrType::NumInto("size_mm")),
+            ("rot", AttrType::NumInto("rotation")),
+            ("anchor", AttrType::Str),
+            ("width", AttrType::NumInto("width_mm")),
+        ],
+    )?;
     Ok(args)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 
-fn need_args(line: usize, tokens: &[String], min_after_verb: usize, usage: &str)
-    -> Result<(), ParseError>
-{
+fn need_args(
+    line: usize,
+    tokens: &[String],
+    min_after_verb: usize,
+    usage: &str,
+) -> Result<(), ParseError> {
     if tokens.len() <= min_after_verb {
         Err(ParseError::at(line, format!("expected `{usage}`")))
     } else {
@@ -759,11 +1039,16 @@ fn parse_num(s: &str, line: usize, label: &str) -> Result<f64, ParseError> {
 
 fn expand_side(s: &str, line: usize) -> Result<String, ParseError> {
     Ok(match s.to_ascii_lowercase().as_str() {
-        "l" | "left"   => "left".into(),
-        "r" | "right"  => "right".into(),
-        "t" | "top"    => "top".into(),
+        "l" | "left" => "left".into(),
+        "r" | "right" => "right".into(),
+        "t" | "top" => "top".into(),
         "b" | "bottom" => "bottom".into(),
-        other => return Err(ParseError::at(line, format!("side: expected L/R/T/B (or full names), got `{other}`"))),
+        other => {
+            return Err(ParseError::at(
+                line,
+                format!("side: expected L/R/T/B (or full names), got `{other}`"),
+            ))
+        }
     })
 }
 
@@ -772,44 +1057,59 @@ fn expand_side(s: &str, line: usize) -> Result<String, ParseError> {
 /// terse in long pin lists.
 fn canonical_pin_role(s: &str, line: usize) -> Result<String, ParseError> {
     Ok(match s.to_ascii_lowercase().as_str() {
-        "passive" | "p"             => "passive".into(),
-        "input"   | "in"            => "input".into(),
-        "output"  | "out"           => "output".into(),
-        "bidir"   | "io"            => "bidir".into(),
-        "power"   | "power_out" | "pwr" | "pwr_out" => "power_out".into(),
-        "power_in" | "pwr_in"       => "power_in".into(),
-        other => return Err(ParseError::at(
-            line,
-            format!("role: expected passive/input/output/bidir/power_out/power_in, got `{other}`"),
-        )),
+        "passive" | "p" => "passive".into(),
+        "input" | "in" => "input".into(),
+        "output" | "out" => "output".into(),
+        "bidir" | "io" => "bidir".into(),
+        "power" | "power_out" | "pwr" | "pwr_out" => "power_out".into(),
+        "power_in" | "pwr_in" => "power_in".into(),
+        other => {
+            return Err(ParseError::at(
+                line,
+                format!(
+                    "role: expected passive/input/output/bidir/power_out/power_in, got `{other}`"
+                ),
+            ))
+        }
     })
 }
 
 fn expand_kind(s: &str, line: usize) -> Result<String, ParseError> {
     Ok(match s {
-        "ic" | "generic_ic"   => "generic_ic".into(),
-        "r"  | "resistor"     => "resistor".into(),
-        "c"  | "capacitor"    => "capacitor".into(),
-        "l"  | "inductor"     => "inductor".into(),
-        "led"                 => "led".into(),
-        "d"  | "diode"        => "diode".into(),
-        other => return Err(ParseError::at(
-            line,
-            format!("kind: expected ic/r/c/l/led/d (or full names), got `{other}`"),
-        )),
+        "ic" | "generic_ic" => "generic_ic".into(),
+        "r" | "resistor" => "resistor".into(),
+        "c" | "capacitor" => "capacitor".into(),
+        "l" | "inductor" => "inductor".into(),
+        "led" => "led".into(),
+        "d" | "diode" => "diode".into(),
+        other => {
+            return Err(ParseError::at(
+                line,
+                format!("kind: expected ic/r/c/l/led/d (or full names), got `{other}`"),
+            ))
+        }
     })
 }
 
 fn guess_mime(path: &str) -> String {
     let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") { "image/jpeg".into() }
-    else if lower.ends_with(".png") { "image/png".into() }
-    else if lower.ends_with(".gif") { "image/gif".into() }
-    else if lower.ends_with(".webp") { "image/webp".into() }
-    else if lower.ends_with(".pdf") { "application/pdf".into() }
-    else if lower.ends_with(".txt") { "text/plain".into() }
-    else if lower.ends_with(".md") { "text/markdown".into() }
-    else { "application/octet-stream".into() }
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg".into()
+    } else if lower.ends_with(".png") {
+        "image/png".into()
+    } else if lower.ends_with(".gif") {
+        "image/gif".into()
+    } else if lower.ends_with(".webp") {
+        "image/webp".into()
+    } else if lower.ends_with(".pdf") {
+        "application/pdf".into()
+    } else if lower.ends_with(".txt") {
+        "text/plain".into()
+    } else if lower.ends_with(".md") {
+        "text/markdown".into()
+    } else {
+        "application/octet-stream".into()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -840,20 +1140,25 @@ fn apply_kv(
     let obj = args.as_object_mut().expect("args must be a JSON object");
     for tok in tokens {
         let Some((k, v)) = tok.split_once('=') else {
-            return Err(ParseError::at(line, format!(
-                "expected key=value for trailing args, got `{tok}`"
-            )));
+            return Err(ParseError::at(
+                line,
+                format!("expected key=value for trailing args, got `{tok}`"),
+            ));
         };
         let Some((_, ty)) = allowed.iter().find(|(name, _)| *name == k) else {
             let names: Vec<&str> = allowed.iter().map(|(n, _)| *n).collect();
-            return Err(ParseError::at(line, format!(
-                "unknown attribute `{k}`; allowed: {}",
-                names.join(", "),
-            )));
+            return Err(ParseError::at(
+                line,
+                format!("unknown attribute `{k}`; allowed: {}", names.join(", "),),
+            ));
         };
         match ty {
-            AttrType::Str => { obj.insert(k.into(), Value::String(v.into())); }
-            AttrType::StrInto(target) => { obj.insert((*target).into(), Value::String(v.into())); }
+            AttrType::Str => {
+                obj.insert(k.into(), Value::String(v.into()));
+            }
+            AttrType::StrInto(target) => {
+                obj.insert((*target).into(), Value::String(v.into()));
+            }
             AttrType::Num => {
                 let n = parse_num(v, line, k)?;
                 obj.insert(k.into(), json!(n));
@@ -877,9 +1182,14 @@ fn apply_kv(
 
 fn parse_bool(s: &str, line: usize, k: &str) -> Result<bool, ParseError> {
     Ok(match s.to_ascii_lowercase().as_str() {
-        "true"  | "1" | "yes" => true,
-        "false" | "0" | "no"  => false,
-        other => return Err(ParseError::at(line, format!("{k}: expected true/false, got `{other}`"))),
+        "true" | "1" | "yes" => true,
+        "false" | "0" | "no" => false,
+        other => {
+            return Err(ParseError::at(
+                line,
+                format!("{k}: expected true/false, got `{other}`"),
+            ))
+        }
     })
 }
 
@@ -894,7 +1204,12 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         let cmd = &cmds[0];
         assert_eq!(cmd.tool, "library.create");
-        let silk = cmd.args.get("silk").expect("silk array").as_array().expect("array");
+        let silk = cmd
+            .args
+            .get("silk")
+            .expect("silk array")
+            .as_array()
+            .expect("array");
         assert_eq!(silk.len(), 3, "expected two lines + one text, got {silk:?}");
         // Two lines first.
         assert_eq!(silk[0]["kind"], "line");

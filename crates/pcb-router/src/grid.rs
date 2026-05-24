@@ -188,7 +188,11 @@ impl Grid {
                 let net = pad.net.as_deref().and_then(net_id_of);
                 for r in cmin.row..=cmax.row {
                     for c in cmin.col..=cmax.col {
-                        let gp = GridPoint { layer, col: c, row: r };
+                        let gp = GridPoint {
+                            layer,
+                            col: c,
+                            row: r,
+                        };
                         if !self.in_bounds(gp) {
                             continue;
                         }
@@ -211,13 +215,7 @@ impl Grid {
     /// `halo` of cells around it on the same layer so foreign nets
     /// can't run flush against this one. The halo radius is the
     /// router's clearance converted to grid cells.
-    pub fn stamp_trace(
-        &mut self,
-        a: GridPoint,
-        b: GridPoint,
-        net: u32,
-        halo: i32,
-    ) {
+    pub fn stamp_trace(&mut self, a: GridPoint, b: GridPoint, net: u32, halo: i32) {
         debug_assert_eq!(a.layer, b.layer);
         let layer = a.layer;
         let (mut c, mut r) = (a.col, a.row);
@@ -258,7 +256,11 @@ impl Grid {
     fn stamp_cell_with_halo(&mut self, layer: u8, c: i32, r: i32, net: u32, halo: i32) {
         // Centre cell: Trace(net) — walkable by the same net so star
         // routes can share path along the trunk.
-        let centre = GridPoint { layer, col: c, row: r };
+        let centre = GridPoint {
+            layer,
+            col: c,
+            row: r,
+        };
         if matches!(self.get(centre), Cell::Free) {
             self.set(centre, Cell::Trace(net));
         }

@@ -105,7 +105,10 @@ fn write_grid(svg: &mut String, view: (f64, f64, f64, f64)) {
         let _ = write!(
             svg,
             r##"<line x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}"/>"##,
-            x, vy, x, vy + vh
+            x,
+            vy,
+            x,
+            vy + vh
         );
         x += step;
     }
@@ -114,7 +117,10 @@ fn write_grid(svg: &mut String, view: (f64, f64, f64, f64)) {
         let _ = write!(
             svg,
             r##"<line x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}"/>"##,
-            vx, y, vx + vw, y
+            vx,
+            y,
+            vx + vw,
+            y
         );
         y += step;
     }
@@ -155,7 +161,14 @@ fn write_symbol(svg: &mut String, schematic: &Schematic, sym: &Symbol) {
     let pins = sym.kind.pins();
     let mut idx_per_side = SideCounter::default();
     for pin in &pins {
-        write_pin(svg, schematic, sym, pin, (bx, by, bw, bh), &mut idx_per_side);
+        write_pin(
+            svg,
+            schematic,
+            sym,
+            pin,
+            (bx, by, bw, bh),
+            &mut idx_per_side,
+        );
     }
 }
 
@@ -196,7 +209,15 @@ fn write_pin(
     let (start_x, start_y, end_x, end_y, label_x, label_y, label_anchor) = match pin.side {
         PinSide::Left => {
             let y = by + PIN_PITCH_MM * (i_f + 1.0);
-            (bx, y, bx - PIN_LEN_MM, y, bx - PIN_LEN_MM - 0.4, y + 0.4, "end")
+            (
+                bx,
+                y,
+                bx - PIN_LEN_MM,
+                y,
+                bx - PIN_LEN_MM - 0.4,
+                y + 0.4,
+                "end",
+            )
         }
         PinSide::Right => {
             let y = by + PIN_PITCH_MM * (i_f + 1.0);
@@ -212,7 +233,15 @@ fn write_pin(
         }
         PinSide::Top => {
             let x = bx + PIN_PITCH_MM * (i_f + 1.0);
-            (x, by, x, by - PIN_LEN_MM, x, by - PIN_LEN_MM - 0.4, "middle")
+            (
+                x,
+                by,
+                x,
+                by - PIN_LEN_MM,
+                x,
+                by - PIN_LEN_MM - 0.4,
+                "middle",
+            )
         }
         PinSide::Bottom => {
             let x = bx + PIN_PITCH_MM * (i_f + 1.0);

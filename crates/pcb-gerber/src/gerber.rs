@@ -113,7 +113,11 @@ fn write_header(w: &mut impl Write, label: &str) -> io::Result<()> {
         _ => None,
     };
     writeln!(w, "G04 pcb {label}*")?;
-    writeln!(w, "%TF.GenerationSoftware,pcb,pcb-gerber,{}*%", env!("CARGO_PKG_VERSION"))?;
+    writeln!(
+        w,
+        "%TF.GenerationSoftware,pcb,pcb-gerber,{}*%",
+        env!("CARGO_PKG_VERSION")
+    )?;
     if let Some(func) = function {
         writeln!(w, "%TF.FileFunction,{func}*%")?;
         writeln!(w, "%TF.FilePolarity,Positive*%")?;
@@ -239,7 +243,9 @@ pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result
             if orphan_traces.contains(&trace.id) {
                 continue;
             }
-            let id = table.intern(Aperture::Round { d: trace.width + cl + cl });
+            let id = table.intern(Aperture::Round {
+                d: trace.width + cl + cl,
+            });
             void_draws.push((id, trace.start, trace.end));
         }
         for via in &board.vias {
@@ -252,7 +258,9 @@ pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result
             if orphan_vias.contains(&via.id) {
                 continue;
             }
-            let id = table.intern(Aperture::Round { d: via.diameter + cl + cl });
+            let id = table.intern(Aperture::Round {
+                d: via.diameter + cl + cl,
+            });
             void_flashes.push((id, via.position));
         }
     }
@@ -431,14 +439,14 @@ pub fn write_edge_cuts(board: &Board, w: &mut impl Write) -> io::Result<()> {
     // Path traversed CCW (looking at the board from the top): start
     // on the bottom edge just after the bottom-left arc and walk
     // counter-clockwise around the perimeter.
-    let p_bottom_start  = Point::new(xmin + r, ymin);
-    let p_bottom_end    = Point::new(xmax - r, ymin);
-    let p_right_start   = Point::new(xmax, ymin + r);
-    let p_right_end     = Point::new(xmax, ymax - r);
-    let p_top_start     = Point::new(xmax - r, ymax);
-    let p_top_end       = Point::new(xmin + r, ymax);
-    let p_left_start    = Point::new(xmin, ymax - r);
-    let p_left_end      = Point::new(xmin, ymin + r);
+    let p_bottom_start = Point::new(xmin + r, ymin);
+    let p_bottom_end = Point::new(xmax - r, ymin);
+    let p_right_start = Point::new(xmax, ymin + r);
+    let p_right_end = Point::new(xmax, ymax - r);
+    let p_top_start = Point::new(xmax - r, ymax);
+    let p_top_end = Point::new(xmin + r, ymax);
+    let p_left_start = Point::new(xmin, ymax - r);
+    let p_left_end = Point::new(xmin, ymin + r);
 
     move_to(w, p_bottom_start)?;
     line_to(w, p_bottom_end)?;
@@ -493,13 +501,8 @@ pub fn write_silk(board: &Board, side: Side, w: &mut impl Write) -> io::Result<(
     // stroke). Board-level text never overlaps a pad — pads belong to
     // footprints — so no clipping is needed.
     for txt in board.silk_texts.iter().filter(|t| t.layer == layer) {
-        let polys = hershey::text_polylines(
-            &txt.text,
-            txt.position,
-            txt.size,
-            txt.rotation,
-            txt.anchor,
-        );
+        let polys =
+            hershey::text_polylines(&txt.text, txt.position, txt.size, txt.rotation, txt.anchor);
         let stroke_w = if txt.width.0 > 0 {
             txt.width
         } else {
@@ -553,7 +556,8 @@ pub fn write_silk(board: &Board, side: Side, w: &mut impl Write) -> io::Result<(
             let id = table.intern(Aperture::Round { d: stroke_w });
             // Default label sits above the body, so it never crosses
             // a pad — emit polylines straight through.
-            let polys = hershey::text_polylines(primary, pos, size, fp.rotation, SilkAnchor::Middle);
+            let polys =
+                hershey::text_polylines(primary, pos, size, fp.rotation, SilkAnchor::Middle);
             for poly in polys {
                 draws.push((id, Stroke::Poly(poly)));
             }
@@ -616,7 +620,9 @@ pub fn write_silk(board: &Board, side: Side, w: &mut impl Write) -> io::Result<(
                                 draws.push((id, Stroke::Poly(poly)));
                             } else {
                                 for pair in poly.windows(2) {
-                                    for (a, b) in silk_clip::clip_segment(pair[0], pair[1], &pad_rects) {
+                                    for (a, b) in
+                                        silk_clip::clip_segment(pair[0], pair[1], &pad_rects)
+                                    {
                                         draws.push((id, Stroke::Seg(a, b)));
                                     }
                                 }

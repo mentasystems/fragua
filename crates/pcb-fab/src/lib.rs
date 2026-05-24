@@ -85,7 +85,7 @@ impl Provider {
     pub fn rules(self) -> FabRules {
         match self {
             Self::Jlcpcb => FabRules {
-                min_trace_width_mm: 0.127,    // 5 mil — JLCPCB std 2-layer
+                min_trace_width_mm: 0.127, // 5 mil — JLCPCB std 2-layer
                 min_clearance_mm: 0.127,
                 min_drill_mm: 0.20,
                 // Via annular ring: outer copper ring around the drill,
@@ -357,19 +357,17 @@ pub fn write_bom(
         Provider::Jlcpcb => {
             writeln!(w, "Comment,Designator,Footprint,LCSC Part #")?;
             for ((value, key), fps) in &groups {
-                let entry = if key.is_empty() { None } else { library_lookup(key) };
-                let footprint = fps
-                    .first()
-                    .map(|f| f.library.as_str())
-                    .unwrap_or("");
+                let entry = if key.is_empty() {
+                    None
+                } else {
+                    library_lookup(key)
+                };
+                let footprint = fps.first().map(|f| f.library.as_str()).unwrap_or("");
                 let lcsc = entry
                     .as_ref()
                     .and_then(|e| e.lcsc_id.as_deref())
                     .unwrap_or("");
-                let mpn = entry
-                    .as_ref()
-                    .and_then(|e| e.mpn.as_deref())
-                    .unwrap_or("");
+                let mpn = entry.as_ref().and_then(|e| e.mpn.as_deref()).unwrap_or("");
                 let comment = if mpn.is_empty() {
                     value.clone()
                 } else {
@@ -394,19 +392,17 @@ pub fn write_bom(
             // switching providers doesn't have to redo the format.
             writeln!(w, "Reference,Value,Footprint,Quantity,LCSC,MPN")?;
             for ((value, key), fps) in &groups {
-                let entry = if key.is_empty() { None } else { library_lookup(key) };
-                let footprint = fps
-                    .first()
-                    .map(|f| f.library.as_str())
-                    .unwrap_or("");
+                let entry = if key.is_empty() {
+                    None
+                } else {
+                    library_lookup(key)
+                };
+                let footprint = fps.first().map(|f| f.library.as_str()).unwrap_or("");
                 let lcsc = entry
                     .as_ref()
                     .and_then(|e| e.lcsc_id.as_deref())
                     .unwrap_or("");
-                let mpn = entry
-                    .as_ref()
-                    .and_then(|e| e.mpn.as_deref())
-                    .unwrap_or("");
+                let mpn = entry.as_ref().and_then(|e| e.mpn.as_deref()).unwrap_or("");
                 let mut refs: Vec<&str> = fps.iter().map(|f| f.reference.as_str()).collect();
                 refs.sort();
                 writeln!(
@@ -500,11 +496,7 @@ pub struct PackReport {
 /// written even when checks fail — the user can look at the partial
 /// output to debug. `blocking = true` flags whether the design is
 /// fab-ready or still has Errors to clean up.
-pub fn pack(
-    project: &Project,
-    provider: Provider,
-    out_dir: &Path,
-) -> Result<PackReport, String> {
+pub fn pack(project: &Project, provider: Provider, out_dir: &Path) -> Result<PackReport, String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("create out_dir: {e}"))?;
 
     // Snapshot the project so the zip reflects a single point in time
@@ -552,9 +544,9 @@ pub fn pack(
     let mut files: Vec<String> = Vec::new();
 
     let emit = |zip: &mut zip::ZipWriter<Cursor<Vec<u8>>>,
-                    files: &mut Vec<String>,
-                    name: String,
-                    body: &dyn Fn(&mut Vec<u8>) -> io::Result<()>|
+                files: &mut Vec<String>,
+                name: String,
+                body: &dyn Fn(&mut Vec<u8>) -> io::Result<()>|
      -> Result<(), String> {
         let mut buf = Vec::new();
         body(&mut buf).map_err(|e| format!("{name}: {e}"))?;
@@ -585,9 +577,12 @@ pub fn pack(
     emit(&mut zip, &mut files, format!("{stem}-B_SilkS.gbr"), &|w| {
         gerber::write_silk(&board, Side::Bottom, w)
     })?;
-    emit(&mut zip, &mut files, format!("{stem}-Edge_Cuts.gbr"), &|w| {
-        gerber::write_edge_cuts(&board, w)
-    })?;
+    emit(
+        &mut zip,
+        &mut files,
+        format!("{stem}-Edge_Cuts.gbr"),
+        &|w| gerber::write_edge_cuts(&board, w),
+    )?;
     emit(&mut zip, &mut files, format!("{stem}-PTH.drl"), &|w| {
         excellon::write(&board, true, w)
     })?;
@@ -624,7 +619,9 @@ pub fn pack(
         .into_inner();
     fs::write(&zip_path, &final_buf).map_err(|e| format!("write {}: {e}", zip_path.display()))?;
 
-    let board_size_mm = board.outline.map(|r: Rect| (r.width().to_mm(), r.height().to_mm()));
+    let board_size_mm = board
+        .outline
+        .map(|r: Rect| (r.width().to_mm(), r.height().to_mm()));
 
     Ok(PackReport {
         provider: provider.name().to_string(),
@@ -648,7 +645,12 @@ fn build_readme(
 ) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "Project: {project}");
-    let _ = writeln!(s, "Target fab: {} ({})", provider.name(), describe_provider(provider));
+    let _ = writeln!(
+        s,
+        "Target fab: {} ({})",
+        provider.name(),
+        describe_provider(provider)
+    );
     if let Some(o) = board.outline {
         let _ = writeln!(
             s,
@@ -656,7 +658,10 @@ fn build_readme(
             o.width().to_mm(),
             o.height().to_mm(),
             if board.outline_corner_radius.0 > 0 {
-                format!(", corner radius {:.2} mm", board.outline_corner_radius.to_mm())
+                format!(
+                    ", corner radius {:.2} mm",
+                    board.outline_corner_radius.to_mm()
+                )
             } else {
                 String::new()
             },
@@ -664,8 +669,16 @@ fn build_readme(
     }
     let _ = writeln!(s);
     let _ = writeln!(s, "── Validation ──────────────────────────────────────");
-    let _ = writeln!(s, "DRC : {} error(s), {} warning(s)", drc.error_count, drc.warning_count);
-    let _ = writeln!(s, "ERC : {} error(s), {} warning(s)", erc.error_count, erc.warning_count);
+    let _ = writeln!(
+        s,
+        "DRC : {} error(s), {} warning(s)",
+        drc.error_count, drc.warning_count
+    );
+    let _ = writeln!(
+        s,
+        "ERC : {} error(s), {} warning(s)",
+        erc.error_count, erc.warning_count
+    );
     let _ = writeln!(
         s,
         "Fab : {} error(s), {} warning(s) — checked against {} rules",
@@ -674,35 +687,69 @@ fn build_readme(
         provider.name(),
     );
     if blocking_reasons.is_empty() {
-        let _ = writeln!(s, "→ READY: no blocking errors. Upload the zip to the fab portal.");
+        let _ = writeln!(
+            s,
+            "→ READY: no blocking errors. Upload the zip to the fab portal."
+        );
     } else {
         let _ = writeln!(s, "→ NOT READY: {}", blocking_reasons.join("; "));
         let _ = writeln!(s, "  Fix the errors first, then re-run `pack`.");
     }
     let _ = writeln!(s);
     let _ = writeln!(s, "── Files ───────────────────────────────────────────");
-    let _ = writeln!(s, "  *.gbr  Gerber files (copper, soldermask, silk, edge cuts)");
+    let _ = writeln!(
+        s,
+        "  *.gbr  Gerber files (copper, soldermask, silk, edge cuts)"
+    );
     let _ = writeln!(s, "  *-PTH.drl, *-NPTH.drl  Excellon drill files");
-    let _ = writeln!(s, "  *-bom.csv  Bill of materials in {} format", provider.name());
+    let _ = writeln!(
+        s,
+        "  *-bom.csv  Bill of materials in {} format",
+        provider.name()
+    );
     let _ = writeln!(s, "  *-cpl.csv  Component placement / pick-and-place list");
     let _ = writeln!(s);
     let _ = writeln!(s, "── How to order ────────────────────────────────────");
     match provider {
         Provider::Jlcpcb => {
-            let _ = writeln!(s, "1. Go to https://cart.jlcpcb.com/quote and upload this zip.");
-            let _ = writeln!(s, "2. JLCPCB auto-detects the layers from the Gerber filenames.");
-            let _ = writeln!(s, "3. To enable SMT assembly, tick \"PCB Assembly\" and upload");
+            let _ = writeln!(
+                s,
+                "1. Go to https://cart.jlcpcb.com/quote and upload this zip."
+            );
+            let _ = writeln!(
+                s,
+                "2. JLCPCB auto-detects the layers from the Gerber filenames."
+            );
+            let _ = writeln!(
+                s,
+                "3. To enable SMT assembly, tick \"PCB Assembly\" and upload"
+            );
             let _ = writeln!(s, "   *-bom.csv as the BOM and *-cpl.csv as the CPL.");
         }
         Provider::Pcbway => {
-            let _ = writeln!(s, "1. Go to https://www.pcbway.com/orderonline.aspx and upload this zip.");
+            let _ = writeln!(
+                s,
+                "1. Go to https://www.pcbway.com/orderonline.aspx and upload this zip."
+            );
             let _ = writeln!(s, "2. PCBWay accepts the KiCad-default Gerber filenames.");
-            let _ = writeln!(s, "3. For assembly, attach *-bom.csv and *-cpl.csv at the SMT step.");
+            let _ = writeln!(
+                s,
+                "3. For assembly, attach *-bom.csv and *-cpl.csv at the SMT step."
+            );
         }
         Provider::Generic => {
-            let _ = writeln!(s, "Generic / KiCad-style outputs. Upload the zip to your fab of");
-            let _ = writeln!(s, "choice; almost all houses accept this layout. Adjust column");
-            let _ = writeln!(s, "names in *-bom.csv if your assembler requires a specific format.");
+            let _ = writeln!(
+                s,
+                "Generic / KiCad-style outputs. Upload the zip to your fab of"
+            );
+            let _ = writeln!(
+                s,
+                "choice; almost all houses accept this layout. Adjust column"
+            );
+            let _ = writeln!(
+                s,
+                "names in *-bom.csv if your assembler requires a specific format."
+            );
         }
     }
     s

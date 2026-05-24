@@ -154,7 +154,9 @@ pub struct Library {
 
 /// Default location: `~/.pcb-library/`. Created on first access.
 fn default_root() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     home.join(".pcb-library")
 }
 
@@ -204,8 +206,8 @@ impl Library {
     }
 
     fn save(&self, index: &LibraryIndex) -> Result<(), String> {
-        let bytes = serde_json::to_vec_pretty(index)
-            .map_err(|e| format!("library: serialise: {e}"))?;
+        let bytes =
+            serde_json::to_vec_pretty(index).map_err(|e| format!("library: serialise: {e}"))?;
         // Atomic-ish: write to .tmp then rename.
         let tmp = self.index_path.with_extension("json.tmp");
         fs::write(&tmp, &bytes).map_err(|e| format!("library: write {}: {e}", tmp.display()))?;
@@ -279,9 +281,10 @@ impl Library {
         data: &[u8],
     ) -> Result<Attachment, String> {
         let id = Uuid::new_v4().to_string();
-        let path = self.attachments_dir.join(format!("{}.{}", id, ext_for_mime(&mime)));
-        fs::write(&path, data)
-            .map_err(|e| format!("library: write {}: {e}", path.display()))?;
+        let path = self
+            .attachments_dir
+            .join(format!("{}.{}", id, ext_for_mime(&mime)));
+        fs::write(&path, data).map_err(|e| format!("library: write {}: {e}", path.display()))?;
         let att = Attachment {
             id,
             kind,

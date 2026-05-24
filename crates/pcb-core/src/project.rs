@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::board::{Board, CopperLayer, Footprint, Id, Pour, SilkLine, SilkText, Trace, Via};
 use crate::event::{ActivityLevel, Event, EventBus};
 use crate::geometry::{Point, Rect};
-use crate::units::Length;
 use crate::schematic::{Net, Schematic, Symbol};
+use crate::units::Length;
 
 /// Cheap-to-clone handle around the shared project state. Mutations
 /// land synchronously on `inner` and the matching `Event` is published
@@ -88,7 +88,11 @@ impl Project {
     /// only held for the time it takes to clone the string.
     #[must_use]
     pub fn name_owned(&self) -> String {
-        self.inner.read().expect("project lock poisoned").name.clone()
+        self.inner
+            .read()
+            .expect("project lock poisoned")
+            .name
+            .clone()
     }
 
     #[must_use]
@@ -99,7 +103,10 @@ impl Project {
     /// Activity log helper used everywhere we want the UI's activity
     /// panel to show what happened, with a severity tag.
     pub fn log(&self, level: ActivityLevel, message: impl Into<String>) {
-        self.bus.publish(Event::Activity { level, message: message.into() });
+        self.bus.publish(Event::Activity {
+            level,
+            message: message.into(),
+        });
     }
 
     /// Read the project state.
@@ -187,7 +194,10 @@ impl Project {
             inner.board.add_trace(trace);
             (inner.board.traces.len(), inner.board.vias.len())
         };
-        self.bus.publish(Event::RoutingChanged { trace_count, via_count });
+        self.bus.publish(Event::RoutingChanged {
+            trace_count,
+            via_count,
+        });
         id
     }
 
@@ -198,7 +208,10 @@ impl Project {
             inner.board.add_via(via);
             (inner.board.traces.len(), inner.board.vias.len())
         };
-        self.bus.publish(Event::RoutingChanged { trace_count, via_count });
+        self.bus.publish(Event::RoutingChanged {
+            trace_count,
+            via_count,
+        });
         id
     }
 
@@ -220,7 +233,10 @@ impl Project {
             inner.board.add_silk_line(line);
             (inner.board.silk_lines.len(), inner.board.silk_texts.len())
         };
-        self.bus.publish(Event::SilkChanged { line_count, text_count });
+        self.bus.publish(Event::SilkChanged {
+            line_count,
+            text_count,
+        });
     }
 
     /// Append a silk text item to the board.
@@ -230,7 +246,10 @@ impl Project {
             inner.board.add_silk_text(text);
             (inner.board.silk_lines.len(), inner.board.silk_texts.len())
         };
-        self.bus.publish(Event::SilkChanged { line_count, text_count });
+        self.bus.publish(Event::SilkChanged {
+            line_count,
+            text_count,
+        });
     }
 
     /// Remove a pour by `(net, layer)`. Returns true if one was removed.
@@ -265,11 +284,7 @@ impl Project {
         {
             let mut inner = self.inner.write().expect("project lock poisoned");
             let outline = inner.board.outline;
-            let mut salvaged: Vec<Footprint> = inner
-                .board
-                .footprints_in_order()
-                .cloned()
-                .collect();
+            let mut salvaged: Vec<Footprint> = inner.board.footprints_in_order().cloned().collect();
             for fp in salvaged.iter_mut() {
                 fp.position = Point::new(Length::from_mm(-100.0), Length::from_mm(-100.0));
             }
@@ -290,9 +305,15 @@ impl Project {
                 .footprints
                 .values()
                 .any(|f| f.reference == footprint.reference)
-                || inner.palette.iter().any(|f| f.reference == footprint.reference);
+                || inner
+                    .palette
+                    .iter()
+                    .any(|f| f.reference == footprint.reference);
             if already {
-                return Err(format!("reference {} already in palette or board", footprint.reference));
+                return Err(format!(
+                    "reference {} already in palette or board",
+                    footprint.reference
+                ));
             }
             inner.palette.push(footprint);
             inner.palette.len()
@@ -327,7 +348,9 @@ impl Project {
                 .footprints
                 .iter()
                 .filter(|(_, fp)| {
-                    let Some(bbox) = fp.bounds() else { return false; };
+                    let Some(bbox) = fp.bounds() else {
+                        return false;
+                    };
                     bbox.min.x.0 < outline.min.x.0
                         || bbox.max.x.0 > outline.max.x.0
                         || bbox.min.y.0 < outline.min.y.0
@@ -348,7 +371,9 @@ impl Project {
             self.bus.publish(Event::FootprintRemoved { id });
         }
         if !moved_refs.is_empty() {
-            self.bus.publish(Event::PaletteChanged { count: palette_count });
+            self.bus.publish(Event::PaletteChanged {
+                count: palette_count,
+            });
         }
         moved_refs
     }
@@ -386,8 +411,13 @@ impl Project {
         let _ = inner.board.add_footprint(fp);
         let palette_count = inner.palette.len();
         drop(inner);
-        self.bus.publish(Event::PaletteChanged { count: palette_count });
-        self.bus.publish(Event::FootprintAdded { id, reference: reference_string });
+        self.bus.publish(Event::PaletteChanged {
+            count: palette_count,
+        });
+        self.bus.publish(Event::FootprintAdded {
+            id,
+            reference: reference_string,
+        });
         Ok(id)
     }
 
@@ -474,7 +504,10 @@ impl Project {
             (before - (trace_count + via_count), trace_count, via_count)
         };
         if removed > 0 {
-            self.bus.publish(Event::RoutingChanged { trace_count, via_count });
+            self.bus.publish(Event::RoutingChanged {
+                trace_count,
+                via_count,
+            });
         }
         removed
     }
@@ -492,7 +525,10 @@ impl Project {
             )
         };
         if removed {
-            self.bus.publish(Event::RoutingChanged { trace_count, via_count });
+            self.bus.publish(Event::RoutingChanged {
+                trace_count,
+                via_count,
+            });
         }
         removed
     }
@@ -509,7 +545,10 @@ impl Project {
             )
         };
         if removed {
-            self.bus.publish(Event::RoutingChanged { trace_count, via_count });
+            self.bus.publish(Event::RoutingChanged {
+                trace_count,
+                via_count,
+            });
         }
         removed
     }
@@ -521,7 +560,10 @@ impl Project {
             let mut inner = self.inner.write().expect("project lock poisoned");
             inner.board.clear_routing();
         }
-        self.bus.publish(Event::RoutingChanged { trace_count: 0, via_count: 0 });
+        self.bus.publish(Event::RoutingChanged {
+            trace_count: 0,
+            via_count: 0,
+        });
     }
 
     pub fn add_symbol(&self, symbol: Symbol) -> Id {
@@ -584,7 +626,10 @@ impl Project {
         let name = net.name.clone();
         let connection_count = net.connections.len();
         drop(inner);
-        self.bus.publish(Event::NetChanged { name, connection_count });
+        self.bus.publish(Event::NetChanged {
+            name,
+            connection_count,
+        });
         Ok(())
     }
 
@@ -652,8 +697,9 @@ impl Project {
         let file: ProjectFile = serde_json::from_slice(&bytes).ok()?;
         let library = match crate::library::Library::open_default() {
             Ok(lib) => lib,
-            Err(_) => crate::library::Library::open_at(std::env::temp_dir().join("pcb-library"))
-                .ok()?,
+            Err(_) => {
+                crate::library::Library::open_at(std::env::temp_dir().join("pcb-library")).ok()?
+            }
         };
         let proj = Self {
             inner: Arc::new(RwLock::new(ProjectInner {
@@ -696,12 +742,10 @@ impl Project {
             s.push(".tmp");
             PathBuf::from(s)
         };
-        let bytes = serde_json::to_vec_pretty(&file)
-            .map_err(|e| format!("project: serialise: {e}"))?;
-        fs::write(&tmp, &bytes)
-            .map_err(|e| format!("project: write {}: {e}", tmp.display()))?;
-        fs::rename(&tmp, path)
-            .map_err(|e| format!("project: rename {}: {e}", path.display()))?;
+        let bytes =
+            serde_json::to_vec_pretty(&file).map_err(|e| format!("project: serialise: {e}"))?;
+        fs::write(&tmp, &bytes).map_err(|e| format!("project: write {}: {e}", tmp.display()))?;
+        fs::rename(&tmp, path).map_err(|e| format!("project: rename {}: {e}", path.display()))?;
         let final_path = path.to_path_buf();
         *self.save_path.write().expect("save_path lock poisoned") = Some(final_path.clone());
         Ok(final_path)
@@ -711,7 +755,10 @@ impl Project {
     /// is happening; the caller must `save_to_path` to persist.
     #[must_use]
     pub fn save_path(&self) -> Option<PathBuf> {
-        self.save_path.read().expect("save_path lock poisoned").clone()
+        self.save_path
+            .read()
+            .expect("save_path lock poisoned")
+            .clone()
     }
 
     /// Set (or clear) the autosave target without writing now.

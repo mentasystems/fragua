@@ -123,16 +123,31 @@ pub fn search(
                 if matches!(grid.get(p), Cell::Trace(n) if n == target_net) {
                     let state = State { p, dir: Dir::Start };
                     g_score.insert(state, 0);
-                    open.push(Node { f: h(p), g: 0, s: state });
+                    open.push(Node {
+                        f: h(p),
+                        g: 0,
+                        s: state,
+                    });
                     had_trace_source = true;
                 }
             }
         }
     }
-    let seed_g = if had_trace_source { SEED_FALLBACK_PENALTY } else { 0 };
-    let start_state = State { p: start, dir: Dir::Start };
+    let seed_g = if had_trace_source {
+        SEED_FALLBACK_PENALTY
+    } else {
+        0
+    };
+    let start_state = State {
+        p: start,
+        dir: Dir::Start,
+    };
     g_score.insert(start_state, seed_g);
-    open.push(Node { f: seed_g + h(start), g: seed_g, s: start_state });
+    open.push(Node {
+        f: seed_g + h(start),
+        g: seed_g,
+        s: start_state,
+    });
 
     while let Some(Node { s, g, .. }) = open.pop() {
         if s.p == target && matches!(grid.get(s.p), Cell::NetPad(n) if n == target_net) {
@@ -184,10 +199,18 @@ pub fn search(
             // cell when an alternative exists.
             if move_dir == Dir::Via {
                 let on_pad = matches!(
-                    grid.get(GridPoint { layer: 0, col: next_p.col, row: next_p.row }),
+                    grid.get(GridPoint {
+                        layer: 0,
+                        col: next_p.col,
+                        row: next_p.row
+                    }),
                     Cell::NetPad(_)
                 ) || matches!(
-                    grid.get(GridPoint { layer: 1, col: next_p.col, row: next_p.row }),
+                    grid.get(GridPoint {
+                        layer: 1,
+                        col: next_p.col,
+                        row: next_p.row
+                    }),
                     Cell::NetPad(_)
                 );
                 if on_pad {
@@ -197,14 +220,14 @@ pub fn search(
             // Bend penalty: same-layer turn that doesn't extend the
             // current run. After a via or from the start node we don't
             // count it (the next move always counts as "new" then).
-            if move_dir != Dir::Via
-                && s.dir != Dir::Start
-                && s.dir != Dir::Via
-                && s.dir != move_dir
+            if move_dir != Dir::Via && s.dir != Dir::Start && s.dir != Dir::Via && s.dir != move_dir
             {
                 step_cost += BEND_COST;
             }
-            let next = State { p: next_p, dir: move_dir };
+            let next = State {
+                p: next_p,
+                dir: move_dir,
+            };
             let tentative = g + step_cost;
             if tentative < *g_score.get(&next).unwrap_or(&u32::MAX) {
                 g_score.insert(next, tentative);
@@ -250,10 +273,45 @@ fn via_safe(grid: &Grid, p: GridPoint, target_net: u32, radius: i32) -> bool {
 
 fn neighbours(p: GridPoint) -> [(GridPoint, Dir); 5] {
     [
-        (GridPoint { layer: p.layer, col: p.col + 1, row: p.row }, Dir::Right),
-        (GridPoint { layer: p.layer, col: p.col - 1, row: p.row }, Dir::Left),
-        (GridPoint { layer: p.layer, col: p.col,     row: p.row + 1 }, Dir::Down),
-        (GridPoint { layer: p.layer, col: p.col,     row: p.row - 1 }, Dir::Up),
-        (GridPoint { layer: 1 - p.layer, col: p.col, row: p.row }, Dir::Via),
+        (
+            GridPoint {
+                layer: p.layer,
+                col: p.col + 1,
+                row: p.row,
+            },
+            Dir::Right,
+        ),
+        (
+            GridPoint {
+                layer: p.layer,
+                col: p.col - 1,
+                row: p.row,
+            },
+            Dir::Left,
+        ),
+        (
+            GridPoint {
+                layer: p.layer,
+                col: p.col,
+                row: p.row + 1,
+            },
+            Dir::Down,
+        ),
+        (
+            GridPoint {
+                layer: p.layer,
+                col: p.col,
+                row: p.row - 1,
+            },
+            Dir::Up,
+        ),
+        (
+            GridPoint {
+                layer: 1 - p.layer,
+                col: p.col,
+                row: p.row,
+            },
+            Dir::Via,
+        ),
     ]
 }

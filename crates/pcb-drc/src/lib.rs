@@ -283,12 +283,7 @@ fn check_trace_trace(board: &Board, opts: &DrcOptions, report: &mut DrcReport) {
     }
 }
 
-fn check_trace_pad(
-    board: &Board,
-    pads: &[PadGeom],
-    opts: &DrcOptions,
-    report: &mut DrcReport,
-) {
+fn check_trace_pad(board: &Board, pads: &[PadGeom], opts: &DrcOptions, report: &mut DrcReport) {
     for trace in &board.traces {
         let half = trace.width.to_mm() / 2.0;
         for pad in pads {
@@ -353,13 +348,21 @@ fn check_edge(
             continue;
         }
         let r = pad.rect;
-        let gap = edge_gap(r.min.x.to_mm(), r.min.y.to_mm(), r.max.x.to_mm(), r.max.y.to_mm());
+        let gap = edge_gap(
+            r.min.x.to_mm(),
+            r.min.y.to_mm(),
+            r.max.x.to_mm(),
+            r.max.y.to_mm(),
+        );
         if gap + 1e-6 < clr {
             let p = pad_center(r);
             report.push(Violation {
                 kind: ViolationKind::EdgeClearance,
                 severity: Severity::Error,
-                message: format!("pad {} touches edge: {gap:.3} mm < {clr:.3} mm", pad.label()),
+                message: format!(
+                    "pad {} touches edge: {gap:.3} mm < {clr:.3} mm",
+                    pad.label()
+                ),
                 x_mm: p.0,
                 y_mm: p.1,
                 involved: vec![pad.label()],
@@ -379,7 +382,10 @@ fn check_edge(
             report.push(Violation {
                 kind: ViolationKind::EdgeClearance,
                 severity: Severity::Error,
-                message: format!("trace {} touches edge: {gap:.3} mm < {clr:.3} mm", trace.net),
+                message: format!(
+                    "trace {} touches edge: {gap:.3} mm < {clr:.3} mm",
+                    trace.net
+                ),
                 x_mm: mx,
                 y_mm: my,
                 involved: vec![trace.net.clone()],
@@ -406,7 +412,9 @@ fn check_edge(
 
 fn check_unconnected_pads(board: &Board, pads: &[PadGeom], report: &mut DrcReport) {
     for pad in pads {
-        let Some(net) = pad.net else { continue; };
+        let Some(net) = pad.net else {
+            continue;
+        };
         // Acceptable: another same-net pad on the same layer overlaps
         // (rare, would mean pads butted together) OR a trace endpoint
         // of the same net touches the pad rect on the same layer OR
@@ -448,8 +456,7 @@ fn check_small_component_dangling(board: &Board, pads: &[PadGeom], report: &mut 
                 Some(net) => pads
                     .iter()
                     .find(|p| {
-                        p.fp_reference == fp.reference
-                            && p.pad_number == fp_pad.number.as_str()
+                        p.fp_reference == fp.reference && p.pad_number == fp_pad.number.as_str()
                     })
                     .is_some_and(|pg| {
                         pad_has_same_net_neighbour(pads, pg)
@@ -527,9 +534,7 @@ fn trace_touches_pad(board: &Board, pad: &PadGeom, net: &str) -> bool {
 /// ground for any pad on that net + layer. Cross-layer pads need a
 /// via to reach the pour — that case is handled by `via_touches_pad`.
 fn pour_covers_pad(pours: &[Pour], pad: &PadGeom, net: &str) -> bool {
-    pours
-        .iter()
-        .any(|p| p.net == net && p.layer == pad.layer)
+    pours.iter().any(|p| p.net == net && p.layer == pad.layer)
 }
 
 fn via_touches_pad(board: &Board, pad: &PadGeom, net: &str) -> bool {
@@ -585,7 +590,9 @@ fn check_routing_inefficient(board: &Board, opts: &DrcOptions, report: &mut DrcR
     let mut net_pads: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
     for fp in board.footprints.values() {
         for pad in &fp.pads {
-            let Some(net) = pad.net.as_deref() else { continue; };
+            let Some(net) = pad.net.as_deref() else {
+                continue;
+            };
             if pour_nets.contains(net) {
                 continue;
             }
@@ -737,12 +744,7 @@ fn point_segment_distance(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
     (ex * ex + ey * ey).sqrt()
 }
 
-fn segment_segment_distance(
-    a0: (f64, f64),
-    a1: (f64, f64),
-    b0: (f64, f64),
-    b1: (f64, f64),
-) -> f64 {
+fn segment_segment_distance(a0: (f64, f64), a1: (f64, f64), b0: (f64, f64), b1: (f64, f64)) -> f64 {
     if segments_intersect(a0, a1, b0, b1) {
         return 0.0;
     }
@@ -752,12 +754,7 @@ fn segment_segment_distance(
         .min(point_segment_distance(b1, a0, a1))
 }
 
-fn segments_intersect(
-    a0: (f64, f64),
-    a1: (f64, f64),
-    b0: (f64, f64),
-    b1: (f64, f64),
-) -> bool {
+fn segments_intersect(a0: (f64, f64), a1: (f64, f64), b0: (f64, f64), b1: (f64, f64)) -> bool {
     fn orient(p: (f64, f64), q: (f64, f64), r: (f64, f64)) -> f64 {
         (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0)
     }
@@ -774,9 +771,8 @@ fn segment_aabb_distance(a: (f64, f64), b: (f64, f64), rect: Rect) -> f64 {
     let rx1 = rect.max.x.to_mm();
     let ry1 = rect.max.y.to_mm();
     // If either endpoint is inside the rect → 0.
-    let endpoint_inside = |p: (f64, f64)| -> bool {
-        p.0 >= rx0 && p.0 <= rx1 && p.1 >= ry0 && p.1 <= ry1
-    };
+    let endpoint_inside =
+        |p: (f64, f64)| -> bool { p.0 >= rx0 && p.0 <= rx1 && p.1 >= ry0 && p.1 <= ry1 };
     if endpoint_inside(a) || endpoint_inside(b) {
         return 0.0;
     }

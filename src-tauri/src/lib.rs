@@ -177,22 +177,24 @@ fn library_state(state: State<'_, AppState>) -> serde_json::Value {
     let items: Vec<serde_json::Value> = entries
         .iter()
         .filter(|e| used.contains(&e.key))
-        .map(|e| serde_json::json!({
-            "key": e.key,
-            "description": e.description,
-            "default_value": e.default_value,
-            "default_rotation_deg": e.default_rotation_deg,
-            "edge_mounted": e.edge_mounted,
-            "pad_count": e.pads.len(),
-            "attachments": e.attachments.iter().map(|a| serde_json::json!({
-                "id": a.id,
-                "kind": a.kind,
-                "filename": a.filename,
-                "mime": a.mime,
-                "added_at": a.added_at,
-            })).collect::<Vec<_>>(),
-            "created_at": e.created_at,
-        }))
+        .map(|e| {
+            serde_json::json!({
+                "key": e.key,
+                "description": e.description,
+                "default_value": e.default_value,
+                "default_rotation_deg": e.default_rotation_deg,
+                "edge_mounted": e.edge_mounted,
+                "pad_count": e.pads.len(),
+                "attachments": e.attachments.iter().map(|a| serde_json::json!({
+                    "id": a.id,
+                    "kind": a.kind,
+                    "filename": a.filename,
+                    "mime": a.mime,
+                    "added_at": a.added_at,
+                })).collect::<Vec<_>>(),
+                "created_at": e.created_at,
+            })
+        })
         .collect();
     serde_json::json!({ "entries": items })
 }
@@ -226,30 +228,34 @@ fn component_info(
     let pads: Vec<serde_json::Value> = fp
         .pads
         .iter()
-        .map(|p| serde_json::json!({
-            "number": p.number,
-            "name": p.name,
-            "net": p.net,
-            "layer": match p.layer {
-                pcb_core::CopperLayer::Top => "top",
-                pcb_core::CopperLayer::Bottom => "bottom",
-            },
-        }))
+        .map(|p| {
+            serde_json::json!({
+                "number": p.number,
+                "name": p.name,
+                "net": p.net,
+                "layer": match p.layer {
+                    pcb_core::CopperLayer::Top => "top",
+                    pcb_core::CopperLayer::Bottom => "bottom",
+                },
+            })
+        })
         .collect();
 
-    let library = lib_entry.map(|e| serde_json::json!({
-        "key": e.key,
-        "description": e.description,
-        "default_value": e.default_value,
-        "edge_mounted": e.edge_mounted,
-        "pad_count": e.pads.len(),
-        "attachments": e.attachments.iter().map(|a| serde_json::json!({
-            "id": a.id,
-            "kind": a.kind,
-            "filename": a.filename,
-            "mime": a.mime,
-        })).collect::<Vec<_>>(),
-    }));
+    let library = lib_entry.map(|e| {
+        serde_json::json!({
+            "key": e.key,
+            "description": e.description,
+            "default_value": e.default_value,
+            "edge_mounted": e.edge_mounted,
+            "pad_count": e.pads.len(),
+            "attachments": e.attachments.iter().map(|a| serde_json::json!({
+                "id": a.id,
+                "kind": a.kind,
+                "filename": a.filename,
+                "mime": a.mime,
+            })).collect::<Vec<_>>(),
+        })
+    });
 
     Ok(serde_json::json!({
         "reference": fp.reference,
@@ -310,8 +316,14 @@ fn set_board_outline(
         return Err("dimensions must be at least 1 mm".to_string());
     }
     let outline = pcb_core::Rect::from_corners(
-        pcb_core::Point::new(pcb_core::Length::from_mm(0.0), pcb_core::Length::from_mm(0.0)),
-        pcb_core::Point::new(pcb_core::Length::from_mm(w_mm), pcb_core::Length::from_mm(h_mm)),
+        pcb_core::Point::new(
+            pcb_core::Length::from_mm(0.0),
+            pcb_core::Length::from_mm(0.0),
+        ),
+        pcb_core::Point::new(
+            pcb_core::Length::from_mm(w_mm),
+            pcb_core::Length::from_mm(h_mm),
+        ),
     );
     let radius = pcb_core::Length::from_mm(corner_radius_mm.unwrap_or(0.0).max(0.0));
     state.project.set_outline_with_radius(outline, radius);
@@ -358,10 +370,7 @@ fn rotate_footprint(
             .ok_or_else(|| format!("no footprint named {reference}"))?
     };
     let next = (current + degrees_delta).rem_euclid(360.0);
-    state
-        .project
-        .rotate_footprint(&reference, next)
-        .map(|_| ())
+    state.project.rotate_footprint(&reference, next).map(|_| ())
 }
 
 /// Move a footprint already on the board. Used by the UI's
@@ -451,9 +460,7 @@ fn run_router(state: State<'_, AppState>) -> Result<String, String> {
     let failed: Vec<&str> = report
         .per_net
         .iter()
-        .filter_map(|(n, o)| {
-            matches!(o, pcb_router::Outcome::Failed { .. }).then_some(n.as_str())
-        })
+        .filter_map(|(n, o)| matches!(o, pcb_router::Outcome::Failed { .. }).then_some(n.as_str()))
         .collect();
     let summary = if failed.is_empty() {
         format!(
@@ -469,9 +476,10 @@ fn run_router(state: State<'_, AppState>) -> Result<String, String> {
             failed.join(", ")
         )
     };
-    state
-        .project
-        .log(pcb_core::ActivityLevel::Info, format!("route.run: {summary}"));
+    state.project.log(
+        pcb_core::ActivityLevel::Info,
+        format!("route.run: {summary}"),
+    );
     Ok(summary)
 }
 
@@ -504,7 +512,6 @@ fn export_fab_pack(state: State<'_, AppState>) -> Result<String, String> {
     );
     Ok(dir.to_string_lossy().into_owned())
 }
-
 
 #[tauri::command]
 fn add_demo_resistor(state: State<'_, AppState>) {
@@ -573,7 +580,8 @@ pub fn run() {
         }),
         None => Project::new(""),
     };
-    let api_addr = std::env::var("FRAGUA_API_ADDR").unwrap_or_else(|_| API_DEFAULT_ADDR.to_string());
+    let api_addr =
+        std::env::var("FRAGUA_API_ADDR").unwrap_or_else(|_| API_DEFAULT_ADDR.to_string());
 
     let state = AppState {
         project: project.clone(),
@@ -681,12 +689,11 @@ fn spawn_autosave(project: Project) {
                 }
             }
             // Quiet period reached: write the user's file (if any).
-            let Some(target) = project.save_path() else { continue };
+            let Some(target) = project.save_path() else {
+                continue;
+            };
             if let Err(e) = project.save_to_path(&target) {
-                project.log(
-                    pcb_core::ActivityLevel::Error,
-                    format!("autosave: {e}"),
-                );
+                project.log(pcb_core::ActivityLevel::Error, format!("autosave: {e}"));
             }
         }
     });
@@ -696,9 +703,7 @@ fn is_persistable(ev: &pcb_core::Event) -> bool {
     use pcb_core::Event;
     !matches!(
         ev,
-        Event::Activity { .. }
-            | Event::PlacementProgress { .. }
-            | Event::LibraryChanged { .. }
+        Event::Activity { .. } | Event::PlacementProgress { .. } | Event::LibraryChanged { .. }
     )
 }
 
@@ -730,10 +735,7 @@ fn spawn_http_api(project: Project, addr: String) {
             let (sock, _peer) = match listener.accept().await {
                 Ok(t) => t,
                 Err(e) => {
-                    project_for_log.log(
-                        pcb_core::ActivityLevel::Warn,
-                        format!("api: accept: {e}"),
-                    );
+                    project_for_log.log(pcb_core::ActivityLevel::Warn, format!("api: accept: {e}"));
                     continue;
                 }
             };
@@ -761,7 +763,10 @@ mod http {
     pub async fn serve_one(mut sock: TcpStream, project: Project) -> std::io::Result<()> {
         let (head, body_start) = match read_head(&mut sock).await? {
             Some(parts) => parts,
-            None => return write_status(&mut sock, 400, "Bad Request", "text/plain", b"bad request").await,
+            None => {
+                return write_status(&mut sock, 400, "Bad Request", "text/plain", b"bad request")
+                    .await
+            }
         };
         let mut lines = head.split("\r\n");
         let request_line = lines.next().unwrap_or_default();
@@ -771,7 +776,10 @@ mod http {
 
         let mut content_length: usize = 0;
         for h in lines {
-            if let Some(rest) = h.strip_prefix("Content-Length:").or_else(|| h.strip_prefix("content-length:")) {
+            if let Some(rest) = h
+                .strip_prefix("Content-Length:")
+                .or_else(|| h.strip_prefix("content-length:"))
+            {
                 if let Ok(n) = rest.trim().parse::<usize>() {
                     content_length = n;
                 }
@@ -803,11 +811,21 @@ mod http {
         }
     }
 
-    async fn handle_save(sock: &mut TcpStream, project: &Project, body: &[u8]) -> std::io::Result<()> {
+    async fn handle_save(
+        sock: &mut TcpStream,
+        project: &Project,
+        body: &[u8],
+    ) -> std::io::Result<()> {
         let parsed: Value = match serde_json::from_slice(body) {
             Ok(v) => v,
             Err(e) => {
-                return write_text(sock, 400, "Bad Request", &format!("invalid json body: {e}\n")).await;
+                return write_text(
+                    sock,
+                    400,
+                    "Bad Request",
+                    &format!("invalid json body: {e}\n"),
+                )
+                .await;
             }
         };
         let path = match parsed.get("path").and_then(Value::as_str) {
@@ -832,11 +850,21 @@ mod http {
         }
     }
 
-    async fn handle_script(sock: &mut TcpStream, project: &Project, body: &[u8]) -> std::io::Result<()> {
+    async fn handle_script(
+        sock: &mut TcpStream,
+        project: &Project,
+        body: &[u8],
+    ) -> std::io::Result<()> {
         let args: Value = match serde_json::from_slice(body) {
             Ok(v) => v,
             Err(e) => {
-                return write_text(sock, 400, "Bad Request", &format!("invalid json body: {e}\n")).await;
+                return write_text(
+                    sock,
+                    400,
+                    "Bad Request",
+                    &format!("invalid json body: {e}\n"),
+                )
+                .await;
             }
         };
         match pcb_script::tools::dispatch(project, "script", &args).await {
@@ -848,8 +876,11 @@ mod http {
                 write_text(sock, 200, "OK", &text).await
             }
             Err(err) => {
-                let mut text = format!("script error ({code}): {msg}\n",
-                    code = err.code, msg = err.message);
+                let mut text = format!(
+                    "script error ({code}): {msg}\n",
+                    code = err.code,
+                    msg = err.message
+                );
                 if project.save_path().is_none() {
                     text.push_str(unsaved_warning());
                 }
@@ -865,10 +896,7 @@ mod http {
     ///   ...
     fn format_script_result(value: &Value) -> String {
         let mut out = String::new();
-        if let Some(summary) = value
-            .pointer("/content/0/text")
-            .and_then(Value::as_str)
-        {
+        if let Some(summary) = value.pointer("/content/0/text").and_then(Value::as_str) {
             out.push_str(summary);
             out.push('\n');
         }
@@ -887,9 +915,7 @@ mod http {
                         .unwrap_or_else(|| {
                             // Tool returned no text content: fall back to the
                             // structured result so the agent sees something.
-                            r.get("result")
-                                .map(|v| v.to_string())
-                                .unwrap_or_default()
+                            r.get("result").map(|v| v.to_string()).unwrap_or_default()
                         })
                 } else {
                     r.get("error")
@@ -945,7 +971,14 @@ script. After the first save, autosave rebinds to that path automatically.\n"
         reason: &str,
         body: &str,
     ) -> std::io::Result<()> {
-        write_status(sock, code, reason, "text/plain; charset=utf-8", body.as_bytes()).await
+        write_status(
+            sock,
+            code,
+            reason,
+            "text/plain; charset=utf-8",
+            body.as_bytes(),
+        )
+        .await
     }
 
     async fn write_status(

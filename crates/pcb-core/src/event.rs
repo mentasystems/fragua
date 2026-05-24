@@ -28,16 +28,25 @@ pub enum Event {
     /// A schematic symbol was added.
     SymbolAdded { id: Id, reference: String },
     /// The connections of a net were set or replaced.
-    NetChanged { name: String, connection_count: usize },
+    NetChanged {
+        name: String,
+        connection_count: usize,
+    },
     /// Routing (traces + vias) changed in bulk — typically emitted
     /// after a router pass or a manual clear.
-    RoutingChanged { trace_count: usize, via_count: usize },
+    RoutingChanged {
+        trace_count: usize,
+        via_count: usize,
+    },
     /// A copper pour was added or removed. Carries the resulting pour
     /// count so the UI can re-fetch and re-render.
     PoursChanged { count: usize },
     /// Silkscreen content was added or removed. Carries totals so the
     /// UI can refresh without a follow-up fetch.
-    SilkChanged { line_count: usize, text_count: usize },
+    SilkChanged {
+        line_count: usize,
+        text_count: usize,
+    },
     /// One frame of an in-progress auto-placement. Streamed several
     /// times per second so the UI can animate components settling.
     PlacementProgress { iteration: u32 },
@@ -50,7 +59,10 @@ pub enum Event {
     /// without an extra fetch.
     LibraryChanged { count: usize },
     /// Free-form activity log line for the UI's activity panel.
-    Activity { level: ActivityLevel, message: String },
+    Activity {
+        level: ActivityLevel,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

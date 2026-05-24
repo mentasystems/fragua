@@ -56,12 +56,7 @@ fn unconnected_pad_is_flagged() {
         Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
         Point::new(Length::from_mm(50.0), Length::from_mm(20.0)),
     ));
-    board.add_footprint(fp(
-        "R1",
-        10.0,
-        10.0,
-        vec![pad("1", 0.0, 0.0, Some("VCC"))],
-    ));
+    board.add_footprint(fp("R1", 10.0, 10.0, vec![pad("1", 0.0, 0.0, Some("VCC"))]));
     let report = run(&board, &DrcOptions::default());
     assert!(report
         .violations
@@ -76,12 +71,7 @@ fn trace_touching_pad_marks_pad_as_connected() {
         Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
         Point::new(Length::from_mm(50.0), Length::from_mm(20.0)),
     ));
-    board.add_footprint(fp(
-        "R1",
-        10.0,
-        10.0,
-        vec![pad("1", 0.0, 0.0, Some("VCC"))],
-    ));
+    board.add_footprint(fp("R1", 10.0, 10.0, vec![pad("1", 0.0, 0.0, Some("VCC"))]));
     board.add_trace(Trace {
         id: Id::new(),
         layer: CopperLayer::Top,

@@ -52,13 +52,24 @@ fn library_silk_propagates_to_spawned_footprint() {
             {"kind": "text", "layer": "top", "x_mm": 0.0, "y_mm": 1.5, "text": "{REF}", "size_mm": 1.0, "anchor": "middle"},
         ],
     });
-    block_on(pcb_script::tools::dispatch(&project, "library.create", &create_args))
-        .map_err(|e| e.message)
-        .expect("library.create");
+    block_on(pcb_script::tools::dispatch(
+        &project,
+        "library.create",
+        &create_args,
+    ))
+    .map_err(|e| e.message)
+    .expect("library.create");
 
     // Library entry should now expose the silk array.
-    let entry = project.library().find("test_two_pad").expect("entry stored");
-    assert_eq!(entry.silk.len(), 2, "library entry should carry both silk items");
+    let entry = project
+        .library()
+        .find("test_two_pad")
+        .expect("entry stored");
+    assert_eq!(
+        entry.silk.len(),
+        2,
+        "library entry should carry both silk items"
+    );
 
     // 2. Add a schematic symbol so palette.add_from_library can find it.
     block_on(pcb_script::tools::dispatch(
@@ -80,8 +91,14 @@ fn library_silk_propagates_to_spawned_footprint() {
 
     let snap = project.read();
     let palette = snap.palette();
-    let fp = palette.iter().find(|f| f.reference == "U1").expect("U1 in palette");
-    assert!(!fp.silk.is_empty(), "spawned footprint must carry library silk");
+    let fp = palette
+        .iter()
+        .find(|f| f.reference == "U1")
+        .expect("U1 in palette");
+    assert!(
+        !fp.silk.is_empty(),
+        "spawned footprint must carry library silk"
+    );
     assert_eq!(fp.silk.len(), 2);
     // First entry is the line on the top layer.
     match &fp.silk[0] {

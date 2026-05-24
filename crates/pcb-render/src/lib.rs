@@ -338,8 +338,14 @@ fn silk_text_bbox(
         max_y = max_y.max(wy);
     }
     Some(Rect::from_corners(
-        Point::new(pcb_core::Length::from_mm(min_x), pcb_core::Length::from_mm(min_y)),
-        Point::new(pcb_core::Length::from_mm(max_x), pcb_core::Length::from_mm(max_y)),
+        Point::new(
+            pcb_core::Length::from_mm(min_x),
+            pcb_core::Length::from_mm(min_y),
+        ),
+        Point::new(
+            pcb_core::Length::from_mm(max_x),
+            pcb_core::Length::from_mm(max_y),
+        ),
     ))
 }
 
@@ -397,13 +403,8 @@ fn safe_silk_text_pos(
 }
 
 fn write_silk_text(svg: &mut String, txt: &SilkText, suppress_in: &[Rect]) {
-    let segments = hershey::text_segments(
-        &txt.text,
-        txt.position,
-        txt.size,
-        txt.rotation,
-        txt.anchor,
-    );
+    let segments =
+        hershey::text_segments(&txt.text, txt.position, txt.size, txt.rotation, txt.anchor);
     let w = txt.width.to_mm();
     for (a, b) in segments {
         for (s, e) in silk_clip::clip_segment(a, b, suppress_in) {
@@ -525,10 +526,7 @@ fn view_rect(board: &Board) -> Rect {
     // to show.
     Rect::from_corners(
         pcb_core::Point::new(pcb_core::Length(0), pcb_core::Length(0)),
-        pcb_core::Point::new(
-            pcb_core::Length(50_000_000),
-            pcb_core::Length(50_000_000),
-        ),
+        pcb_core::Point::new(pcb_core::Length(50_000_000), pcb_core::Length(50_000_000)),
     )
 }
 
@@ -598,7 +596,11 @@ fn write_footprint(svg: &mut String, fp: &Footprint, pours: &[pcb_core::Pour]) {
         if pw < 0.8 || ph < 0.8 {
             continue;
         }
-        let label_text = if pad.name.is_empty() { pad.number.as_str() } else { pad.name.as_str() };
+        let label_text = if pad.name.is_empty() {
+            pad.number.as_str()
+        } else {
+            pad.name.as_str()
+        };
         // Heuristic font size: cap at ~half the pad's short side, then
         // shrink linearly with the label length so 4+ chars still fit.
         let chars = label_text.chars().count().max(1) as f64;
@@ -626,7 +628,10 @@ fn body_rect(fp: &Footprint) -> Option<Rect> {
         )
     });
     let first = iter.next()?;
-    Some(iter.fold(first, Rect::union).expand(pcb_core::Length::from_mm(0.4)))
+    Some(
+        iter.fold(first, Rect::union)
+            .expand(pcb_core::Length::from_mm(0.4)),
+    )
 }
 
 /// World-coord bounding box of the footprint body (pad bbox + 0.4 mm
@@ -639,7 +644,10 @@ fn world_body_rect(fp: &Footprint) -> Option<Rect> {
         Rect::from_center(c, w, h)
     });
     let first = iter.next()?;
-    Some(iter.fold(first, Rect::union).expand(pcb_core::Length::from_mm(0.4)))
+    Some(
+        iter.fold(first, Rect::union)
+            .expand(pcb_core::Length::from_mm(0.4)),
+    )
 }
 
 fn write_pad(svg: &mut String, pad: &Pad, pours: &[pcb_core::Pour]) {
@@ -675,7 +683,6 @@ fn write_pad(svg: &mut String, pad: &Pad, pours: &[pcb_core::Pour]) {
         );
     }
 }
-
 
 /// Draw the ratsnest: thin lines between every pair of pads on the
 /// same net, where no trace already routes that pair. Suppressed for
@@ -776,10 +783,10 @@ fn write_outline_handles(svg: &mut String, outline: Rect) {
     // Handle is a small square sitting on the edge midpoint.
     let s = (w.min(h) * 0.04).clamp(0.8, 3.0);
     let handles = [
-        ("top",    cx, outline.max.y.to_mm()),
+        ("top", cx, outline.max.y.to_mm()),
         ("bottom", cx, outline.min.y.to_mm()),
-        ("right",  outline.max.x.to_mm(), cy),
-        ("left",   outline.min.x.to_mm(), cy),
+        ("right", outline.max.x.to_mm(), cy),
+        ("left", outline.min.x.to_mm(), cy),
     ];
     for (edge, hx, hy) in handles {
         let cursor = match edge {
@@ -1259,7 +1266,13 @@ fn sanitize_id(s: &str) -> String {
     out
 }
 
-fn write_rect_stroke(svg: &mut String, rect: Rect, stroke: &str, width_mm: f64, corner_radius_mm: f64) {
+fn write_rect_stroke(
+    svg: &mut String,
+    rect: Rect,
+    stroke: &str,
+    width_mm: f64,
+    corner_radius_mm: f64,
+) {
     let r = corner_radius_mm.max(0.0);
     let _ = write!(
         svg,

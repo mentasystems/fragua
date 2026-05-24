@@ -137,9 +137,9 @@ pub fn place(
     movable: &[String],
     opts: &PlaceOptions,
 ) -> Result<PlaceReport, String> {
-    let outline = board
-        .outline
-        .ok_or_else(|| "auto-place needs a board outline; set one with `outline W H`".to_string())?;
+    let outline = board.outline.ok_or_else(|| {
+        "auto-place needs a board outline; set one with `outline W H`".to_string()
+    })?;
 
     // Resolve movable refs to ids, skipping unknowns. Capturing ids
     // up front means `movable` order doesn't matter and we don't
@@ -148,9 +148,7 @@ pub fn place(
     let mut starting_positions: HashMap<Id, Point> = HashMap::new();
     let mut skipped: Vec<String> = Vec::new();
     for r in movable {
-        let found = board
-            .footprints_in_order()
-            .find(|fp| fp.reference == *r);
+        let found = board.footprints_in_order().find(|fp| fp.reference == *r);
         match found {
             Some(fp) if fp.bounds().is_some() => {
                 movable_ids.push(fp.id);
@@ -177,12 +175,10 @@ pub fn place(
     // after a move (HPWL per net depends on min/max pad coords).
     let mut nets_of_id: HashMap<Id, Vec<String>> = HashMap::new();
     for id in &movable_ids {
-        let Some(fp) = board.footprints.get(id) else { continue };
-        let mut nets: Vec<String> = fp
-            .pads
-            .iter()
-            .filter_map(|p| p.net.clone())
-            .collect();
+        let Some(fp) = board.footprints.get(id) else {
+            continue;
+        };
+        let mut nets: Vec<String> = fp.pads.iter().filter_map(|p| p.net.clone()).collect();
         nets.sort();
         nets.dedup();
         nets_of_id.insert(*id, nets);
@@ -216,7 +212,8 @@ pub fn place(
         opts.seed
     });
 
-    let cooling = (opts.final_temp / opts.initial_temp).powf(1.0 / opts.max_iterations.max(1) as f64);
+    let cooling =
+        (opts.final_temp / opts.initial_temp).powf(1.0 / opts.max_iterations.max(1) as f64);
     let mut accepted = 0usize;
 
     for iter in 0..opts.max_iterations {
@@ -226,7 +223,9 @@ pub fn place(
         let step_mm = opts.max_step_mm * (1.0 - progress) + opts.min_step_mm * progress;
 
         let id = movable_ids[rng.next_usize() % movable_ids.len()];
-        let Some(fp) = board.footprints.get(&id) else { continue };
+        let Some(fp) = board.footprints.get(&id) else {
+            continue;
+        };
         let move_kind = if rng.next_u32() % 8 == 0 {
             // 1/8 of the moves try a 90° rotation in place — cheap way
             // to fix orientation without burning translation moves.
@@ -336,7 +335,9 @@ pub fn place(
 
     let mut moved: Vec<String> = Vec::new();
     for id in &movable_ids {
-        let Some(fp) = board.footprints.get(id) else { continue };
+        let Some(fp) = board.footprints.get(id) else {
+            continue;
+        };
         let start = starting_positions[id];
         let dx_mm = (fp.position.x.to_mm() - start.x.to_mm()).abs();
         let dy_mm = (fp.position.y.to_mm() - start.y.to_mm()).abs();
@@ -362,11 +363,18 @@ fn total_hpwl(board: &Board) -> f64 {
     let mut nets: HashMap<&str, [f64; 4]> = HashMap::new();
     for fp in board.footprints.values() {
         for pad in &fp.pads {
-            let Some(net) = pad.net.as_deref() else { continue };
+            let Some(net) = pad.net.as_deref() else {
+                continue;
+            };
             let center = fp.pad_world_center(pad);
             let x = center.x.to_mm();
             let y = center.y.to_mm();
-            let entry = nets.entry(net).or_insert([f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY]);
+            let entry = nets.entry(net).or_insert([
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+            ]);
             entry[0] = entry[0].min(x);
             entry[1] = entry[1].min(y);
             entry[2] = entry[2].max(x);
@@ -437,7 +445,9 @@ fn congestion_overflow(board: &Board, outline: pcb_core::Rect, res: u32) -> f64 
     let mut net_bbox: HashMap<&str, [f64; 4]> = HashMap::new();
     for fp in board.footprints.values() {
         for pad in &fp.pads {
-            let Some(net) = pad.net.as_deref() else { continue };
+            let Some(net) = pad.net.as_deref() else {
+                continue;
+            };
             let c = fp.pad_world_center(pad);
             let x = c.x.to_mm();
             let y = c.y.to_mm();
@@ -533,7 +543,9 @@ fn pair_gap_penalty(a: &Footprint, b: &Footprint, min_gap_mm: f64) -> f64 {
 /// when called in the SA loop because only one footprint moved per
 /// iteration; everything else is reused.
 fn footprint_gap_penalty(board: &Board, fp_id: Id, min_gap_mm: f64) -> f64 {
-    let Some(fp) = board.footprints.get(&fp_id) else { return 0.0 };
+    let Some(fp) = board.footprints.get(&fp_id) else {
+        return 0.0;
+    };
     board
         .footprints_in_order()
         .filter(|other| other.id != fp_id)
@@ -559,7 +571,9 @@ fn total_gap_penalty(board: &Board, min_gap_mm: f64) -> f64 {
 /// soft min-gap preference is enforced via the SA score, not by reject.
 fn would_overlap(board: &Board, probe: &Footprint, ignore_id: Option<Id>, gap_mm: f64) -> bool {
     let extra = Length::from_mm(gap_mm);
-    let Some(probe_bounds) = probe.bounds() else { return false };
+    let Some(probe_bounds) = probe.bounds() else {
+        return false;
+    };
     let probe_bounds = probe_bounds.expand(extra);
     for fp in board.footprints_in_order() {
         if Some(fp.id) == ignore_id {
@@ -576,7 +590,9 @@ fn would_overlap(board: &Board, probe: &Footprint, ignore_id: Option<Id>, gap_mm
 
 /// True if every corner of `probe`'s bbox sits inside `outline`.
 fn inside_outline(probe: &Footprint, outline: pcb_core::Rect) -> bool {
-    let Some(b) = probe.bounds() else { return false };
+    let Some(b) = probe.bounds() else {
+        return false;
+    };
     b.min.x.0 >= outline.min.x.0
         && b.min.y.0 >= outline.min.y.0
         && b.max.x.0 <= outline.max.x.0

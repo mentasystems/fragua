@@ -449,11 +449,13 @@ async fn tool_script(project: &Project, args: &Value) -> Result<Value, ToolError
         ActivityLevel::Info,
         format!("script: {ok_count} ok, {fail_count} failed"),
     );
-    Ok(text_result(format!("script: {ok_count} ok, {fail_count} failed")).with_data(json!({
-        "ok_count": ok_count,
-        "fail_count": fail_count,
-        "results": results,
-    })))
+    Ok(
+        text_result(format!("script: {ok_count} ok, {fail_count} failed")).with_data(json!({
+            "ok_count": ok_count,
+            "fail_count": fail_count,
+            "results": results,
+        })),
+    )
 }
 
 async fn tool_batch(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -499,11 +501,13 @@ async fn tool_batch(project: &Project, args: &Value) -> Result<Value, ToolError>
         ActivityLevel::Info,
         format!("batch: {ok_count} ok, {fail_count} failed"),
     );
-    Ok(text_result(format!("batch: {ok_count} ok, {fail_count} failed")).with_data(json!({
-        "ok_count": ok_count,
-        "fail_count": fail_count,
-        "results": results,
-    })))
+    Ok(
+        text_result(format!("batch: {ok_count} ok, {fail_count} failed")).with_data(json!({
+            "ok_count": ok_count,
+            "fail_count": fail_count,
+            "results": results,
+        })),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -534,10 +538,17 @@ fn tool_board_set_outline(project: &Project, args: &Value) -> Result<Value, Tool
             "board.set_outline: {:.1} × {:.1} mm{}",
             input.w_mm,
             input.h_mm,
-            if radius_mm > 0.0 { format!(" (radius {radius_mm:.2} mm)") } else { String::new() },
+            if radius_mm > 0.0 {
+                format!(" (radius {radius_mm:.2} mm)")
+            } else {
+                String::new()
+            },
         ),
     );
-    let mut text = format!("Board outline set to {:.1} × {:.1} mm", input.w_mm, input.h_mm);
+    let mut text = format!(
+        "Board outline set to {:.1} × {:.1} mm",
+        input.w_mm, input.h_mm
+    );
     if radius_mm > 0.0 {
         text.push_str(&format!(", corner radius {radius_mm:.2} mm"));
     }
@@ -692,10 +703,15 @@ fn tool_placement_add(project: &Project, args: &Value) -> Result<Value, ToolErro
     let id = project.add_footprint(footprint);
     project.log(
         ActivityLevel::Info,
-        format!("placement.add: {} at ({:.2}, {:.2}) mm", input.reference, input.x_mm, input.y_mm),
+        format!(
+            "placement.add: {} at ({:.2}, {:.2}) mm",
+            input.reference, input.x_mm, input.y_mm
+        ),
     );
-    Ok(text_result(format!("Placed {} ({})", input.reference, id.0))
-        .with_data(json!({ "id": id.0.to_string(), "reference": input.reference })))
+    Ok(
+        text_result(format!("Placed {} ({})", input.reference, id.0))
+            .with_data(json!({ "id": id.0.to_string(), "reference": input.reference })),
+    )
 }
 
 fn tool_view_snapshot(project: &Project) -> Result<Value, ToolError> {
@@ -771,14 +787,16 @@ fn tool_view_snapshot(project: &Project) -> Result<Value, ToolError> {
     let vias: Vec<Value> = board
         .vias
         .iter()
-        .map(|v| json!({
-            "id": v.id.0.to_string(),
-            "net": v.net,
-            "x_mm": v.position.x.to_mm(),
-            "y_mm": v.position.y.to_mm(),
-            "drill_mm": v.drill.to_mm(),
-            "diameter_mm": v.diameter.to_mm(),
-        }))
+        .map(|v| {
+            json!({
+                "id": v.id.0.to_string(),
+                "net": v.net,
+                "x_mm": v.position.x.to_mm(),
+                "y_mm": v.position.y.to_mm(),
+                "drill_mm": v.drill.to_mm(),
+                "diameter_mm": v.diameter.to_mm(),
+            })
+        })
         .collect();
 
     Ok(text_result(svg).with_data(json!({
@@ -846,7 +864,11 @@ fn tool_view_summary(project: &Project) -> Result<Value, ToolError> {
     let total_nets = nets.len();
     let unconnected_nets: usize = nets
         .iter()
-        .filter(|n| n["unconnected_pads"].as_array().map_or(false, |a| !a.is_empty()))
+        .filter(|n| {
+            n["unconnected_pads"]
+                .as_array()
+                .map_or(false, |a| !a.is_empty())
+        })
         .count();
 
     Ok(text_result(format!(
@@ -914,7 +936,9 @@ fn collect_net_status(board: &pcb_core::Board, sch: &pcb_core::schematic::Schema
         let mut connected_count = 0_usize;
         let mut unconnected = Vec::new();
         for conn in &net.connections {
-            let Some(symbol) = sch.symbols.get(&conn.symbol_id) else { continue; };
+            let Some(symbol) = sch.symbols.get(&conn.symbol_id) else {
+                continue;
+            };
             let pad_ref = format!("{}.{}", symbol.reference, conn.pin_number);
             let pin_name = symbol
                 .kind
@@ -923,8 +947,8 @@ fn collect_net_status(board: &pcb_core::Board, sch: &pcb_core::schematic::Schema
                 .find(|p| p.number == conn.pin_number)
                 .map(|p| p.name.clone())
                 .unwrap_or_default();
-            let is_unconnected = unconnected_pads
-                .contains(&(symbol.reference.clone(), conn.pin_number.clone()));
+            let is_unconnected =
+                unconnected_pads.contains(&(symbol.reference.clone(), conn.pin_number.clone()));
             if !is_unconnected {
                 connected_count += 1;
             } else {
@@ -953,14 +977,22 @@ fn tool_net_status(project: &Project) -> Result<Value, ToolError> {
     let nets = collect_net_status(snap.board(), snap.schematic());
     let unconnected: Vec<&str> = nets
         .iter()
-        .filter(|n| n["unconnected_pads"].as_array().map_or(false, |a| !a.is_empty()))
+        .filter(|n| {
+            n["unconnected_pads"]
+                .as_array()
+                .map_or(false, |a| !a.is_empty())
+        })
         .filter_map(|n| n["net"].as_str())
         .collect();
     Ok(text_result(format!(
         "{} nets total, {} with unconnected pads ({})",
         nets.len(),
         unconnected.len(),
-        if unconnected.is_empty() { "all clean".to_string() } else { unconnected.join(", ") },
+        if unconnected.is_empty() {
+            "all clean".to_string()
+        } else {
+            unconnected.join(", ")
+        },
     ))
     .with_data(json!({ "nets": nets })))
 }
@@ -1152,13 +1184,11 @@ fn tool_schematic_connect(project: &Project, args: &Value) -> Result<Value, Tool
         let sch = snap.schematic();
         for pin_ref in &input.pins {
             let (sym_ref, pin_token) = pin_ref.split_once('.').ok_or_else(|| {
-                ToolError::invalid_params(format!(
-                    "expected REF.PIN format, got {pin_ref:?}"
-                ))
+                ToolError::invalid_params(format!("expected REF.PIN format, got {pin_ref:?}"))
             })?;
-            let symbol = sch.find_by_reference(sym_ref).ok_or_else(|| {
-                ToolError::invalid_params(format!("unknown symbol {sym_ref}"))
-            })?;
+            let symbol = sch
+                .find_by_reference(sym_ref)
+                .ok_or_else(|| ToolError::invalid_params(format!("unknown symbol {sym_ref}")))?;
             // Accept either the pin number (e.g. "U1.16") or the pin
             // name (e.g. "U1.GPIO13"). Names are matched
             // case-insensitively to be forgiving with how the agent
@@ -1170,10 +1200,7 @@ fn tool_schematic_connect(project: &Project, args: &Value) -> Result<Value, Tool
                 .kind
                 .pins()
                 .iter()
-                .find(|p| {
-                    p.number == pin_token
-                        || p.name.eq_ignore_ascii_case(pin_token)
-                })
+                .find(|p| p.number == pin_token || p.name.eq_ignore_ascii_case(pin_token))
                 .map(|p| p.number.clone())
                 .unwrap_or_else(|| pin_token.to_string());
             connections.push(NetConnection {
@@ -1194,11 +1221,10 @@ fn tool_schematic_connect(project: &Project, args: &Value) -> Result<Value, Tool
         ActivityLevel::Info,
         format!("schematic.connect: {} ({} pin(s))", input.net, count),
     );
-    Ok(text_result(format!(
-        "Net {} now has {} connection(s)",
-        input.net, count
-    ))
-    .with_data(json!({ "net": input.net, "connection_count": count })))
+    Ok(
+        text_result(format!("Net {} now has {} connection(s)", input.net, count))
+            .with_data(json!({ "net": input.net, "connection_count": count })),
+    )
 }
 
 fn tool_schematic_status(project: &Project) -> Result<Value, ToolError> {
@@ -1293,7 +1319,10 @@ fn tool_palette_add(project: &Project, args: &Value) -> Result<Value, ToolError>
                             Length::from_mm(pad_plan.x_mm),
                             Length::from_mm(pad_plan.y_mm),
                         ),
-                        size: (Length::from_mm(pad_plan.w_mm), Length::from_mm(pad_plan.h_mm)),
+                        size: (
+                            Length::from_mm(pad_plan.w_mm),
+                            Length::from_mm(pad_plan.h_mm),
+                        ),
                         layer: pad_plan.layer.into(),
                         net,
                         drill: pad_plan.drill_mm.map(Length::from_mm),
@@ -1328,8 +1357,10 @@ fn tool_palette_add(project: &Project, args: &Value) -> Result<Value, ToolError>
         ActivityLevel::Info,
         format!("palette.add: {} component(s)", added.len()),
     );
-    Ok(text_result(format!("Added {} item(s) to palette", added.len()))
-        .with_data(json!({ "added": added })))
+    Ok(
+        text_result(format!("Added {} item(s) to palette", added.len()))
+            .with_data(json!({ "added": added })),
+    )
 }
 
 fn tool_palette_clear(project: &Project) -> Result<Value, ToolError> {
@@ -1348,11 +1379,7 @@ fn tool_palette_list(project: &Project) -> Result<Value, ToolError> {
             let (bw, bh) = bounds
                 .map(|r| (r.width().to_mm(), r.height().to_mm()))
                 .unwrap_or((0.0, 0.0));
-            let mut nets: Vec<&str> = fp
-                .pads
-                .iter()
-                .filter_map(|p| p.net.as_deref())
-                .collect();
+            let mut nets: Vec<&str> = fp.pads.iter().filter_map(|p| p.net.as_deref()).collect();
             nets.sort();
             nets.dedup();
             json!({
@@ -1367,11 +1394,10 @@ fn tool_palette_list(project: &Project) -> Result<Value, ToolError> {
             })
         })
         .collect();
-    Ok(text_result(format!(
-        "{} item(s) waiting in the palette",
-        entries.len()
-    ))
-    .with_data(json!({ "items": entries })))
+    Ok(
+        text_result(format!("{} item(s) waiting in the palette", entries.len()))
+            .with_data(json!({ "items": entries })),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -1405,31 +1431,57 @@ fn library_entry_summary(e: &pcb_core::LibraryEntry) -> Value {
 
 fn library_entry_full(e: &pcb_core::LibraryEntry) -> Value {
     let mut v = library_entry_summary(e);
-    let pads: Vec<Value> = e.pads.iter().map(|p| json!({
-        "number": p.number,
-        "name": p.name,
-        "x_mm": p.x_mm,
-        "y_mm": p.y_mm,
-        "w_mm": p.w_mm,
-        "h_mm": p.h_mm,
-    })).collect();
-    let silk: Vec<Value> = e.silk.iter().map(|s| match s {
-        LibrarySilk::Line { layer, x1_mm, y1_mm, x2_mm, y2_mm, width_mm } => json!({
-            "kind": "line",
-            "layer": layer_to_str_silk(*layer),
-            "x1_mm": x1_mm, "y1_mm": y1_mm, "x2_mm": x2_mm, "y2_mm": y2_mm,
-            "width_mm": width_mm,
-        }),
-        LibrarySilk::Text { layer, x_mm, y_mm, text, size_mm, rotation_deg, anchor, width_mm } => json!({
-            "kind": "text",
-            "layer": layer_to_str_silk(*layer),
-            "x_mm": x_mm, "y_mm": y_mm,
-            "text": text, "size_mm": size_mm,
-            "rotation_deg": rotation_deg,
-            "anchor": anchor_to_str(*anchor),
-            "width_mm": width_mm,
-        }),
-    }).collect();
+    let pads: Vec<Value> = e
+        .pads
+        .iter()
+        .map(|p| {
+            json!({
+                "number": p.number,
+                "name": p.name,
+                "x_mm": p.x_mm,
+                "y_mm": p.y_mm,
+                "w_mm": p.w_mm,
+                "h_mm": p.h_mm,
+            })
+        })
+        .collect();
+    let silk: Vec<Value> = e
+        .silk
+        .iter()
+        .map(|s| match s {
+            LibrarySilk::Line {
+                layer,
+                x1_mm,
+                y1_mm,
+                x2_mm,
+                y2_mm,
+                width_mm,
+            } => json!({
+                "kind": "line",
+                "layer": layer_to_str_silk(*layer),
+                "x1_mm": x1_mm, "y1_mm": y1_mm, "x2_mm": x2_mm, "y2_mm": y2_mm,
+                "width_mm": width_mm,
+            }),
+            LibrarySilk::Text {
+                layer,
+                x_mm,
+                y_mm,
+                text,
+                size_mm,
+                rotation_deg,
+                anchor,
+                width_mm,
+            } => json!({
+                "kind": "text",
+                "layer": layer_to_str_silk(*layer),
+                "x_mm": x_mm, "y_mm": y_mm,
+                "text": text, "size_mm": size_mm,
+                "rotation_deg": rotation_deg,
+                "anchor": anchor_to_str(*anchor),
+                "width_mm": width_mm,
+            }),
+        })
+        .collect();
     if let Some(obj) = v.as_object_mut() {
         obj.insert("pads".into(), Value::Array(pads));
         obj.insert("silk".into(), Value::Array(silk));
@@ -1450,7 +1502,14 @@ fn anchor_to_str(a: SilkAnchor) -> &'static str {
 /// already footprint-local mm; we just rebox into nanometre `Length`.
 fn library_silk_to_footprint(s: &LibrarySilk) -> FootprintSilk {
     match s {
-        LibrarySilk::Line { layer, x1_mm, y1_mm, x2_mm, y2_mm, width_mm } => FootprintSilk::Line {
+        LibrarySilk::Line {
+            layer,
+            x1_mm,
+            y1_mm,
+            x2_mm,
+            y2_mm,
+            width_mm,
+        } => FootprintSilk::Line {
             layer: *layer,
             start: Point::new(Length::from_mm(*x1_mm), Length::from_mm(*y1_mm)),
             end: Point::new(Length::from_mm(*x2_mm), Length::from_mm(*y2_mm)),
@@ -1485,7 +1544,9 @@ fn tool_library_list(project: &Project) -> Result<Value, ToolError> {
 }
 
 #[derive(Debug, Deserialize)]
-struct LibraryFindInput { key: String }
+struct LibraryFindInput {
+    key: String,
+}
 
 fn tool_library_find(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: LibraryFindInput = serde_json::from_value(args.clone())
@@ -1576,16 +1637,21 @@ enum LibrarySilkInput {
 impl From<LibrarySilkInput> for LibrarySilk {
     fn from(v: LibrarySilkInput) -> Self {
         match v {
-            LibrarySilkInput::Line { layer, x1_mm, y1_mm, x2_mm, y2_mm, width_mm } => {
-                LibrarySilk::Line {
-                    layer: layer.into(),
-                    x1_mm,
-                    y1_mm,
-                    x2_mm,
-                    y2_mm,
-                    width_mm,
-                }
-            }
+            LibrarySilkInput::Line {
+                layer,
+                x1_mm,
+                y1_mm,
+                x2_mm,
+                y2_mm,
+                width_mm,
+            } => LibrarySilk::Line {
+                layer: layer.into(),
+                x1_mm,
+                y1_mm,
+                x2_mm,
+                y2_mm,
+                width_mm,
+            },
             LibrarySilkInput::Text {
                 layer,
                 x_mm,
@@ -1612,15 +1678,19 @@ impl From<LibrarySilkInput> for LibrarySilk {
 fn tool_library_create(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: LibraryCreateInput = serde_json::from_value(args.clone())
         .map_err(|e| ToolError::invalid_params(format!("library.create: {e}")))?;
-    let pads = input.pads.into_iter().map(|p| pcb_core::LibraryPad {
-        number: p.number,
-        name: p.name,
-        x_mm: p.x_mm,
-        y_mm: p.y_mm,
-        w_mm: p.w_mm,
-        h_mm: p.h_mm,
-        drill_mm: p.drill_mm,
-    }).collect();
+    let pads = input
+        .pads
+        .into_iter()
+        .map(|p| pcb_core::LibraryPad {
+            number: p.number,
+            name: p.name,
+            x_mm: p.x_mm,
+            y_mm: p.y_mm,
+            w_mm: p.w_mm,
+            h_mm: p.h_mm,
+            drill_mm: p.drill_mm,
+        })
+        .collect();
     let silk: Vec<LibrarySilk> = input.silk.into_iter().map(Into::into).collect();
     let entry = pcb_core::LibraryEntry {
         key: input.key.clone(),
@@ -1640,10 +1710,16 @@ fn tool_library_create(project: &Project, args: &Value) -> Result<Value, ToolErr
         .upsert(entry)
         .map_err(ToolError::invalid_params)?;
     let count = project.library().list().len();
-    project.events().publish(pcb_core::Event::LibraryChanged { count });
+    project
+        .events()
+        .publish(pcb_core::Event::LibraryChanged { count });
     project.log(
         ActivityLevel::Info,
-        format!("library.create: {} ({} pads)", stored.key, stored.pads.len()),
+        format!(
+            "library.create: {} ({} pads)",
+            stored.key,
+            stored.pads.len()
+        ),
     );
     Ok(text_result(format!("Saved {}", stored.key)).with_data(library_entry_full(&stored)))
 }
@@ -1669,22 +1745,34 @@ fn tool_library_attach(project: &Project, args: &Value) -> Result<Value, ToolErr
         .attach(&input.key, input.kind, input.filename, input.mime, &bytes)
         .map_err(ToolError::invalid_params)?;
     let count = project.library().list().len();
-    project.events().publish(pcb_core::Event::LibraryChanged { count });
+    project
+        .events()
+        .publish(pcb_core::Event::LibraryChanged { count });
     project.log(
         ActivityLevel::Info,
-        format!("library.attach: {} ← {} ({} bytes)", input.key, att.filename, bytes.len()),
+        format!(
+            "library.attach: {} ← {} ({} bytes)",
+            input.key,
+            att.filename,
+            bytes.len()
+        ),
     );
-    Ok(text_result(format!("Attached {}", att.filename)).with_data(json!({
-        "id": att.id,
-        "kind": att.kind,
-        "filename": att.filename,
-        "mime": att.mime,
-        "added_at": att.added_at,
-    })))
+    Ok(
+        text_result(format!("Attached {}", att.filename)).with_data(json!({
+            "id": att.id,
+            "kind": att.kind,
+            "filename": att.filename,
+            "mime": att.mime,
+            "added_at": att.added_at,
+        })),
+    )
 }
 
 #[derive(Debug, Deserialize)]
-struct LibraryDeleteAttachmentInput { key: String, attachment_id: String }
+struct LibraryDeleteAttachmentInput {
+    key: String,
+    attachment_id: String,
+}
 
 fn tool_library_delete_attachment(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: LibraryDeleteAttachmentInput = serde_json::from_value(args.clone())
@@ -1695,14 +1783,25 @@ fn tool_library_delete_attachment(project: &Project, args: &Value) -> Result<Val
         .map_err(ToolError::invalid_params)?;
     if removed {
         let count = project.library().list().len();
-        project.events().publish(pcb_core::Event::LibraryChanged { count });
+        project
+            .events()
+            .publish(pcb_core::Event::LibraryChanged { count });
     }
-    Ok(text_result(if removed { "Attachment removed" } else { "No matching attachment" }.to_string())
-        .with_data(json!({ "removed": removed })))
+    Ok(text_result(
+        if removed {
+            "Attachment removed"
+        } else {
+            "No matching attachment"
+        }
+        .to_string(),
+    )
+    .with_data(json!({ "removed": removed })))
 }
 
 #[derive(Debug, Deserialize)]
-struct LibraryDeleteInput { key: String }
+struct LibraryDeleteInput {
+    key: String,
+}
 
 fn tool_library_delete(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: LibraryDeleteInput = serde_json::from_value(args.clone())
@@ -1713,11 +1812,23 @@ fn tool_library_delete(project: &Project, args: &Value) -> Result<Value, ToolErr
         .map_err(ToolError::invalid_params)?;
     if removed {
         let count = project.library().list().len();
-        project.events().publish(pcb_core::Event::LibraryChanged { count });
-        project.log(ActivityLevel::Info, format!("library.delete: {}", input.key));
+        project
+            .events()
+            .publish(pcb_core::Event::LibraryChanged { count });
+        project.log(
+            ActivityLevel::Info,
+            format!("library.delete: {}", input.key),
+        );
     }
-    Ok(text_result(if removed { "Entry removed" } else { "No matching entry" }.to_string())
-        .with_data(json!({ "removed": removed })))
+    Ok(text_result(
+        if removed {
+            "Entry removed"
+        } else {
+            "No matching entry"
+        }
+        .to_string(),
+    )
+    .with_data(json!({ "removed": removed })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1735,13 +1846,12 @@ struct PaletteAddFromLibraryInput {
 fn tool_palette_add_from_library(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: PaletteAddFromLibraryInput = serde_json::from_value(args.clone())
         .map_err(|e| ToolError::invalid_params(format!("palette.add_from_library: {e}")))?;
-    let entry = project
-        .library()
-        .find(&input.key)
-        .ok_or_else(|| ToolError::invalid_params(format!(
+    let entry = project.library().find(&input.key).ok_or_else(|| {
+        ToolError::invalid_params(format!(
             "palette.add_from_library: no library entry with key {}",
             input.key
-        )))?;
+        ))
+    })?;
 
     // Pull value/key/description/edge from the schematic symbol if it
     // exists, falling back to the library entry's defaults. The
@@ -1755,46 +1865,61 @@ fn tool_palette_add_from_library(project: &Project, args: &Value) -> Result<Valu
                 input.reference
             ))
         })?;
-        let value = input.value
+        let value = input
+            .value
             .clone()
             .filter(|s| !s.is_empty())
             .or_else(|| (!symbol.value.is_empty()).then(|| symbol.value.clone()))
             .unwrap_or_else(|| entry.default_value.clone());
-        let key_field = if symbol.key.is_empty() { input.key.clone() } else { symbol.key.clone() };
+        let key_field = if symbol.key.is_empty() {
+            input.key.clone()
+        } else {
+            symbol.key.clone()
+        };
         let description_field = if symbol.description.is_empty() {
             entry.description.clone()
         } else {
             symbol.description.clone()
         };
-        let pads: Vec<Pad> = entry.pads.iter().map(|p| {
-            // Library pads are numbered ("1", "2", ...) but the
-            // schematic side may use names ("A"/"K" for LEDs, "VBAT"
-            // for power pins). Look up by number first, then by the
-            // pad's name so net wiring survives across either
-            // convention.
-            let net = sch
-                .net_for_pin(symbol.id, &p.number)
-                .or_else(|| {
-                    if p.name.is_empty() {
-                        None
-                    } else {
-                        sch.net_for_pin(symbol.id, &p.name)
-                    }
-                })
-                .map(str::to_string);
-            Pad {
-                number: p.number.clone(),
-                name: p.name.clone(),
-                offset: Point::new(Length::from_mm(p.x_mm), Length::from_mm(p.y_mm)),
-                size: (Length::from_mm(p.w_mm), Length::from_mm(p.h_mm)),
-                layer: input.layer.into(),
-                net,
-                drill: p.drill_mm.map(Length::from_mm),
-            }
-        }).collect();
+        let pads: Vec<Pad> = entry
+            .pads
+            .iter()
+            .map(|p| {
+                // Library pads are numbered ("1", "2", ...) but the
+                // schematic side may use names ("A"/"K" for LEDs, "VBAT"
+                // for power pins). Look up by number first, then by the
+                // pad's name so net wiring survives across either
+                // convention.
+                let net = sch
+                    .net_for_pin(symbol.id, &p.number)
+                    .or_else(|| {
+                        if p.name.is_empty() {
+                            None
+                        } else {
+                            sch.net_for_pin(symbol.id, &p.name)
+                        }
+                    })
+                    .map(str::to_string);
+                Pad {
+                    number: p.number.clone(),
+                    name: p.name.clone(),
+                    offset: Point::new(Length::from_mm(p.x_mm), Length::from_mm(p.y_mm)),
+                    size: (Length::from_mm(p.w_mm), Length::from_mm(p.h_mm)),
+                    layer: input.layer.into(),
+                    net,
+                    drill: p.drill_mm.map(Length::from_mm),
+                }
+            })
+            .collect();
         // edge_mounted: schematic doesn't have this yet; just inherit
         // from library.
-        (value, key_field, description_field, pads, entry.edge_mounted)
+        (
+            value,
+            key_field,
+            description_field,
+            pads,
+            entry.edge_mounted,
+        )
     };
 
     let silk: Vec<FootprintSilk> = entry.silk.iter().map(library_silk_to_footprint).collect();
@@ -1812,13 +1937,20 @@ fn tool_palette_add_from_library(project: &Project, args: &Value) -> Result<Valu
         edge_mounted: edge_from_schematic,
         silk,
     };
-    project.palette_add(footprint).map_err(ToolError::invalid_params)?;
+    project
+        .palette_add(footprint)
+        .map_err(ToolError::invalid_params)?;
     project.log(
         ActivityLevel::Info,
-        format!("palette.add_from_library: {} ← {}", input.reference, input.key),
+        format!(
+            "palette.add_from_library: {} ← {}",
+            input.reference, input.key
+        ),
     );
-    Ok(text_result(format!("Spawned {} from {}", input.reference, input.key))
-        .with_data(json!({ "reference": input.reference, "key": input.key })))
+    Ok(
+        text_result(format!("Spawned {} from {}", input.reference, input.key))
+            .with_data(json!({ "reference": input.reference, "key": input.key })),
+    )
 }
 
 fn tool_place_from_palette(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -1903,14 +2035,13 @@ fn tool_placement_batch(project: &Project, args: &Value) -> Result<Value, ToolEr
         ActivityLevel::Info,
         format!("placement.batch: {ok_count} placed, {fail_count} failed"),
     );
-    Ok(text_result(format!(
-        "{ok_count} placed, {fail_count} failed"
-    ))
-    .with_data(json!({
-        "ok_count": ok_count,
-        "fail_count": fail_count,
-        "results": results,
-    })))
+    Ok(
+        text_result(format!("{ok_count} placed, {fail_count} failed")).with_data(json!({
+            "ok_count": ok_count,
+            "fail_count": fail_count,
+            "results": results,
+        })),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -1953,15 +2084,13 @@ fn tool_placement_rotate(project: &Project, args: &Value) -> Result<Value, ToolE
         ActivityLevel::Info,
         format!("placement.rotate: {} → {normalised:.0}°", input.reference),
     );
-    Ok(text_result(format!(
-        "Rotated {} to {normalised:.0}°",
-        input.reference
-    ))
-    .into())
+    Ok(text_result(format!("Rotated {} to {normalised:.0}°", input.reference)).into())
 }
 
 #[derive(Debug, Deserialize)]
-struct ClearNetInput { net: String }
+struct ClearNetInput {
+    net: String,
+}
 
 fn tool_route_clear_net(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: ClearNetInput = serde_json::from_value(args.clone())
@@ -1971,16 +2100,19 @@ fn tool_route_clear_net(project: &Project, args: &Value) -> Result<Value, ToolEr
         ActivityLevel::Info,
         format!("route.clear_net: {} ({} item(s))", input.net, removed),
     );
-    Ok(text_result(format!("Cleared {removed} item(s) from net {}", input.net))
-        .with_data(json!({"removed": removed})))
+    Ok(
+        text_result(format!("Cleared {removed} item(s) from net {}", input.net))
+            .with_data(json!({"removed": removed})),
+    )
 }
 
 #[derive(Debug, Deserialize)]
-struct DeleteByIdInput { id: String }
+struct DeleteByIdInput {
+    id: String,
+}
 
 fn parse_id(s: &str) -> Result<pcb_core::Id, ToolError> {
-    pcb_core::Id::parse(s)
-        .map_err(|e| ToolError::invalid_params(format!("invalid id {s}: {e}")))
+    pcb_core::Id::parse(s).map_err(|e| ToolError::invalid_params(format!("invalid id {s}: {e}")))
 }
 
 fn tool_route_delete_trace(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -1988,8 +2120,15 @@ fn tool_route_delete_trace(project: &Project, args: &Value) -> Result<Value, Too
         .map_err(|e| ToolError::invalid_params(format!("route.delete_trace: {e}")))?;
     let id = parse_id(&input.id)?;
     let ok = project.delete_trace(id);
-    Ok(text_result(if ok { "Trace removed" } else { "Trace not found" }.to_string())
-        .with_data(json!({"removed": ok})))
+    Ok(text_result(
+        if ok {
+            "Trace removed"
+        } else {
+            "Trace not found"
+        }
+        .to_string(),
+    )
+    .with_data(json!({"removed": ok})))
 }
 
 fn tool_route_delete_via(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -1997,10 +2136,11 @@ fn tool_route_delete_via(project: &Project, args: &Value) -> Result<Value, ToolE
         .map_err(|e| ToolError::invalid_params(format!("route.delete_via: {e}")))?;
     let id = parse_id(&input.id)?;
     let ok = project.delete_via(id);
-    Ok(text_result(if ok { "Via removed" } else { "Via not found" }.to_string())
-        .with_data(json!({"removed": ok})))
+    Ok(
+        text_result(if ok { "Via removed" } else { "Via not found" }.to_string())
+            .with_data(json!({"removed": ok})),
+    )
 }
-
 
 #[derive(Debug, Deserialize)]
 struct PadPlan {
@@ -2094,11 +2234,10 @@ fn tool_pour_add(project: &Project, args: &Value) -> Result<Value, ToolError> {
         ActivityLevel::Info,
         format!("pour.add {} on {:?}", input.net, layer),
     );
-    Ok(text_result(format!(
-        "Pour added: net={} layer={:?}",
-        input.net, layer
-    ))
-    .with_data(json!({"net": input.net, "layer": layer_to_str(layer)})))
+    Ok(
+        text_result(format!("Pour added: net={} layer={:?}", input.net, layer))
+            .with_data(json!({"net": input.net, "layer": layer_to_str(layer)})),
+    )
 }
 
 fn tool_pour_remove(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -2141,8 +2280,12 @@ struct SilkTextInput {
     width_mm: Option<f64>,
 }
 
-fn default_silk_width() -> f64 { 0.15 }
-fn default_silk_size() -> f64 { 1.2 }
+fn default_silk_width() -> f64 {
+    0.15
+}
+fn default_silk_size() -> f64 {
+    1.2
+}
 
 fn tool_silk_add_line(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: SilkLineInput = serde_json::from_value(args.clone())
@@ -2189,10 +2332,12 @@ fn tool_silk_add_text(project: &Project, args: &Value) -> Result<Value, ToolErro
         ActivityLevel::Info,
         format!("silk.add_text {:?} \"{}\"", layer, input.text),
     );
-    Ok(text_result(format!("Silk text added: \"{}\"", input.text)).with_data(json!({
-        "layer": layer_to_str_silk(layer),
-        "text": input.text,
-    })))
+    Ok(
+        text_result(format!("Silk text added: \"{}\"", input.text)).with_data(json!({
+            "layer": layer_to_str_silk(layer),
+            "text": input.text,
+        })),
+    )
 }
 
 fn layer_to_str_silk(layer: SilkLayer) -> &'static str {
@@ -2225,12 +2370,24 @@ struct RouteRunInput {
     via_diameter_mm: f64,
 }
 
-fn default_cell() -> f64 { 0.25 }
-fn default_trace_w() -> f64 { 0.25 }
-fn default_clearance() -> f64 { 0.20 }
-fn default_via_cost() -> u32 { 8 }
-fn default_via_drill() -> f64 { 0.30 }
-fn default_via_diameter() -> f64 { 0.60 }
+fn default_cell() -> f64 {
+    0.25
+}
+fn default_trace_w() -> f64 {
+    0.25
+}
+fn default_clearance() -> f64 {
+    0.20
+}
+fn default_via_cost() -> u32 {
+    8
+}
+fn default_via_drill() -> f64 {
+    0.30
+}
+fn default_via_diameter() -> f64 {
+    0.60
+}
 
 #[derive(Debug, Deserialize)]
 struct AutoPlaceInput {
@@ -2261,14 +2418,30 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
         .map_err(|e| ToolError::invalid_params(format!("auto-place: {e}")))?;
 
     let mut opts = pcb_placer::PlaceOptions::default();
-    if let Some(v) = input.iters { opts.max_iterations = v.max(0.0) as usize; }
-    if let Some(v) = input.seed { opts.seed = v.max(0.0) as u64; }
-    if let Some(v) = input.max_step_mm { opts.max_step_mm = v; }
-    if let Some(v) = input.min_step_mm { opts.min_step_mm = v; }
-    if let Some(v) = input.min_gap_mm { opts.min_gap_mm = v; }
-    if let Some(v) = input.gap_penalty_factor { opts.gap_penalty_factor = v; }
-    if let Some(v) = input.congestion_penalty_factor { opts.congestion_penalty_factor = v; }
-    if let Some(v) = input.congestion_resolution { opts.congestion_resolution = v.max(0.0) as u32; }
+    if let Some(v) = input.iters {
+        opts.max_iterations = v.max(0.0) as usize;
+    }
+    if let Some(v) = input.seed {
+        opts.seed = v.max(0.0) as u64;
+    }
+    if let Some(v) = input.max_step_mm {
+        opts.max_step_mm = v;
+    }
+    if let Some(v) = input.min_step_mm {
+        opts.min_step_mm = v;
+    }
+    if let Some(v) = input.min_gap_mm {
+        opts.min_gap_mm = v;
+    }
+    if let Some(v) = input.gap_penalty_factor {
+        opts.gap_penalty_factor = v;
+    }
+    if let Some(v) = input.congestion_penalty_factor {
+        opts.congestion_penalty_factor = v;
+    }
+    if let Some(v) = input.congestion_resolution {
+        opts.congestion_resolution = v.max(0.0) as u32;
+    }
 
     // Place on a clone so the project lock is released quickly. Apply
     // the resulting positions back through the regular `move_footprint_to`
@@ -2300,7 +2473,9 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
         else {
             continue;
         };
-        let Some(&id) = live_id_of_ref.get(r) else { continue };
+        let Some(&id) = live_id_of_ref.get(r) else {
+            continue;
+        };
         if project.move_footprint(id, target.position) {
             applied_moves += 1;
         }
@@ -2385,7 +2560,9 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         let sch = snap.schematic();
         let mut out = std::collections::HashMap::new();
         for (net_name, net) in &sch.nets {
-            let Some(class) = sch.class_for_net(net_name) else { continue };
+            let Some(class) = sch.class_for_net(net_name) else {
+                continue;
+            };
             let mut over = pcb_router::NetOverride::default();
             if let Some(w) = class.trace_width_mm {
                 over.trace_width = Some(Length::from_mm(w));
@@ -2493,11 +2670,7 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let hints_block = if report.hints.is_empty() {
         String::new()
     } else {
-        let lines: Vec<String> = report
-            .hints
-            .iter()
-            .map(|h| format!("  - {h}"))
-            .collect();
+        let lines: Vec<String> = report.hints.iter().map(|h| format!("  - {h}")).collect();
         format!("\nhints:\n{}", lines.join("\n"))
     };
     Ok(text_result(format!(
@@ -2553,22 +2726,36 @@ fn tool_drc_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         .map_err(|e| ToolError::invalid_params(format!("drc.run: {e}")))?;
 
     let mut opts = pcb_drc::DrcOptions::default();
-    if let Some(v) = input.min_clearance_mm { opts.min_clearance = Length::from_mm(v); }
-    if let Some(v) = input.edge_clearance_mm { opts.edge_clearance = Length::from_mm(v); }
-    if let Some(v) = input.min_trace_width_mm { opts.min_trace_width = Length::from_mm(v); }
-    if let Some(v) = input.min_drill_mm { opts.min_drill = Length::from_mm(v); }
-    if let Some(v) = input.routing_inefficient_ratio { opts.routing_inefficient_ratio = v; }
+    if let Some(v) = input.min_clearance_mm {
+        opts.min_clearance = Length::from_mm(v);
+    }
+    if let Some(v) = input.edge_clearance_mm {
+        opts.edge_clearance = Length::from_mm(v);
+    }
+    if let Some(v) = input.min_trace_width_mm {
+        opts.min_trace_width = Length::from_mm(v);
+    }
+    if let Some(v) = input.min_drill_mm {
+        opts.min_drill = Length::from_mm(v);
+    }
+    if let Some(v) = input.routing_inefficient_ratio {
+        opts.routing_inefficient_ratio = v;
+    }
 
     let snap = project.read();
     // Surface schematic net classes as DRC overrides so a class with
     // tighter clearance than the global default actually gets enforced.
     let sch = snap.schematic();
     for (net_name, _net) in &sch.nets {
-        let Some(class) = sch.class_for_net(net_name) else { continue };
+        let Some(class) = sch.class_for_net(net_name) else {
+            continue;
+        };
         if let Some(c) = class.clearance_mm {
             opts.net_overrides.insert(
                 net_name.clone(),
-                pcb_drc::NetOverride { clearance: Some(Length::from_mm(c)) },
+                pcb_drc::NetOverride {
+                    clearance: Some(Length::from_mm(c)),
+                },
             );
         }
     }
@@ -2637,8 +2824,12 @@ fn tool_schematic_set_class(project: &Project, args: &Value) -> Result<Value, To
     project.set_net_class(class);
     let mut text = format!("class {} set", input.name);
     let mut bits: Vec<String> = Vec::new();
-    if let Some(w) = input.trace_width_mm { bits.push(format!("width={w} mm")); }
-    if let Some(c) = input.clearance_mm { bits.push(format!("clearance={c} mm")); }
+    if let Some(w) = input.trace_width_mm {
+        bits.push(format!("width={w} mm"));
+    }
+    if let Some(c) = input.clearance_mm {
+        bits.push(format!("clearance={c} mm"));
+    }
     if !bits.is_empty() {
         text.push_str(&format!(" ({})", bits.join(", ")));
     }
@@ -2671,10 +2862,14 @@ fn materialize_class_pours(project: &Project) -> ClassPourSummary {
         .collect();
     let mut to_add: Vec<(String, CopperLayer)> = Vec::new();
     for (net_name, _net) in &sch.nets {
-        let Some(class) = sch.class_for_net(net_name) else { continue };
+        let Some(class) = sch.class_for_net(net_name) else {
+            continue;
+        };
         for layer in &class.pour_layers {
             if existing.contains(&(net_name.clone(), *layer)) {
-                summary.already_present.push(format!("{net_name}/{}", layer_to_str(*layer)));
+                summary
+                    .already_present
+                    .push(format!("{net_name}/{}", layer_to_str(*layer)));
             } else {
                 to_add.push((net_name.clone(), *layer));
             }
@@ -2682,7 +2877,10 @@ fn materialize_class_pours(project: &Project) -> ClassPourSummary {
     }
     drop(snap);
     for (net, layer) in to_add {
-        project.add_pour(Pour { net: net.clone(), layer });
+        project.add_pour(Pour {
+            net: net.clone(),
+            layer,
+        });
         summary.added.push(format!("{net}/{}", layer_to_str(layer)));
     }
     summary
@@ -2707,9 +2905,17 @@ fn tool_auto_pour(project: &Project, _args: &Value) -> Result<Value, ToolError> 
     let text = format!(
         "auto-pour: added {} ({}); already present {} ({})",
         summary.added.len(),
-        if summary.added.is_empty() { "—".to_string() } else { summary.added.join(", ") },
+        if summary.added.is_empty() {
+            "—".to_string()
+        } else {
+            summary.added.join(", ")
+        },
         summary.already_present.len(),
-        if summary.already_present.is_empty() { "—".to_string() } else { summary.already_present.join(", ") },
+        if summary.already_present.is_empty() {
+            "—".to_string()
+        } else {
+            summary.already_present.join(", ")
+        },
     );
     Ok(text_result(text).with_data(json!({
         "added": summary.added,
@@ -2734,10 +2940,11 @@ fn tool_fab_pack(project: &Project, args: &Value) -> Result<Value, ToolError> {
 
     let provider = match input.fab.as_deref() {
         None => pcb_fab::Provider::Jlcpcb,
-        Some(s) => pcb_fab::Provider::from_name(s)
-            .ok_or_else(|| ToolError::invalid_params(format!(
+        Some(s) => pcb_fab::Provider::from_name(s).ok_or_else(|| {
+            ToolError::invalid_params(format!(
                 "pack: unknown fab `{s}` — supported: jlcpcb, pcbway, generic"
-            )))?,
+            ))
+        })?,
     };
 
     let out_dir = match input.out_dir {
@@ -2780,7 +2987,11 @@ fn tool_fab_pack(project: &Project, args: &Value) -> Result<Value, ToolError> {
 
 fn tool_erc_run(project: &Project, _args: &Value) -> Result<Value, ToolError> {
     let snap = project.read();
-    let report = pcb_erc::run(snap.board(), snap.schematic(), &pcb_erc::ErcOptions::default());
+    let report = pcb_erc::run(
+        snap.board(),
+        snap.schematic(),
+        &pcb_erc::ErcOptions::default(),
+    );
     drop(snap);
 
     project.log(
@@ -2799,10 +3010,7 @@ fn tool_erc_run(project: &Project, _args: &Value) -> Result<Value, ToolError> {
         report.error_count, report.warning_count,
     );
     for v in report.violations.iter().take(6) {
-        summary.push_str(&format!(
-            "\n  [{:?}] {}",
-            v.severity, v.message,
-        ));
+        summary.push_str(&format!("\n  [{:?}] {}", v.severity, v.message,));
     }
     if report.violations.len() > 6 {
         summary.push_str(&format!(
@@ -2825,20 +3033,16 @@ fn tool_output_fab_pack(project: &Project, args: &Value) -> Result<Value, ToolEr
         .map_err(|e| ToolError::invalid_params(format!("output.fab_pack: {e}")))?;
 
     let snap = project.read();
-    let stem = input
-        .name
-        .unwrap_or_else(|| snap.name().to_string());
+    let stem = input.name.unwrap_or_else(|| snap.name().to_string());
     let out_dir = std::path::PathBuf::from(&input.out_dir);
 
-    let paths = pcb_gerber::write_fab_pack(snap.board(), &stem, &out_dir).map_err(|e| ToolError {
-        code: error_code::INTERNAL_ERROR,
-        message: format!("write_fab_pack: {e}"),
-    })?;
+    let paths =
+        pcb_gerber::write_fab_pack(snap.board(), &stem, &out_dir).map_err(|e| ToolError {
+            code: error_code::INTERNAL_ERROR,
+            message: format!("write_fab_pack: {e}"),
+        })?;
 
-    let path_strings: Vec<String> = paths
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect();
+    let path_strings: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
     project.log(
         ActivityLevel::Info,
         format!(

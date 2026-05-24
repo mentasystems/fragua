@@ -74,7 +74,9 @@ pub enum Outcome {
         /// (or the placement) made the net work harder than it should.
         lower_bound_mm: f64,
     },
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -198,10 +200,11 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
         for (name, outcome) in &report.per_net {
             match outcome {
                 Outcome::Failed { .. } => failed.push(name.clone()),
-                Outcome::Ok { length_mm, lower_bound_mm, .. }
-                    if *lower_bound_mm > 0.0
-                        && length_mm / lower_bound_mm > BAD_DETOUR_RATIO =>
-                {
+                Outcome::Ok {
+                    length_mm,
+                    lower_bound_mm,
+                    ..
+                } if *lower_bound_mm > 0.0 && length_mm / lower_bound_mm > BAD_DETOUR_RATIO => {
                     inefficient.push(name.clone());
                 }
                 _ => {}
@@ -238,7 +241,11 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
 
         let bad: std::collections::HashSet<String> =
             failed.iter().chain(inefficient.iter()).cloned().collect();
-        let rest: Vec<String> = order.iter().filter(|n| !bad.contains(*n)).cloned().collect();
+        let rest: Vec<String> = order
+            .iter()
+            .filter(|n| !bad.contains(*n))
+            .cloned()
+            .collect();
         order = failed.into_iter().chain(inefficient).chain(rest).collect();
     }
 
@@ -264,45 +271,45 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
 /// usually right: the failing/detoured nets are the ones with one or
 /// two pads geographically far from the cluster, and moving those is
 /// the lowest-effort fix.
-fn generate_hints(
-    report: &RouteReport,
-    nets: &BTreeMap<String, Vec<NetPadInfo>>,
-) -> Vec<String> {
+fn generate_hints(report: &RouteReport, nets: &BTreeMap<String, Vec<NetPadInfo>>) -> Vec<String> {
     let mut hints = Vec::new();
     for (net_name, outcome) in &report.per_net {
         let troubled = match outcome {
             Outcome::Failed { .. } => true,
-            Outcome::Ok { length_mm, lower_bound_mm, .. }
-                if *lower_bound_mm > 0.0 && length_mm / lower_bound_mm > 2.0 =>
-            {
-                true
-            }
+            Outcome::Ok {
+                length_mm,
+                lower_bound_mm,
+                ..
+            } if *lower_bound_mm > 0.0 && length_mm / lower_bound_mm > 2.0 => true,
             _ => false,
         };
         if !troubled {
             continue;
         }
-        let Some(pads) = nets.get(net_name) else { continue };
+        let Some(pads) = nets.get(net_name) else {
+            continue;
+        };
         if pads.len() < 2 {
             continue;
         }
         // Outlier = pad with max sum-Manhattan distance to all other
         // pads on the net. A central cluster has tight pairwise sums;
         // the outlier sticks out and dominates the bbox.
-        let outlier = pads
-            .iter()
-            .max_by_key(|p| {
-                pads.iter()
-                    .map(|q| {
-                        (p.center.x.0 - q.center.x.0).unsigned_abs()
-                            + (p.center.y.0 - q.center.y.0).unsigned_abs()
-                    })
-                    .sum::<u64>()
-            });
+        let outlier = pads.iter().max_by_key(|p| {
+            pads.iter()
+                .map(|q| {
+                    (p.center.x.0 - q.center.x.0).unsigned_abs()
+                        + (p.center.y.0 - q.center.y.0).unsigned_abs()
+                })
+                .sum::<u64>()
+        });
         if let Some(o) = outlier {
             // Reference is "REF.PIN"; the footprint reference is the
             // bit before the dot. Tell the agent that piece.
-            let fp_ref = o.pad_ref.split_once('.').map_or(o.pad_ref.as_str(), |(r, _)| r);
+            let fp_ref = o
+                .pad_ref
+                .split_once('.')
+                .map_or(o.pad_ref.as_str(), |(r, _)| r);
             let kind = if matches!(outcome, Outcome::Failed { .. }) {
                 "failed"
             } else {
@@ -412,7 +419,9 @@ fn route_pass(
         let mut c = opts.clearance;
         for o in opts.net_overrides.values() {
             if let Some(over) = o.clearance {
-                if over.0 > c.0 { c = over; }
+                if over.0 > c.0 {
+                    c = over;
+                }
             }
         }
         c
@@ -445,14 +454,13 @@ fn route_pass(
     // skip the router entirely — the pour itself is the electrical
     // connection, so adding traces is redundant copper that just
     // clutters the board.
-    let pour_nets: std::collections::HashSet<String> = board
-        .pours
-        .iter()
-        .map(|p| p.net.clone())
-        .collect();
+    let pour_nets: std::collections::HashSet<String> =
+        board.pours.iter().map(|p| p.net.clone()).collect();
 
     for net_name in order {
-        let Some(pad_points) = nets.get(net_name) else { continue };
+        let Some(pad_points) = nets.get(net_name) else {
+            continue;
+        };
         let net_id = net_id_of[net_name];
         if pour_nets.contains(net_name) {
             per_net.push((
@@ -628,12 +636,7 @@ fn hpwl_mm(pads: &[NetPadInfo]) -> f64 {
 /// route from these pads would naturally take becomes expensive — easy
 /// nets routed in the next pass detour around it, leaving a clear lane
 /// when the bad net itself runs (it's now first in `order`).
-fn bump_corridor(
-    snap_grid: &Grid,
-    cost_map: &mut CostMap,
-    pads: &[NetPadInfo],
-    amount: u32,
-) {
+fn bump_corridor(snap_grid: &Grid, cost_map: &mut CostMap, pads: &[NetPadInfo], amount: u32) {
     if pads.is_empty() {
         return;
     }
@@ -746,8 +749,8 @@ fn emit_trace(
     let push_trace = |board: &mut Board, grid: &mut Grid, s: GridPoint, e: GridPoint| -> f64 {
         let start = grid.unsnap(s);
         let end = grid.unsnap(e);
-        let len_mm = (start.x.to_mm() - end.x.to_mm()).abs()
-            + (start.y.to_mm() - end.y.to_mm()).abs();
+        let len_mm =
+            (start.x.to_mm() - end.x.to_mm()).abs() + (start.y.to_mm() - end.y.to_mm()).abs();
         let trace = Trace {
             id: pcb_core::Id::new(),
             layer,

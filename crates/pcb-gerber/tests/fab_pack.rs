@@ -108,10 +108,19 @@ fn fab_pack_writes_every_expected_file_and_each_is_well_formed() {
         "demo-Edge_Cuts.gbr",
     ] {
         let body = fs::read_to_string(dir.join(name)).unwrap();
-        assert!(body.starts_with("G04 pcb"), "{name}: missing header comment");
-        assert!(body.contains("%FSLAX46Y46*%"), "{name}: missing format spec");
+        assert!(
+            body.starts_with("G04 pcb"),
+            "{name}: missing header comment"
+        );
+        assert!(
+            body.contains("%FSLAX46Y46*%"),
+            "{name}: missing format spec"
+        );
         assert!(body.contains("%MOMM*%"), "{name}: missing units");
-        assert!(body.trim_end().ends_with("M02*"), "{name}: missing M02 footer");
+        assert!(
+            body.trim_end().ends_with("M02*"),
+            "{name}: missing M02 footer"
+        );
     }
 
     // Both copper sides should have 6 flashes (3 footprints × 2 pads on top side, 0 on bottom).
@@ -135,9 +144,18 @@ fn fab_pack_writes_every_expected_file_and_each_is_well_formed() {
     // segments. B.SilkS has no items here but still must contain
     // valid header + footer.
     let f_silk = fs::read_to_string(dir.join("demo-F_SilkS.gbr")).unwrap();
-    assert!(f_silk.contains("Legend,Top"), "expected X2 Legend,Top attribute");
-    assert!(f_silk.matches("D01*").count() > 0, "F.SilkS missing D01 lines: {f_silk}");
-    assert!(f_silk.matches("D02*").count() > 0, "F.SilkS missing D02 lines: {f_silk}");
+    assert!(
+        f_silk.contains("Legend,Top"),
+        "expected X2 Legend,Top attribute"
+    );
+    assert!(
+        f_silk.matches("D01*").count() > 0,
+        "F.SilkS missing D01 lines: {f_silk}"
+    );
+    assert!(
+        f_silk.matches("D02*").count() > 0,
+        "F.SilkS missing D02 lines: {f_silk}"
+    );
     let b_silk = fs::read_to_string(dir.join("demo-B_SilkS.gbr")).unwrap();
     assert!(b_silk.contains("Legend,Bot"));
 
@@ -150,8 +168,12 @@ fn fab_pack_writes_every_expected_file_and_each_is_well_formed() {
     let bom_lines: Vec<&str> = bom.lines().collect();
     assert_eq!(bom_lines[0], "Reference,Value,Footprint,Quantity");
     assert_eq!(bom_lines.len(), 3);
-    assert!(bom_lines.iter().any(|l| l.contains("R1 R2") && l.ends_with(",2")));
-    assert!(bom_lines.iter().any(|l| l.contains("R3") && l.ends_with(",1")));
+    assert!(bom_lines
+        .iter()
+        .any(|l| l.contains("R1 R2") && l.ends_with(",2")));
+    assert!(bom_lines
+        .iter()
+        .any(|l| l.contains("R3") && l.ends_with(",1")));
 
     // Positions: 1 header + 3 footprints.
     let pos = fs::read_to_string(dir.join("demo-pos.csv")).unwrap();

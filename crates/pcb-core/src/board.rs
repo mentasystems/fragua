@@ -14,9 +14,7 @@ use crate::units::Length;
 
 /// Stable identifier for any item the human or agent can address by name
 /// across script-API calls and UI events.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Id(pub Uuid);
 
 impl Id {
@@ -40,9 +38,7 @@ impl Default for Id {
 
 /// Copper layer slot. Phase 1 only models the two outer layers; inner
 /// layers are added when we tackle multi-layer routing.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CopperLayer {
     Top,
     Bottom,
@@ -52,9 +48,7 @@ pub enum CopperLayer {
 /// so the model can't conflate "copper top" with "silk top" (they
 /// share a side but are emitted as different Gerber files and
 /// rendered with different visual treatments).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SilkLayer {
     Top,
     Bottom,
@@ -63,9 +57,7 @@ pub enum SilkLayer {
 /// Horizontal anchor for a silk text run. Identical semantics to
 /// SVG's `text-anchor`: where on the rendered glyph ribbon the
 /// `position` point lands.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SilkAnchor {
     Start,
     Middle,

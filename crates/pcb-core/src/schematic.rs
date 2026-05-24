@@ -95,12 +95,32 @@ impl SymbolKind {
     pub fn pins(&self) -> Vec<SchPin> {
         match self {
             Self::Resistor | Self::Capacitor | Self::Inductor => vec![
-                SchPin { number: "1".into(), name: String::new(), side: PinSide::Left, role: PinRole::Passive },
-                SchPin { number: "2".into(), name: String::new(), side: PinSide::Right, role: PinRole::Passive },
+                SchPin {
+                    number: "1".into(),
+                    name: String::new(),
+                    side: PinSide::Left,
+                    role: PinRole::Passive,
+                },
+                SchPin {
+                    number: "2".into(),
+                    name: String::new(),
+                    side: PinSide::Right,
+                    role: PinRole::Passive,
+                },
             ],
             Self::Led | Self::Diode => vec![
-                SchPin { number: "A".into(), name: "A".into(), side: PinSide::Left, role: PinRole::Passive },
-                SchPin { number: "K".into(), name: "K".into(), side: PinSide::Right, role: PinRole::Passive },
+                SchPin {
+                    number: "A".into(),
+                    name: "A".into(),
+                    side: PinSide::Left,
+                    role: PinRole::Passive,
+                },
+                SchPin {
+                    number: "K".into(),
+                    name: "K".into(),
+                    side: PinSide::Right,
+                    role: PinRole::Passive,
+                },
             ],
             Self::GenericIc { pins } => pins.clone(),
         }

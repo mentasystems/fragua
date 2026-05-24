@@ -120,10 +120,7 @@ fn subtract_rect(a: Point, b: Point, rect: Rect, out: &mut Vec<(Point, Point)>) 
     let entry_len = t0;
     let exit_len = 1.0 - t1;
     let lerp = |t: f64| -> Point {
-        Point::new(
-            Length::from_mm(ax + dx * t),
-            Length::from_mm(ay + dy * t),
-        )
+        Point::new(Length::from_mm(ax + dx * t), Length::from_mm(ay + dy * t))
     };
     if entry_len > 1e-9 {
         out.push((a, lerp(t0)));

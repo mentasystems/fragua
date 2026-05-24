@@ -303,7 +303,9 @@ fn check_phantom_nets(board: &Board, sch: &Schematic, report: &mut ErcReport) {
     let mut seen: HashSet<(String, String)> = HashSet::new();
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
-            let Some(net) = pad.net.as_deref() else { continue };
+            let Some(net) = pad.net.as_deref() else {
+                continue;
+            };
             if known_nets.contains(net) || pour_nets.contains(net) {
                 continue;
             }
@@ -355,7 +357,9 @@ fn check_role_based_rules(board: &Board, sch: &Schematic, report: &mut ErcReport
     for (net_name, net) in &sch.nets {
         let entries = roles.entry(net_name.clone()).or_default();
         for c in &net.connections {
-            let Some(sym) = sch.symbols.get(&c.symbol_id) else { continue };
+            let Some(sym) = sch.symbols.get(&c.symbol_id) else {
+                continue;
+            };
             let role = sym
                 .kind
                 .pins()
@@ -376,9 +380,10 @@ fn check_role_based_rules(board: &Board, sch: &Schematic, report: &mut ErcReport
         let has_power_out = pins.iter().any(|(_, r)| *r == PinRole::PowerOut)
             || poured_nets.contains(net_name.as_str());
         let has_power_in = pins.iter().any(|(_, r)| *r == PinRole::PowerIn);
-        let has_driver = pins.iter().any(|(_, r)| {
-            matches!(r, PinRole::Output | PinRole::Bidir | PinRole::PowerOut)
-        }) || poured_nets.contains(net_name.as_str());
+        let has_driver = pins
+            .iter()
+            .any(|(_, r)| matches!(r, PinRole::Output | PinRole::Bidir | PinRole::PowerOut))
+            || poured_nets.contains(net_name.as_str());
 
         if outputs.len() >= 2 {
             report.push(Violation {
@@ -430,19 +435,18 @@ fn check_role_based_rules(board: &Board, sch: &Schematic, report: &mut ErcReport
 /// — close enough for the heuristic, and avoids surprising the agent
 /// with errors when a cap is far from the chip on a pad-by-pad metric
 /// but visually right next to it.
-fn check_decoupling(
-    board: &Board,
-    sch: &Schematic,
-    max_dist_mm: f64,
-    report: &mut ErcReport,
-) {
+fn check_decoupling(board: &Board, sch: &Schematic, max_dist_mm: f64, report: &mut ErcReport) {
     use std::collections::HashMap;
     // Map symbol_id -> footprint position (if placed on the board).
     // Symbols whose footprints aren't placed yet are skipped — the
     // heuristic only makes sense once positions exist.
     let mut sym_pos: HashMap<pcb_core::Id, (f64, f64)> = HashMap::new();
     for sym in sch.symbols_in_order() {
-        if let Some(fp) = board.footprints.values().find(|f| f.reference == sym.reference) {
+        if let Some(fp) = board
+            .footprints
+            .values()
+            .find(|f| f.reference == sym.reference)
+        {
             sym_pos.insert(sym.id, (fp.position.x.to_mm(), fp.position.y.to_mm()));
         }
     }
@@ -454,14 +458,17 @@ fn check_decoupling(
         if !is_cap {
             continue;
         }
-        let Some(&(x, y)) = sym_pos.get(&sym.id) else { continue };
+        let Some(&(x, y)) = sym_pos.get(&sym.id) else {
+            continue;
+        };
         // Find every net this capacitor is on.
         for net in sch.nets.values() {
             if net.connections.iter().any(|c| c.symbol_id == sym.id) {
-                caps_by_net
-                    .entry(net.name.clone())
-                    .or_default()
-                    .push((sym.reference.clone(), x, y));
+                caps_by_net.entry(net.name.clone()).or_default().push((
+                    sym.reference.clone(),
+                    x,
+                    y,
+                ));
             }
         }
     }
@@ -472,7 +479,9 @@ fn check_decoupling(
         if !matches!(sym.kind, pcb_core::SymbolKind::GenericIc { .. }) {
             continue;
         }
-        let Some(&(sx, sy)) = sym_pos.get(&sym.id) else { continue };
+        let Some(&(sx, sy)) = sym_pos.get(&sym.id) else {
+            continue;
+        };
         for pin in sym.kind.pins() {
             if pin.role != PinRole::PowerIn {
                 continue;

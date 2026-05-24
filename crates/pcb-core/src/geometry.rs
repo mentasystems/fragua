@@ -8,9 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::units::Length;
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Point {
     pub x: Length,
     pub y: Length,
@@ -37,9 +35,7 @@ impl Point {
 }
 
 /// Axis-aligned rectangle in board coordinates.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Rect {
     pub min: Point,
     pub max: Point,

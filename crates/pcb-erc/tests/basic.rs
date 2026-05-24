@@ -6,7 +6,12 @@ use pcb_core::{Board, CopperLayer, Footprint, Id, Length, Pad, Point, Schematic}
 use pcb_erc::{run, ErcKind, ErcOptions};
 
 fn ic_symbol(reference: &str, pin_count: usize) -> Symbol {
-    ic_symbol_with_roles(reference, &(1..=pin_count).map(|_| PinRole::Passive).collect::<Vec<_>>())
+    ic_symbol_with_roles(
+        reference,
+        &(1..=pin_count)
+            .map(|_| PinRole::Passive)
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn ic_symbol_with_roles(reference: &str, roles: &[PinRole]) -> Symbol {
@@ -72,15 +77,18 @@ fn floating_pin_fires_when_pin_is_unconnected() {
     // Wire pin 1 only — pins 2 and 3 are floating.
     sch.set_net(Net {
         name: "S".into(),
-        connections: vec![NetConnection {
-            symbol_id: u_id,
-            pin_number: "1".into(),
-        }, NetConnection {
-            // Add a second endpoint so the FloatingNet rule doesn't
-            // fire and confuse the test.
-            symbol_id: u_id,
-            pin_number: "1".into(),
-        }],
+        connections: vec![
+            NetConnection {
+                symbol_id: u_id,
+                pin_number: "1".into(),
+            },
+            NetConnection {
+                // Add a second endpoint so the FloatingNet rule doesn't
+                // fire and confuse the test.
+                symbol_id: u_id,
+                pin_number: "1".into(),
+            },
+        ],
         class: None,
     });
     let report = run(&empty_board(), &sch, &ErcOptions::default());
@@ -89,7 +97,11 @@ fn floating_pin_fires_when_pin_is_unconnected() {
         .iter()
         .filter(|v| v.kind == ErcKind::FloatingPin)
         .collect();
-    assert_eq!(floating.len(), 2, "expected pin 2 and pin 3 floating, got {floating:?}");
+    assert_eq!(
+        floating.len(),
+        2,
+        "expected pin 2 and pin 3 floating, got {floating:?}"
+    );
 }
 
 #[test]
@@ -121,12 +133,18 @@ fn duplicate_pin_fires_when_same_pin_in_two_nets() {
     sch.add_symbol(u);
     sch.set_net(Net {
         name: "A".into(),
-        connections: vec![NetConnection { symbol_id: u_id, pin_number: "1".into() }],
+        connections: vec![NetConnection {
+            symbol_id: u_id,
+            pin_number: "1".into(),
+        }],
         class: None,
     });
     sch.set_net(Net {
         name: "B".into(),
-        connections: vec![NetConnection { symbol_id: u_id, pin_number: "1".into() }],
+        connections: vec![NetConnection {
+            symbol_id: u_id,
+            pin_number: "1".into(),
+        }],
         class: None,
     });
     let report = run(&empty_board(), &sch, &ErcOptions::default());
@@ -191,8 +209,14 @@ fn multiple_drivers_fires_when_two_outputs_share_a_net() {
     sch.set_net(Net {
         name: "S".into(),
         connections: vec![
-            NetConnection { symbol_id: u1_id, pin_number: "1".into() },
-            NetConnection { symbol_id: u2_id, pin_number: "1".into() },
+            NetConnection {
+                symbol_id: u1_id,
+                pin_number: "1".into(),
+            },
+            NetConnection {
+                symbol_id: u2_id,
+                pin_number: "1".into(),
+            },
         ],
         class: None,
     });
@@ -215,7 +239,10 @@ fn unpowered_power_net_fires_when_only_consumers() {
     sch.add_symbol(u);
     sch.set_net(Net {
         name: "+3V3".into(),
-        connections: vec![NetConnection { symbol_id: u_id, pin_number: "1".into() }],
+        connections: vec![NetConnection {
+            symbol_id: u_id,
+            pin_number: "1".into(),
+        }],
         class: None,
     });
     let report = run(&Board::new(), &sch, &ErcOptions::default());
@@ -234,11 +261,17 @@ fn unpowered_power_net_silent_when_pour_supplies_it() {
     sch.add_symbol(u);
     sch.set_net(Net {
         name: "GND".into(),
-        connections: vec![NetConnection { symbol_id: u_id, pin_number: "1".into() }],
+        connections: vec![NetConnection {
+            symbol_id: u_id,
+            pin_number: "1".into(),
+        }],
         class: None,
     });
     let mut board = Board::new();
-    board.add_pour(Pour { net: "GND".into(), layer: CopperLayer::Bottom });
+    board.add_pour(Pour {
+        net: "GND".into(),
+        layer: CopperLayer::Bottom,
+    });
     let report = run(&board, &sch, &ErcOptions::default());
     assert!(!report
         .violations
@@ -258,8 +291,14 @@ fn unconnected_input_fires_when_no_driver() {
     sch.set_net(Net {
         name: "S".into(),
         connections: vec![
-            NetConnection { symbol_id: u1_id, pin_number: "1".into() },
-            NetConnection { symbol_id: u2_id, pin_number: "1".into() },
+            NetConnection {
+                symbol_id: u1_id,
+                pin_number: "1".into(),
+            },
+            NetConnection {
+                symbol_id: u2_id,
+                pin_number: "1".into(),
+            },
         ],
         class: None,
     });
@@ -282,16 +321,28 @@ fn clean_schematic_produces_zero_violations() {
     sch.set_net(Net {
         name: "A".into(),
         connections: vec![
-            NetConnection { symbol_id: u1_id, pin_number: "1".into() },
-            NetConnection { symbol_id: u2_id, pin_number: "1".into() },
+            NetConnection {
+                symbol_id: u1_id,
+                pin_number: "1".into(),
+            },
+            NetConnection {
+                symbol_id: u2_id,
+                pin_number: "1".into(),
+            },
         ],
         class: None,
     });
     sch.set_net(Net {
         name: "B".into(),
         connections: vec![
-            NetConnection { symbol_id: u1_id, pin_number: "2".into() },
-            NetConnection { symbol_id: u2_id, pin_number: "2".into() },
+            NetConnection {
+                symbol_id: u1_id,
+                pin_number: "2".into(),
+            },
+            NetConnection {
+                symbol_id: u2_id,
+                pin_number: "2".into(),
+            },
         ],
         class: None,
     });

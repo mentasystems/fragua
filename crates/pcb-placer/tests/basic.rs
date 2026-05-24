@@ -58,13 +58,12 @@ fn placer_reduces_hpwl_on_two_far_apart_resistors() {
     board.add_footprint(mk("R1", 5.0, 5.0));
     board.add_footprint(mk("R2", 45.0, 25.0));
 
-    let opts = PlaceOptions { seed: 42, ..PlaceOptions::default() };
-    let report = place(
-        &mut board,
-        &["R1".to_string(), "R2".to_string()],
-        &opts,
-    )
-    .expect("placer should succeed");
+    let opts = PlaceOptions {
+        seed: 42,
+        ..PlaceOptions::default()
+    };
+    let report = place(&mut board, &["R1".to_string(), "R2".to_string()], &opts)
+        .expect("placer should succeed");
     assert!(
         report.final_hpwl_mm < report.initial_hpwl_mm,
         "expected HPWL to drop, got {:.2} → {:.2}",
@@ -80,8 +79,7 @@ fn placer_reduces_hpwl_on_two_far_apart_resistors() {
     );
     // R1 and R2 are both on the same net so both should have moved.
     assert!(
-        report.moved.contains(&"R1".to_string())
-            || report.moved.contains(&"R2".to_string()),
+        report.moved.contains(&"R1".to_string()) || report.moved.contains(&"R2".to_string()),
         "expected at least one of R1/R2 to move, got {:?}",
         report.moved,
     );
@@ -115,7 +113,11 @@ fn pinned_footprints_do_not_move() {
         .unwrap();
 
     // Only R2 is movable; R1 must stay put.
-    let opts = PlaceOptions { seed: 7, max_iterations: 2000, ..PlaceOptions::default() };
+    let opts = PlaceOptions {
+        seed: 7,
+        max_iterations: 2000,
+        ..PlaceOptions::default()
+    };
     let _report = place(&mut board, &["R2".to_string()], &opts).unwrap();
 
     let r1_after = board

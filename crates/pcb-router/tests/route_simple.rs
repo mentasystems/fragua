@@ -90,7 +90,13 @@ fn routes_two_two_pin_resistors_sharing_a_net() {
     assert!(report.total_length_mm > 0.0);
     assert!(report.total_lower_bound_mm > 0.0);
     for (name, outcome) in &report.per_net {
-        if let Outcome::Ok { length_mm, lower_bound_mm, trace_segments, .. } = outcome {
+        if let Outcome::Ok {
+            length_mm,
+            lower_bound_mm,
+            trace_segments,
+            ..
+        } = outcome
+        {
             if *trace_segments > 0 {
                 assert!(
                     *length_mm > 0.0 && *lower_bound_mm > 0.0,
@@ -165,13 +171,37 @@ fn three_colinear_pads_share_trunk_via_steiner() {
         Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
         Point::new(Length::from_mm(40.0), Length::from_mm(20.0)),
     ));
-    board.add_footprint(footprint("R1", 5.0, 10.0, vec![pad("1", 0.0, 0.0, Some("N"))]));
-    board.add_footprint(footprint("R2", 15.0, 10.0, vec![pad("1", 0.0, 0.0, Some("N"))]));
-    board.add_footprint(footprint("R3", 25.0, 10.0, vec![pad("1", 0.0, 0.0, Some("N"))]));
+    board.add_footprint(footprint(
+        "R1",
+        5.0,
+        10.0,
+        vec![pad("1", 0.0, 0.0, Some("N"))],
+    ));
+    board.add_footprint(footprint(
+        "R2",
+        15.0,
+        10.0,
+        vec![pad("1", 0.0, 0.0, Some("N"))],
+    ));
+    board.add_footprint(footprint(
+        "R3",
+        25.0,
+        10.0,
+        vec![pad("1", 0.0, 0.0, Some("N"))],
+    ));
 
     let report = route(&mut board, &RouteOptions::default());
-    let net = report.per_net.iter().find(|(n, _)| n == "N").expect("net N missing");
-    let Outcome::Ok { length_mm, lower_bound_mm, .. } = &net.1 else {
+    let net = report
+        .per_net
+        .iter()
+        .find(|(n, _)| n == "N")
+        .expect("net N missing");
+    let Outcome::Ok {
+        length_mm,
+        lower_bound_mm,
+        ..
+    } = &net.1
+    else {
         panic!("net N should route, got {:?}", net.1);
     };
     // HPWL = 20 mm. Optimal tree = 20 mm. A star would be ~30 mm. We
