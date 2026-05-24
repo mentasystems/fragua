@@ -60,6 +60,13 @@ fn library_silk_propagates_to_spawned_footprint() {
     .map_err(|e| e.message)
     .expect("library.create");
 
+    // library.create no longer persists directly — every agent-generated
+    // entry waits in a pending-review buffer until a human confirms it
+    // via the UI. The test drives that confirmation programmatically.
+    project
+        .confirm_pending_library_entry("test_two_pad")
+        .expect("confirm pending entry");
+
     // Library entry should now expose the silk array.
     let entry = project
         .library()

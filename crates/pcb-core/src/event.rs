@@ -58,6 +58,11 @@ pub enum Event {
     /// modified. Carries the new entry count so the UI can refresh
     /// without an extra fetch.
     LibraryChanged { count: usize },
+    /// The pending-library buffer changed (a `library.create` script
+    /// call queued a new entry for human review, or a confirm/discard
+    /// drained one out). Carries the new pending count so the UI's
+    /// confirmation modal can open or close.
+    PendingLibraryChanged { count: usize },
     /// Free-form activity log line for the UI's activity panel.
     Activity {
         level: ActivityLevel,

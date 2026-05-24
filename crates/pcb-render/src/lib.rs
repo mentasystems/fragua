@@ -675,6 +675,20 @@ fn write_pad(svg: &mut String, pad: &Pad, pours: &[pcb_core::Pour]) {
         x = cx - w / 2.0,
         y = cy - h / 2.0,
     );
+    // GND highlight: a magenta hatched overlay + bold border so any
+    // ground pad on the board reads as such at a glance. The component
+    // library review view uses the same convention — it is the single
+    // most expensive footprint mistake to ship (a power pin landing on
+    // the wrong pad shorts the supply on power-up), so it gets its own
+    // colour everywhere.
+    if pad.net.as_deref().is_some_and(is_ground_net) {
+        let _ = write!(
+            svg,
+            r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="none" stroke="#ff2bd6" stroke-width="0.15" pointer-events="none"/>"##,
+            x = cx - w / 2.0,
+            y = cy - h / 2.0,
+        );
+    }
     if let Some(drill) = pad.drill {
         let r = drill.to_mm() / 2.0;
         let _ = write!(
@@ -682,6 +696,210 @@ fn write_pad(svg: &mut String, pad: &Pad, pours: &[pcb_core::Pour]) {
             r##"<circle cx="{cx:.3}" cy="{cy:.3}" r="{r:.3}" fill="#0e1116" pointer-events="none"/>"##,
         );
     }
+}
+
+/// True if `name` looks like the universal "this is the ground rail"
+/// label. We accept the common spellings (`GND`, `GROUND`, `VSS`, `0V`)
+/// case-insensitively because schematic capture across the industry is
+/// not consistent. The library review view and the board pad renderer
+/// both light up these pads in a distinct colour so a footprint with a
+/// mirrored / mis-numbered pinout is obvious before fab.
+#[must_use]
+pub fn is_ground_net(name: &str) -> bool {
+    let n = name.trim();
+    n.eq_ignore_ascii_case("GND")
+        || n.eq_ignore_ascii_case("GROUND")
+        || n.eq_ignore_ascii_case("VSS")
+        || n.eq_ignore_ascii_case("0V")
+        || n.eq_ignore_ascii_case("AGND")
+        || n.eq_ignore_ascii_case("DGND")
+        || n.eq_ignore_ascii_case("PGND")
+}
+
+/// True if a `LibraryPad`'s number / name reads as a ground pad. Used
+/// by the library review view: library entries are not bound to a net
+/// yet (those bindings live on placed footprints), so we look at the
+/// pad number and the optional pad name instead. Falls back to false
+/// for the common numeric pad labels.
+#[must_use]
+pub fn is_ground_pad_label(number: &str, name: &str) -> bool {
+    is_ground_net(number) || is_ground_net(name)
+}
+
+/// Render a single library entry (pads + library-authored silk) into
+/// a standalone SVG, looking straight down on the part from the TOP.
+/// Used by the library review pane and by the create-time confirmation
+/// modal: the user can compare the rendered footprint to the photo
+/// attachment side by side and catch mirrored pinouts before they
+/// reach fab. Ground pads (`GND` / `VSS` / `0V` / …, matched on the
+/// pad number or name) are highlighted in magenta so a swap stands
+/// out.
+///
+/// `view_size_mm` defines the side length of the square viewBox; pass
+/// a value that comfortably contains the part with a small margin.
+#[must_use]
+pub fn render_library_entry_svg(entry: &pcb_core::LibraryEntry) -> String {
+    // Compute bounding box across pads (in library-local mm, no rotation).
+    let (mut min_x, mut min_y) = (f64::INFINITY, f64::INFINITY);
+    let (mut max_x, mut max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for pad in &entry.pads {
+        let hw = pad.w_mm / 2.0;
+        let hh = pad.h_mm / 2.0;
+        min_x = min_x.min(pad.x_mm - hw);
+        min_y = min_y.min(pad.y_mm - hh);
+        max_x = max_x.max(pad.x_mm + hw);
+        max_y = max_y.max(pad.y_mm + hh);
+    }
+    if !min_x.is_finite() {
+        // No pads — degenerate footprint, render an empty 10 × 10 mm view.
+        min_x = -5.0;
+        min_y = -5.0;
+        max_x = 5.0;
+        max_y = 5.0;
+    }
+    let margin = ((max_x - min_x).max(max_y - min_y) * 0.15).max(1.0);
+    min_x -= margin;
+    min_y -= margin;
+    max_x += margin;
+    max_y += margin;
+    let w = max_x - min_x;
+    let h = max_y - min_y;
+
+    let mut svg = String::with_capacity(2048);
+    let _ = write!(
+        svg,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{x:.3} {y:.3} {w:.3} {h:.3}" width="100%" height="100%">"##,
+        // Flip Y so positive Y is up — TOP view, matching how the rest
+        // of the board canvas behaves.
+        x = min_x,
+        y = -(min_y + h),
+        w = w,
+        h = h,
+    );
+    // Substrate.
+    let _ = write!(
+        svg,
+        r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="#0e1116"/>"##,
+        x = min_x,
+        y = -(min_y + h),
+        w = w,
+        h = h,
+    );
+    svg.push_str(r##"<g transform="scale(1,-1)">"##);
+
+    // Light millimetre grid for scale.
+    let grid_step = 1.0;
+    let gx0 = (min_x / grid_step).floor() * grid_step;
+    let gx1 = (max_x / grid_step).ceil() * grid_step;
+    let gy0 = (min_y / grid_step).floor() * grid_step;
+    let gy1 = (max_y / grid_step).ceil() * grid_step;
+    svg.push_str(r##"<g stroke="#1a1f27" stroke-width="0.02" fill="none">"##);
+    let mut gx = gx0;
+    while gx <= gx1 + 1e-9 {
+        let _ = write!(
+            svg,
+            r##"<line x1="{x:.3}" y1="{y0:.3}" x2="{x:.3}" y2="{y1:.3}"/>"##,
+            x = gx,
+            y0 = min_y,
+            y1 = max_y,
+        );
+        gx += grid_step;
+    }
+    let mut gy = gy0;
+    while gy <= gy1 + 1e-9 {
+        let _ = write!(
+            svg,
+            r##"<line x1="{x0:.3}" y1="{y:.3}" x2="{x1:.3}" y2="{y:.3}"/>"##,
+            x0 = min_x,
+            y = gy,
+            x1 = max_x,
+        );
+        gy += grid_step;
+    }
+    svg.push_str("</g>");
+
+    // Pads. Top layer colour (this is a library-side render, no layer
+    // info beyond the SMD/through-hole drill flag — assume top.)
+    for pad in &entry.pads {
+        let x = pad.x_mm - pad.w_mm / 2.0;
+        let y = pad.y_mm - pad.h_mm / 2.0;
+        let is_gnd = is_ground_pad_label(&pad.number, &pad.name);
+        let fill = "#c97a2b";
+        let _ = write!(
+            svg,
+            r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="{fill}"/>"##,
+            x = x,
+            y = y,
+            w = pad.w_mm,
+            h = pad.h_mm,
+        );
+        if is_gnd {
+            let _ = write!(
+                svg,
+                r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="none" stroke="#ff2bd6" stroke-width="0.18"/>"##,
+                x = x,
+                y = y,
+                w = pad.w_mm,
+                h = pad.h_mm,
+            );
+        }
+        if let Some(d) = pad.drill_mm {
+            let _ = write!(
+                svg,
+                r##"<circle cx="{cx:.3}" cy="{cy:.3}" r="{r:.3}" fill="#0e1116"/>"##,
+                cx = pad.x_mm,
+                cy = pad.y_mm,
+                r = d / 2.0,
+            );
+        }
+        // Pad number label — keep it readable on the copper. Y-flip the
+        // text group because the outer `scale(1,-1)` would otherwise
+        // mirror the glyphs.
+        let label = if pad.name.is_empty() {
+            pad.number.as_str()
+        } else {
+            pad.name.as_str()
+        };
+        let sz = (pad.w_mm.min(pad.h_mm) * 0.45).clamp(0.3, 1.2);
+        let label_color = if is_gnd { "#ff2bd6" } else { "#0e1116" };
+        let _ = write!(
+            svg,
+            r##"<g transform="translate({cx:.3},{cy:.3}) scale(1,-1)"><text x="0" y="0" text-anchor="middle" dominant-baseline="middle" font-family="ui-monospace, monospace" font-size="{sz:.2}" fill="{label_color}" font-weight="bold">{lab}</text></g>"##,
+            cx = pad.x_mm,
+            cy = -pad.y_mm,
+            sz = sz,
+            label_color = label_color,
+            lab = escape(label),
+        );
+    }
+
+    // Pin-1 marker — a small magenta dot top-left of pad "1" if it
+    // exists. Helps the user verify the canonical orientation.
+    if let Some(p1) = entry.pads.iter().find(|p| p.number == "1") {
+        let x = p1.x_mm - p1.w_mm / 2.0 - 0.4;
+        let y = p1.y_mm + p1.h_mm / 2.0 + 0.4;
+        let _ = write!(
+            svg,
+            r##"<circle cx="{x:.3}" cy="{y:.3}" r="0.3" fill="#ffd166"/>"##,
+            x = x,
+            y = y,
+        );
+    }
+
+    // TOP-view tag in a corner so the reviewer cannot confuse the
+    // orientation. Plain SVG text (the outer flip mirrors it, so undo
+    // that locally).
+    let tag_x = min_x + 0.5;
+    let tag_y = max_y - 0.5;
+    let _ = write!(
+        svg,
+        r##"<g transform="translate({x:.3},{y:.3}) scale(1,-1)"><text x="0" y="0" font-family="ui-monospace, monospace" font-size="0.9" fill="#3a4452">TOP view</text></g>"##,
+        x = tag_x,
+        y = -tag_y,
+    );
+
+    svg.push_str("</g></svg>");
+    svg
 }
 
 /// Draw the ratsnest: thin lines between every pair of pads on the
@@ -1290,4 +1508,97 @@ fn escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ground_net_matches_common_spellings() {
+        for n in [
+            "GND", "gnd", "Gnd", "GROUND", "ground", "vss", "VSS", "0V", "0v", "AGND", "DGND",
+            "PGND",
+        ] {
+            assert!(is_ground_net(n), "expected {n} to read as ground");
+        }
+        for n in ["VCC", "VDD", "3V3", "5V", "SDA", "MISO", "GNDB", "MY_GND_NET"] {
+            assert!(!is_ground_net(n), "expected {n} NOT to read as ground");
+        }
+    }
+
+    #[test]
+    fn ground_pad_label_falls_through_to_pad_name() {
+        // Some libraries number GND pins by digits but name them "GND".
+        assert!(is_ground_pad_label("12", "GND"));
+        assert!(is_ground_pad_label("GND", ""));
+        assert!(!is_ground_pad_label("12", ""));
+    }
+
+    #[test]
+    fn library_entry_svg_marks_ground_pads() {
+        let entry = pcb_core::LibraryEntry {
+            key: "test_part".into(),
+            description: String::new(),
+            default_value: String::new(),
+            default_rotation_deg: 0.0,
+            edge_mounted: false,
+            pads: vec![
+                pcb_core::LibraryPad {
+                    number: "1".into(),
+                    name: "VCC".into(),
+                    x_mm: -2.0,
+                    y_mm: 0.0,
+                    w_mm: 1.0,
+                    h_mm: 1.0,
+                    drill_mm: None,
+                },
+                pcb_core::LibraryPad {
+                    number: "2".into(),
+                    name: "GND".into(),
+                    x_mm: 2.0,
+                    y_mm: 0.0,
+                    w_mm: 1.0,
+                    h_mm: 1.0,
+                    drill_mm: None,
+                },
+            ],
+            silk: Vec::new(),
+            lcsc_id: None,
+            mpn: None,
+            attachments: Vec::new(),
+            created_at: 0,
+        };
+        let svg = render_library_entry_svg(&entry);
+        // GND highlight colour appears.
+        assert!(
+            svg.contains("#ff2bd6"),
+            "expected GND highlight colour in SVG"
+        );
+        // TOP-view tag is visible.
+        assert!(svg.contains("TOP view"));
+        // Both pad labels present.
+        assert!(svg.contains("VCC"));
+        assert!(svg.contains("GND"));
+    }
+
+    #[test]
+    fn library_entry_svg_with_no_pads_does_not_panic() {
+        let entry = pcb_core::LibraryEntry {
+            key: "empty".into(),
+            description: String::new(),
+            default_value: String::new(),
+            default_rotation_deg: 0.0,
+            edge_mounted: false,
+            pads: Vec::new(),
+            silk: Vec::new(),
+            lcsc_id: None,
+            mpn: None,
+            attachments: Vec::new(),
+            created_at: 0,
+        };
+        let svg = render_library_entry_svg(&entry);
+        assert!(svg.starts_with("<svg"));
+        assert!(svg.ends_with("</svg>"));
+    }
 }

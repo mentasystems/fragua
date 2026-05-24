@@ -12,3 +12,4 @@ Cargo.lock.bak
 /frontend/.vite
 
 .DS_Store
+.claude/

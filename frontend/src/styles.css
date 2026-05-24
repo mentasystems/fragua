@@ -454,3 +454,295 @@ html, body, #app {
   padding: 24px;
 }
 .info-error { color: #f85149; }
+
+/* ── library review pane ───────────────────────────────────────── */
+.review-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
+  gap: 16px;
+  padding: 16px;
+  overflow-y: auto;
+  height: 100%;
+  align-content: start;
+}
+.review-loading,
+.review-error,
+.review-empty {
+  padding: 32px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+.review-error { color: #f85149; white-space: pre-wrap; }
+.review-empty h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  color: var(--text);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.review-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.review-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255,255,255,0.02);
+}
+.review-key {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+.review-meta {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  align-items: center;
+  flex-wrap: wrap;
+}
+.review-meta > span {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.04);
+}
+.gnd-badge {
+  background: rgba(255, 43, 214, 0.15) !important;
+  color: #ff2bd6 !important;
+  font-weight: 600;
+}
+.gnd-badge.none {
+  background: rgba(248, 81, 73, 0.12) !important;
+  color: #f85149 !important;
+}
+.edge-badge {
+  background: rgba(214, 144, 91, 0.15) !important;
+  color: var(--accent) !important;
+}
+.lcsc-badge, .mpn-badge {
+  background: rgba(63, 185, 80, 0.12) !important;
+  color: #3fb950 !important;
+}
+.review-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+}
+.review-photo, .review-footprint {
+  background: #0e1116;
+  min-height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.review-photo {
+  border-right: 1px solid var(--border);
+}
+.review-photo img {
+  max-width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  display: block;
+}
+.review-footprint svg {
+  width: 100%;
+  height: 240px;
+  display: block;
+}
+.photo-empty, .photo-loading, .photo-error {
+  padding: 16px;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+}
+.photo-error { color: #f85149; }
+.review-desc {
+  margin: 0;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  line-height: 1.5;
+}
+.review-foot {
+  padding: 8px 14px;
+  font-size: 10px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.review-hint {
+  font-style: italic;
+}
+
+/* ── confirm-new-entry modal ───────────────────────────────────── */
+.confirm-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+.confirm-modal[hidden] { display: none; }
+.confirm-modal-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: min(1100px, 100%);
+  max-height: 90vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+}
+.confirm-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--border);
+}
+.confirm-head h2 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  letter-spacing: 0.03em;
+  color: var(--text);
+  font-weight: 600;
+}
+.confirm-key {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+.confirm-sub {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.confirm-warning {
+  background: rgba(248, 81, 73, 0.12);
+  border: 1px solid rgba(248, 81, 73, 0.4);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #f85149;
+  max-width: 280px;
+  line-height: 1.4;
+}
+.confirm-meta {
+  display: flex;
+  gap: 6px;
+  padding: 10px 22px 0;
+  font-size: 11px;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+.confirm-meta > span {
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.04);
+}
+.confirm-desc {
+  margin: 12px 22px 0;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--text);
+  background: rgba(255,255,255,0.02);
+  border-radius: 6px;
+  line-height: 1.5;
+}
+.confirm-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  margin-top: 16px;
+}
+.confirm-photo, .confirm-footprint {
+  background: #0e1116;
+  min-height: 360px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.confirm-photo {
+  border-right: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+}
+.confirm-footprint {
+  border-top: 1px solid var(--border);
+}
+.confirm-photo img {
+  max-width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+}
+.confirm-footprint svg {
+  width: 100%;
+  height: 420px;
+  display: block;
+}
+.confirm-caption {
+  position: absolute;
+  bottom: 6px;
+  left: 8px;
+  font-size: 10px;
+  color: var(--muted);
+  background: rgba(0,0,0,0.5);
+  padding: 2px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.03em;
+}
+.confirm-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 22px;
+  border-top: 1px solid var(--border);
+}
+.btn-discard, .btn-confirm {
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 18px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  background: var(--panel);
+  color: var(--text);
+}
+.btn-discard:hover { background: rgba(248, 81, 73, 0.15); border-color: #f85149; color: #f85149; }
+.btn-confirm {
+  background: #2a9d4a;
+  border-color: #2a9d4a;
+  color: #fff;
+  font-weight: 600;
+}
+.btn-confirm:hover { background: #36b85a; border-color: #36b85a; }
+.btn-confirm:disabled {
+  background: #1a1f27;
+  border-color: var(--border);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+/* Hide the palette strip and library/activity panes when review tab is active —
+   the review pane is full-width canvas. The grid stays the same; we just paint
+   the review list into the canvas-pane container. */

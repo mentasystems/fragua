@@ -42,7 +42,8 @@ type AnyEvent =
   | { kind: "RoutingChanged" }
   | { kind: "PlacementProgress" }
   | { kind: "PaletteChanged" }
-  | { kind: "LibraryChanged"; count: number };
+  | { kind: "LibraryChanged"; count: number }
+  | { kind: "PendingLibraryChanged"; count: number };
 
 type LibraryAttachment = {
   id: string;
@@ -63,7 +64,55 @@ type LibraryEntry = {
   created_at: number;
 };
 
-type View = "board" | "schematic";
+type View = "board" | "schematic" | "review";
+
+type ReviewEntry = {
+  key: string;
+  description: string;
+  default_value: string;
+  edge_mounted: boolean;
+  pad_count: number;
+  ground_pad_count: number;
+  lcsc_id: string | null;
+  mpn: string | null;
+  attachments: LibraryAttachment[];
+  created_at: number;
+  review_svg: string;
+};
+
+type PendingPad = {
+  number: string;
+  name: string;
+  x_mm: number;
+  y_mm: number;
+  w_mm: number;
+  h_mm: number;
+  drill_mm: number | null;
+  is_ground: boolean;
+};
+
+type PendingAttachment = {
+  kind: string;
+  filename: string;
+  mime: string;
+  data_uri: string;
+  bytes: number;
+};
+
+type PendingEntry = {
+  key: string;
+  description: string;
+  default_value: string;
+  default_rotation_deg: number;
+  edge_mounted: boolean;
+  pad_count: number;
+  ground_pad_count: number;
+  lcsc_id: string | null;
+  mpn: string | null;
+  attachments: PendingAttachment[];
+  review_svg: string;
+  pads: PendingPad[];
+};
 
 const root = document.getElementById("app");
 if (!root) throw new Error("missing #app root");
@@ -74,6 +123,7 @@ root.innerHTML = `
     <span class="tabs">
       <span class="tab" data-view="schematic" id="tab-sch">schematic <span id="proj-symbols">0</span>/<span id="proj-nets">0</span></span>
       <span class="tab" data-view="board" id="tab-board">board <span id="proj-footprints">0</span></span>
+      <span class="tab" data-view="review" id="tab-review" title="review every library component side-by-side with its photo">review <span id="proj-review-count">0</span></span>
     </span>
     <span class="board-size">
       <span class="label">size</span>
@@ -100,6 +150,9 @@ root.innerHTML = `
   <div class="info-modal" id="info-modal" hidden>
     <div class="info-modal-card" id="info-modal-card"></div>
   </div>
+  <div class="confirm-modal" id="confirm-modal" hidden>
+    <div class="confirm-modal-card" id="confirm-modal-card"></div>
+  </div>
 `;
 
 const els = {
@@ -114,6 +167,8 @@ const els = {
   libraryCount: document.getElementById("library-count")!,
   tabBoard: document.getElementById("tab-board")!,
   tabSch: document.getElementById("tab-sch")!,
+  tabReview: document.getElementById("tab-review")!,
+  reviewCount: document.getElementById("proj-review-count")!,
   toggleLibrary: document.getElementById("toggle-library")!,
   toggleActivity: document.getElementById("toggle-activity")!,
   palette: document.getElementById("palette-strip")!,
@@ -121,6 +176,8 @@ const els = {
   boardH: document.getElementById("board-h")!,
   infoModal: document.getElementById("info-modal")!,
   infoCard: document.getElementById("info-modal-card")!,
+  confirmModal: document.getElementById("confirm-modal")!,
+  confirmCard: document.getElementById("confirm-modal-card")!,
 };
 
 type DrcViolation = {
@@ -140,7 +197,12 @@ function setView(v: View) {
   view = v;
   els.tabBoard.classList.toggle("active", v === "board");
   els.tabSch.classList.toggle("active", v === "schematic");
-  if (lastState) paintCanvas(lastState);
+  els.tabReview.classList.toggle("active", v === "review");
+  if (v === "review") {
+    void paintReview();
+  } else if (lastState) {
+    paintCanvas(lastState);
+  }
 }
 
 // All control surface lives behind the agent now. Tabs stay clickable
@@ -149,6 +211,7 @@ function setView(v: View) {
 // through the local HTTP script API — no UI buttons.
 els.tabBoard.addEventListener("click", () => setView("board"));
 els.tabSch.addEventListener("click", () => setView("schematic"));
+els.tabReview.addEventListener("click", () => setView("review"));
 
 // Side-pane toggles. Default: both panels hidden — the agent log /
 // library panes get in the way for most tasks; the human can flip them
@@ -194,7 +257,7 @@ function reportFatal(err: unknown) {
 /// not blow away the user's pan/zoom. Lazily seeded from whatever the
 /// renderer emits on first paint of each view.
 type ViewBox = { x: number; y: number; w: number; h: number };
-const viewBoxState: Record<View, ViewBox | null> = { board: null, schematic: null };
+const viewBoxState: Record<View, ViewBox | null> = { board: null, schematic: null, review: null };
 
 function paintCanvas(state: ProjectState) {
   els.canvas.innerHTML = view === "schematic" ? state.schematic_svg : state.board_svg;
@@ -447,6 +510,182 @@ els.infoModal.addEventListener("click", (ev) => {
   if (ev.target === els.infoModal) closeComponentModal();
 });
 
+/// Render the library review pane: one card per stored library
+/// entry, with the photo and the rendered footprint side by side.
+/// GND pads on the footprint are highlighted in magenta by the
+/// renderer so a mirrored / mis-numbered pinout is obvious next to
+/// the real component photo.
+async function paintReview() {
+  els.canvas.innerHTML = `<div class="review-loading">loading library…</div>`;
+  let data: { entries: ReviewEntry[] };
+  try {
+    data = await invoke<{ entries: ReviewEntry[] }>("library_review_state");
+  } catch (err) {
+    els.canvas.innerHTML = `<div class="review-error">library_review_state: ${esc(String(err))}</div>`;
+    return;
+  }
+  els.reviewCount.textContent = String(data.entries.length);
+  if (data.entries.length === 0) {
+    els.canvas.innerHTML = `<div class="review-empty">
+      <h2>no library entries yet</h2>
+      <p>your agent will save parts here as you design.<br>
+      every entry created via the script API queues for human review first —
+      a confirmation popup will appear automatically.</p>
+    </div>`;
+    return;
+  }
+  const photoUriCache = new Map<string, Promise<string>>();
+  async function photoUri(key: string, attId: string): Promise<string> {
+    const cacheKey = `${key}/${attId}`;
+    let p = photoUriCache.get(cacheKey);
+    if (!p) {
+      p = invoke<string>("library_attachment_data_uri", {
+        key,
+        attachmentId: attId,
+      });
+      photoUriCache.set(cacheKey, p);
+    }
+    return p;
+  }
+  const list = document.createElement("div");
+  list.className = "review-list";
+  for (const entry of data.entries) {
+    const card = document.createElement("article");
+    card.className = "review-card";
+    const photo = entry.attachments.find((a) => a.mime.startsWith("image/"));
+    const gndBadge = entry.ground_pad_count > 0
+      ? `<span class="gnd-badge">${entry.ground_pad_count} GND</span>`
+      : `<span class="gnd-badge none">no GND</span>`;
+    card.innerHTML = `
+      <header class="review-head">
+        <h3 class="review-key">${esc(entry.key)}</h3>
+        <div class="review-meta">
+          <span>${entry.pad_count} pads</span>
+          ${gndBadge}
+          ${entry.edge_mounted ? `<span class="edge-badge">edge</span>` : ""}
+          ${entry.lcsc_id ? `<span class="lcsc-badge">${esc(entry.lcsc_id)}</span>` : ""}
+          ${entry.mpn ? `<span class="mpn-badge">${esc(entry.mpn)}</span>` : ""}
+        </div>
+      </header>
+      <div class="review-body">
+        <div class="review-photo" data-key="${esc(entry.key)}" data-att="${esc(photo?.id ?? "")}">
+          ${photo ? `<div class="photo-loading">loading photo…</div>` : `<div class="photo-empty">no photo attached</div>`}
+        </div>
+        <div class="review-footprint">${entry.review_svg}</div>
+      </div>
+      ${entry.description ? `<p class="review-desc">${esc(entry.description)}</p>` : ""}
+      <footer class="review-foot">
+        <span class="review-hint">compare pad positions, pin-1 marker (yellow dot) and GND pads (magenta border) against the photo. Reorder the photo orientation in your head so you are looking at the TOP of the part — same as the footprint render.</span>
+      </footer>
+    `;
+    list.appendChild(card);
+  }
+  els.canvas.innerHTML = "";
+  els.canvas.appendChild(list);
+  // Lazy-load photos.
+  for (const slot of Array.from(els.canvas.querySelectorAll(".review-photo")) as HTMLElement[]) {
+    const key = slot.dataset.key ?? "";
+    const att = slot.dataset.att ?? "";
+    if (!key || !att) continue;
+    photoUri(key, att)
+      .then((uri) => {
+        slot.innerHTML = `<img src="${uri}" alt="${esc(key)} photo" />`;
+      })
+      .catch((err) => {
+        slot.innerHTML = `<div class="photo-error">${esc(String(err))}</div>`;
+      });
+  }
+}
+
+/// Open the confirmation modal for every currently-pending library
+/// entry. The agent must NOT be able to dismiss this — the modal
+/// stays open until the human clicks Save or Discard on every entry.
+/// Called when the backend signals `PendingLibraryChanged`.
+let confirmModalOpen = false;
+async function openConfirmModal() {
+  let data: { entries: PendingEntry[] };
+  try {
+    data = await invoke<{ entries: PendingEntry[] }>("pending_library_entries");
+  } catch (err) {
+    appendActivity("error", `pending_library_entries: ${err}`);
+    return;
+  }
+  if (data.entries.length === 0) {
+    els.confirmModal.setAttribute("hidden", "");
+    confirmModalOpen = false;
+    return;
+  }
+  confirmModalOpen = true;
+  // Show the first pending entry; once confirmed/discarded the
+  // PendingLibraryChanged event will re-trigger this and either
+  // surface the next entry or close the modal.
+  const entry = data.entries[0];
+  const photo = entry.attachments.find((a) => a.mime.startsWith("image/"));
+  const remaining = data.entries.length;
+  const gndBadge = entry.ground_pad_count > 0
+    ? `<span class="gnd-badge">${entry.ground_pad_count} GND pad${entry.ground_pad_count === 1 ? "" : "s"}</span>`
+    : `<span class="gnd-badge none">no GND pads detected</span>`;
+  els.confirmCard.innerHTML = `
+    <header class="confirm-head">
+      <div>
+        <h2>confirm new library entry</h2>
+        <div class="confirm-key">${esc(entry.key)}</div>
+        <div class="confirm-sub">${remaining > 1 ? `${remaining} pending — review one at a time` : "1 pending"}</div>
+      </div>
+      <div class="confirm-warning">
+        <strong>verify the pinout vs. the photo.</strong>
+        a mirrored footprint = unsolderable PCB.
+      </div>
+    </header>
+    <div class="confirm-meta">
+      <span>${entry.pad_count} pads</span>
+      ${gndBadge}
+      ${entry.edge_mounted ? `<span class="edge-badge">edge-mounted</span>` : ""}
+      ${entry.lcsc_id ? `<span class="lcsc-badge">${esc(entry.lcsc_id)}</span>` : ""}
+      ${entry.mpn ? `<span class="mpn-badge">${esc(entry.mpn)}</span>` : ""}
+    </div>
+    ${entry.description ? `<p class="confirm-desc">${esc(entry.description)}</p>` : ""}
+    <div class="confirm-body">
+      <div class="confirm-photo">
+        ${photo ? `<img src="${photo.data_uri}" alt="component photo" />` : `<div class="photo-empty">no photo attached — ask the agent to <code>library.attach</code> a photo before confirming</div>`}
+        <div class="confirm-caption">photo</div>
+      </div>
+      <div class="confirm-footprint">
+        ${entry.review_svg}
+        <div class="confirm-caption">footprint (TOP view, GND in magenta)</div>
+      </div>
+    </div>
+    <footer class="confirm-foot">
+      <button class="btn-discard" data-key="${esc(entry.key)}">Discard</button>
+      <button class="btn-confirm" data-key="${esc(entry.key)}" ${photo ? "" : "disabled title='attach a photo first'"}>Save to library</button>
+    </footer>
+  `;
+  els.confirmModal.removeAttribute("hidden");
+  els.confirmCard.querySelector(".btn-confirm")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget as HTMLButtonElement;
+    const key = btn.dataset.key ?? "";
+    btn.disabled = true;
+    try {
+      await invoke<boolean>("confirm_pending_library_entry", { key });
+    } catch (err) {
+      appendActivity("error", `confirm ${key}: ${err}`);
+      btn.disabled = false;
+    }
+  });
+  els.confirmCard.querySelector(".btn-discard")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget as HTMLButtonElement;
+    const key = btn.dataset.key ?? "";
+    if (!confirm(`Discard pending entry "${key}"? The agent will have to recreate it.`)) return;
+    btn.disabled = true;
+    try {
+      await invoke<boolean>("discard_pending_library_entry", { key });
+    } catch (err) {
+      appendActivity("error", `discard ${key}: ${err}`);
+      btn.disabled = false;
+    }
+  });
+}
+
 function paintDrcMarkers() {
   if (drcViolations.length === 0) return;
   const svg = els.canvas.querySelector("svg") as SVGSVGElement | null;
@@ -620,6 +859,11 @@ async function playEvent(data: AnyEvent) {
   }
   if (data.kind === "LibraryChanged") {
     await refreshLibrary();
+    if (view === "review") void paintReview();
+    return;
+  }
+  if (data.kind === "PendingLibraryChanged") {
+    await openConfirmModal();
     return;
   }
   const isBoardEvent =
@@ -641,11 +885,18 @@ async function start() {
   appendActivity("info", "ui boot");
   await refresh();
   await refreshLibrary();
+  // Check on boot in case the agent queued entries before the UI
+  // attached — the modal then opens immediately.
+  await openConfirmModal().catch(() => {});
   appendActivity("info", "ui ready");
 
   await listen<AnyEvent>("pcb://event", (ev) => {
     playEvent(ev.payload).catch(reportFatal);
   });
 }
+
+// Used to silence the "noUnusedLocals" warning when confirmModalOpen
+// is touched only inside async paths.
+void confirmModalOpen;
 
 start().catch(reportFatal);

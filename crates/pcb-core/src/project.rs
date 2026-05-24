@@ -36,6 +36,34 @@ pub struct Project {
     /// (memory-only session). `save_to_path` updates this so a manual
     /// save also rebinds the autosave target.
     save_path: Arc<RwLock<Option<PathBuf>>>,
+    /// Library entries the script API created but a human hasn't
+    /// confirmed yet. Lives in memory only — the agent populates this
+    /// via `library.create` and the UI either promotes the entry into
+    /// the disk-backed `library` (confirm) or drops it (discard).
+    /// Shared across every `Project` clone so the confirm modal sees
+    /// the same buffer the script just pushed into.
+    pending_library: Arc<RwLock<Vec<PendingLibraryEntry>>>,
+}
+
+/// An in-flight library entry waiting for human review. Carries the
+/// fully-formed `LibraryEntry` plus any binary attachments the agent
+/// uploaded alongside it (typically a single component photo). The
+/// attachments live in memory until confirmation; on confirm they are
+/// written through `Library::attach` so the on-disk store ends up in
+/// the same shape it would have had if `library.create` saved
+/// directly.
+#[derive(Debug, Clone)]
+pub struct PendingLibraryEntry {
+    pub entry: crate::library::LibraryEntry,
+    pub attachments: Vec<PendingAttachment>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingAttachment {
+    pub kind: String,
+    pub filename: String,
+    pub mime: String,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
@@ -71,9 +99,118 @@ impl Project {
             bus: EventBus::new(),
             library: Arc::new(library),
             save_path: Arc::new(RwLock::new(None)),
+            pending_library: Arc::new(RwLock::new(Vec::new())),
         };
         proj.bus.publish(Event::ProjectChanged);
         proj
+    }
+
+    /// Snapshot of the pending-library buffer. Clones the entries; the
+    /// UI uses this to populate the confirmation modal.
+    #[must_use]
+    pub fn pending_library_entries(&self) -> Vec<PendingLibraryEntry> {
+        self.pending_library
+            .read()
+            .expect("pending_library lock poisoned")
+            .clone()
+    }
+
+    #[must_use]
+    pub fn find_pending_library_entry(&self, key: &str) -> Option<PendingLibraryEntry> {
+        self.pending_library
+            .read()
+            .expect("pending_library lock poisoned")
+            .iter()
+            .find(|p| p.entry.key == key)
+            .cloned()
+    }
+
+    /// Queue a library entry for human review. The agent calls this
+    /// instead of writing straight to the disk-backed `Library` so a
+    /// mirrored / mis-pinned footprint never reaches fab. Returns the
+    /// number of pending entries after insertion. If an entry with the
+    /// same key is already pending, it is replaced — the agent can
+    /// iterate without leaking ghosts.
+    pub fn queue_pending_library_entry(&self, pending: PendingLibraryEntry) -> usize {
+        let key = pending.entry.key.clone();
+        let count = {
+            let mut buf = self
+                .pending_library
+                .write()
+                .expect("pending_library lock poisoned");
+            if let Some(idx) = buf.iter().position(|p| p.entry.key == key) {
+                buf[idx] = pending;
+            } else {
+                buf.push(pending);
+            }
+            buf.len()
+        };
+        self.bus
+            .publish(Event::PendingLibraryChanged { count });
+        count
+    }
+
+    /// Promote a pending entry to the on-disk library. Writes any
+    /// staged attachments through `Library::attach`. Returns `true` if
+    /// the key was found and persisted, `false` if it was no longer in
+    /// the buffer (e.g. discarded racing with confirm).
+    pub fn confirm_pending_library_entry(&self, key: &str) -> Result<bool, String> {
+        let pending = {
+            let mut buf = self
+                .pending_library
+                .write()
+                .expect("pending_library lock poisoned");
+            let Some(idx) = buf.iter().position(|p| p.entry.key == key) else {
+                return Ok(false);
+            };
+            buf.remove(idx)
+        };
+        let stored = self.library.upsert(pending.entry)?;
+        for att in pending.attachments {
+            // Attachment failures are surfaced — the entry is already
+            // saved by upsert; the caller can re-attach if needed.
+            self.library
+                .attach(&stored.key, att.kind, att.filename, att.mime, &att.data)?;
+        }
+        let lib_count = self.library.list().len();
+        self.bus
+            .publish(Event::LibraryChanged { count: lib_count });
+        let pending_count = self
+            .pending_library
+            .read()
+            .expect("pending_library lock poisoned")
+            .len();
+        self.bus.publish(Event::PendingLibraryChanged {
+            count: pending_count,
+        });
+        Ok(true)
+    }
+
+    /// Drop a pending entry without persisting. Returns `true` if the
+    /// key was found, `false` if it was already gone.
+    pub fn discard_pending_library_entry(&self, key: &str) -> bool {
+        let removed = {
+            let mut buf = self
+                .pending_library
+                .write()
+                .expect("pending_library lock poisoned");
+            let Some(idx) = buf.iter().position(|p| p.entry.key == key) else {
+                return false;
+            };
+            buf.remove(idx);
+            true
+        };
+        if removed {
+            let pending_count = self
+                .pending_library
+                .read()
+                .expect("pending_library lock poisoned")
+                .len();
+            self.bus.publish(Event::PendingLibraryChanged {
+                count: pending_count,
+            });
+        }
+        removed
     }
 
     /// Read-only access to the user's component library. Mutations go
@@ -711,6 +848,7 @@ impl Project {
             bus: EventBus::new(),
             library: Arc::new(library),
             save_path: Arc::new(RwLock::new(Some(path.to_path_buf()))),
+            pending_library: Arc::new(RwLock::new(Vec::new())),
         };
         proj.bus.publish(Event::ProjectChanged);
         Some(proj)

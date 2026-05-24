@@ -1705,23 +1705,31 @@ fn tool_library_create(project: &Project, args: &Value) -> Result<Value, ToolErr
         attachments: Vec::new(),
         created_at: 0,
     };
-    let stored = project
-        .library()
-        .upsert(entry)
-        .map_err(ToolError::invalid_params)?;
-    let count = project.library().list().len();
-    project
-        .events()
-        .publish(pcb_core::Event::LibraryChanged { count });
+    // HARD GUARD: a library entry the agent generates does NOT land in
+    // the on-disk library until a human eyeballs the rendered footprint
+    // against the component photo and clicks confirm. Mirrored / mis-
+    // numbered footprints have shipped fab orders that ended up in the
+    // bin; the cost of one extra click per part is trivial next to
+    // ordering PCBs twice.
+    let pad_count = entry.pads.len();
+    let key = entry.key.clone();
+    let pending = pcb_core::PendingLibraryEntry {
+        entry: entry.clone(),
+        attachments: Vec::new(),
+    };
+    let pending_count = project.queue_pending_library_entry(pending);
     project.log(
         ActivityLevel::Info,
         format!(
-            "library.create: {} ({} pads)",
-            stored.key,
-            stored.pads.len()
+            "library.create: {} ({} pads) — pending human confirmation ({} queued)",
+            key, pad_count, pending_count
         ),
     );
-    Ok(text_result(format!("Saved {}", stored.key)).with_data(library_entry_full(&stored)))
+    Ok(text_result(format!(
+        "Queued {} for review — open the library review pane (or the auto-popup) and confirm before it lands in the on-disk library. Attach the component photo via `library.attach` before confirming so the reviewer can compare pinout vs. reality.",
+        key
+    ))
+    .with_data(library_entry_full(&entry)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1740,6 +1748,40 @@ fn tool_library_attach(project: &Project, args: &Value) -> Result<Value, ToolErr
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(input.data_base64.as_bytes())
         .map_err(|e| ToolError::invalid_params(format!("library.attach: invalid base64: {e}")))?;
+    // If the target entry is still in the pending-confirmation buffer
+    // (the typical case: `library.create` → `library.attach photo` →
+    // human reviews), stage the attachment on the pending record so the
+    // review modal can display it. Only after `confirm_pending_library_entry`
+    // does the file get written to disk via `Library::attach`. If the
+    // entry was already confirmed earlier, fall through to the live
+    // library so the agent can patch existing parts.
+    if let Some(mut pending) = project.find_pending_library_entry(&input.key) {
+        let byte_len = bytes.len();
+        pending.attachments.push(pcb_core::PendingAttachment {
+            kind: input.kind.clone(),
+            filename: input.filename.clone(),
+            mime: input.mime.clone(),
+            data: bytes,
+        });
+        project.queue_pending_library_entry(pending);
+        project.log(
+            ActivityLevel::Info,
+            format!(
+                "library.attach: {} ← {} ({} bytes) [pending review]",
+                input.key, input.filename, byte_len
+            ),
+        );
+        return Ok(text_result(format!(
+            "Staged {} on pending entry {} — will be persisted when the entry is confirmed",
+            input.filename, input.key
+        ))
+        .with_data(json!({
+            "kind": input.kind,
+            "filename": input.filename,
+            "mime": input.mime,
+            "pending": true,
+        })));
+    }
     let att = project
         .library()
         .attach(&input.key, input.kind, input.filename, input.mime, &bytes)

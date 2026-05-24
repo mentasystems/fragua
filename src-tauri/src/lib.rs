@@ -271,6 +271,135 @@ fn component_info(
     }))
 }
 
+/// Full library (every entry on disk, NOT filtered to "used by this
+/// project"). Powers the library review pane: the user walks every
+/// component, compares the rendered footprint against the photo, and
+/// flags anything mirrored. Returns the inline review SVG for each
+/// entry so the frontend can paint without a follow-up call.
+#[tauri::command]
+fn library_review_state(state: State<'_, AppState>) -> serde_json::Value {
+    let entries = state.project.library().list();
+    let items: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "key": e.key,
+                "description": e.description,
+                "default_value": e.default_value,
+                "edge_mounted": e.edge_mounted,
+                "pad_count": e.pads.len(),
+                "ground_pad_count": e.pads.iter().filter(|p| {
+                    pcb_render::is_ground_pad_label(&p.number, &p.name)
+                }).count(),
+                "lcsc_id": e.lcsc_id,
+                "mpn": e.mpn,
+                "attachments": e.attachments.iter().map(|a| serde_json::json!({
+                    "id": a.id,
+                    "kind": a.kind,
+                    "filename": a.filename,
+                    "mime": a.mime,
+                    "added_at": a.added_at,
+                })).collect::<Vec<_>>(),
+                "created_at": e.created_at,
+                "review_svg": pcb_render::render_library_entry_svg(e),
+            })
+        })
+        .collect();
+    serde_json::json!({ "entries": items })
+}
+
+/// Snapshot of every library entry the agent has queued but a human
+/// has not confirmed yet. Each item carries the inline review SVG and
+/// the staged attachments (photo + datasheet) as base64 data URIs —
+/// the frontend renders the confirmation modal from this alone, no
+/// follow-up fetches needed.
+#[tauri::command]
+fn pending_library_entries(state: State<'_, AppState>) -> serde_json::Value {
+    use base64::Engine;
+    let pending = state.project.pending_library_entries();
+    let items: Vec<serde_json::Value> = pending
+        .iter()
+        .map(|p| {
+            let attachments: Vec<serde_json::Value> = p
+                .attachments
+                .iter()
+                .map(|a| {
+                    let b64 =
+                        base64::engine::general_purpose::STANDARD.encode(&a.data);
+                    serde_json::json!({
+                        "kind": a.kind,
+                        "filename": a.filename,
+                        "mime": a.mime,
+                        "data_uri": format!("data:{};base64,{}", a.mime, b64),
+                        "bytes": a.data.len(),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "key": p.entry.key,
+                "description": p.entry.description,
+                "default_value": p.entry.default_value,
+                "default_rotation_deg": p.entry.default_rotation_deg,
+                "edge_mounted": p.entry.edge_mounted,
+                "pad_count": p.entry.pads.len(),
+                "ground_pad_count": p.entry.pads.iter().filter(|pad| {
+                    pcb_render::is_ground_pad_label(&pad.number, &pad.name)
+                }).count(),
+                "lcsc_id": p.entry.lcsc_id,
+                "mpn": p.entry.mpn,
+                "attachments": attachments,
+                "review_svg": pcb_render::render_library_entry_svg(&p.entry),
+                "pads": p.entry.pads.iter().map(|pad| serde_json::json!({
+                    "number": pad.number,
+                    "name": pad.name,
+                    "x_mm": pad.x_mm,
+                    "y_mm": pad.y_mm,
+                    "w_mm": pad.w_mm,
+                    "h_mm": pad.h_mm,
+                    "drill_mm": pad.drill_mm,
+                    "is_ground": pcb_render::is_ground_pad_label(&pad.number, &pad.name),
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "entries": items })
+}
+
+/// Confirm a pending library entry: promote it to the on-disk library
+/// (plus any staged attachments). The script-side agent does NOT have
+/// a verb for this — confirmation is human-only, by design.
+#[tauri::command]
+fn confirm_pending_library_entry(
+    state: State<'_, AppState>,
+    key: String,
+) -> Result<bool, String> {
+    let ok = state.project.confirm_pending_library_entry(&key)?;
+    state.project.log(
+        pcb_core::ActivityLevel::Info,
+        format!(
+            "library.confirm: {} ({})",
+            key,
+            if ok { "saved" } else { "no pending match" }
+        ),
+    );
+    Ok(ok)
+}
+
+/// Discard a pending library entry. Drops the staged attachments too.
+#[tauri::command]
+fn discard_pending_library_entry(state: State<'_, AppState>, key: String) -> bool {
+    let ok = state.project.discard_pending_library_entry(&key);
+    state.project.log(
+        pcb_core::ActivityLevel::Warn,
+        format!(
+            "library.discard: {} ({})",
+            key,
+            if ok { "dropped" } else { "no pending match" }
+        ),
+    );
+    ok
+}
+
 /// Read one library attachment as a base64-encoded data URI so the
 /// webview's <img> can render it directly. Files large enough that
 /// base64-ing 33% blows past the IPC limit get rejected; in practice
@@ -611,8 +740,12 @@ pub fn run() {
             run_drc,
             export_fab_pack,
             library_state,
+            library_review_state,
             library_attachment_data_uri,
-            component_info
+            component_info,
+            pending_library_entries,
+            confirm_pending_library_entry,
+            discard_pending_library_entry
         ])
         .run(tauri::generate_context!())
         .expect("tauri runtime");
@@ -703,7 +836,10 @@ fn is_persistable(ev: &pcb_core::Event) -> bool {
     use pcb_core::Event;
     !matches!(
         ev,
-        Event::Activity { .. } | Event::PlacementProgress { .. } | Event::LibraryChanged { .. }
+        Event::Activity { .. }
+            | Event::PlacementProgress { .. }
+            | Event::LibraryChanged { .. }
+            | Event::PendingLibraryChanged { .. }
     )
 }
 
