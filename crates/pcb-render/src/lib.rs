@@ -992,7 +992,9 @@ fn write_via(svg: &mut String, via: &Via) {
 
 /// Draw four resize handles on the outline, one per side. Each handle
 /// is tagged with `data-resize-edge` so the frontend can hit-test it
-/// in pointerdown.
+/// in pointerdown. Currently unused — the outline-resize UI path was
+/// drafted but not yet wired into the render pipeline.
+#[allow(dead_code)]
 fn write_outline_handles(svg: &mut String, outline: Rect) {
     let cx = (outline.min.x.to_mm() + outline.max.x.to_mm()) / 2.0;
     let cy = (outline.min.y.to_mm() + outline.max.y.to_mm()) / 2.0;
@@ -1111,7 +1113,7 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
     let cell_x = |i: usize| x0 + (i as f64 + 0.5) * cell;
     let cell_y = |j: usize| y0 + (j as f64 + 0.5) * cell;
 
-    let mut mark_rect = |grid: &mut [bool], rx: f64, ry: f64, rw: f64, rh: f64| {
+    let mark_rect = |grid: &mut [bool], rx: f64, ry: f64, rw: f64, rh: f64| {
         let i0 = (((rx - x0) / cell).floor() as i64).max(0) as usize;
         let i1 = (((rx + rw - x0) / cell).ceil() as i64).max(0) as usize;
         let j0 = (((ry - y0) / cell).floor() as i64).max(0) as usize;
@@ -1123,7 +1125,7 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
         }
     };
 
-    let mut mark_circle = |grid: &mut [bool], cx: f64, cy: f64, r: f64| {
+    let mark_circle = |grid: &mut [bool], cx: f64, cy: f64, r: f64| {
         let i0 = (((cx - r - x0) / cell).floor() as i64).max(0) as usize;
         let i1 = (((cx + r - x0) / cell).ceil() as i64).max(0) as usize;
         let j0 = (((cy - r - y0) / cell).floor() as i64).max(0) as usize;
@@ -1140,7 +1142,7 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
         }
     };
 
-    let mut mark_segment = |grid: &mut [bool], sx: f64, sy: f64, ex: f64, ey: f64, half: f64| {
+    let mark_segment = |grid: &mut [bool], sx: f64, sy: f64, ex: f64, ey: f64, half: f64| {
         let xmin = sx.min(ex) - half;
         let xmax = sx.max(ex) + half;
         let ymin = sy.min(ey) - half;
@@ -1344,7 +1346,7 @@ fn prune_pour_islands(
             }
             let i = idx % cols;
             let j = idx / cols;
-            let mut push = |ni: usize, nj: usize, comp: &mut [u32], stack: &mut Vec<usize>| {
+            let push = |ni: usize, nj: usize, comp: &mut [u32], stack: &mut Vec<usize>| {
                 let nidx = nj * cols + ni;
                 if !void[nidx] && comp[nidx] == u32::MAX {
                     comp[nidx] = id;

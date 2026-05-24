@@ -1,6 +1,6 @@
 //! Driver that ties the grid and A* together.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use pcb_core::{Board, CopperLayer, Length, Point, Rect, Trace, Via};
 
@@ -736,7 +736,7 @@ fn emit_trace(
     path: &[GridPoint],
     net: &str,
     net_id: u32,
-    opts: &RouteOptions,
+    _opts: &RouteOptions,
     halo_cells: i32,
     trace_width: Length,
 ) -> f64 {

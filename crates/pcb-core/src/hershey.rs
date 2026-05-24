@@ -1,3 +1,10 @@
+// The `G_a`..`G_z` constants intentionally use lowercase letters —
+// the case of the trailing character IS the glyph identity (`G_a` is
+// glyph "a"; `G_A` is glyph "A"). Renaming them upper-case would
+// collide the two halves of ASCII. Suppress the lint at the module
+// level so we don't sprinkle `#[allow]` on every const.
+#![allow(non_upper_case_globals)]
+
 //! Tiny stroke font for silkscreen text.
 //!
 //! Why a custom stroke font and not a TTF/Hershey-simplex import?
