@@ -1,7 +1,7 @@
 //! Bill-of-materials writer (CSV).
 //!
 //! Footprints are grouped by `(value, library)`; references for each
-//! group are concatenated. This is the layout JLC, MacroFab and most
+//! group are concatenated. This is the layout JLC, `MacroFab` and most
 //! house assembly tools accept.
 
 use std::collections::BTreeMap;

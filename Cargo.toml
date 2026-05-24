@@ -27,6 +27,35 @@ pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# Numeric truncation/sign/precision casts are pervasive in our graphics
+# and grid code — discretising mm-scaled `f64` into integer cells is the
+# whole point, and `pedantic` flags every cast. Suppressing at the
+# workspace level keeps the lint signal vs noise ratio usable.
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+# `must_use_candidate` is unstable in practice: applying it to mutation
+# methods that incidentally return an Id or a success bool cascades
+# warnings to every fire-and-forget call site we already accept.
+must_use_candidate = "allow"
+# `unnecessary_wraps` wants us to drop `Result`/`Option` from function
+# signatures whose current implementations never produce the error/none
+# arm. Changing those signatures is an API-break that we should make
+# deliberately, not under lint pressure.
+unnecessary_wraps = "allow"
+# Pure style / opinion lints that don't pull their weight on this codebase.
+similar_names = "allow"
+too_many_lines = "allow"
+too_many_arguments = "allow"
+doc_markdown = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+format_push_string = "allow"
+match_wildcard_for_single_variants = "allow"
+# Fields like `x_mm` / `w_mm` deliberately encode units in their names;
+# the `_mm` suffix is the whole point and trips both of these lints.
+struct_field_names = "allow"
+many_single_char_names = "allow"
 
 [profile.release]
 lto = "thin"

@@ -466,7 +466,7 @@ pub fn write_edge_cuts(board: &Board, w: &mut impl Write) -> io::Result<()> {
 }
 
 /// Default silk text stroke width when none is provided. Roughly
-/// matches the KiCad default of size/8.
+/// matches the `KiCad` default of size/8.
 fn default_silk_stroke(size: Length) -> Length {
     Length(size.0 / 8)
 }
@@ -477,19 +477,20 @@ fn default_silk_stroke(size: Length) -> Length {
 /// `D01` interpolation under a circular aperture matching the
 /// stroke width. Multiple stroke widths are coalesced through the
 /// regular aperture-table machinery so the file stays compact.
+// Each emitted item is one stroke under an aperture. A polyline
+// groups two or more points so the writer can fold them into a
+// single `D02 ... D01 ...; D01 ...; ...` run, instead of re-issuing
+// `D02` between every pair. Bare segments stay in single-line form
+// for clarity.
+enum Stroke {
+    Seg(Point, Point),
+    Poly(Vec<Point>),
+}
+
 pub fn write_silk(board: &Board, side: Side, w: &mut impl Write) -> io::Result<()> {
     write_header(w, side.silk_label())?;
     let layer = side.silk_layer();
     let mut table = Table::default();
-    // Each emitted item is one stroke under aperture `id`. A polyline
-    // groups two or more points so the writer can fold them into a
-    // single `D02 ... D01 ...; D01 ...; ...` run, instead of
-    // re-issuing `D02` between every pair. Bare segments stay in the
-    // single-line form for clarity.
-    enum Stroke {
-        Seg(Point, Point),
-        Poly(Vec<Point>),
-    }
     let mut draws: Vec<(u32, Stroke)> = Vec::new();
 
     // Board-level lines.
@@ -694,7 +695,7 @@ fn polyline_misses_all(poly: &[Point], rects: &[Rect]) -> bool {
     true
 }
 
-/// Local-coord (max_y, ...) of the bounding box of `fp`'s pads —
+/// Local-coord (`max_y`, ...) of the bounding box of `fp`'s pads —
 /// in footprint-local frame, ignoring rotation. Used by the silk
 /// writer to anchor the default `{REF}` label without round-tripping
 /// through `Footprint::bounds` (which gives world-space coords).

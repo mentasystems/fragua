@@ -13,6 +13,7 @@
 //! previous block-opening command (`sym` / `lib`) with `pin` or `pad`
 //! sub-entries. `#` starts a line comment.
 
+use base64::Engine;
 use serde_json::{json, Value};
 
 /// One parsed command + the line number it came from. The compiler
@@ -173,7 +174,7 @@ fn tokenise(body: &str, line_no: usize) -> Result<Vec<String>, ParseError> {
 }
 
 fn strip_trailing(s: &str) -> &str {
-    s.trim_end_matches(|c: char| c == ' ' || c == '\t' || c == '\r')
+    s.trim_end_matches([' ', '\t', '\r'])
 }
 
 // ─── Block (sym / lib) accumulator ────────────────────────────────────
@@ -226,7 +227,7 @@ impl Block {
                         role = Some(canonical_pin_role(rest, line)?);
                     } else if !t.contains('=') {
                         // Bare third token is the pin name (e.g. `pin 1 L V5`).
-                        name = t.clone();
+                        name.clone_from(t);
                     }
                 }
                 let mut pin = json!({"number": number, "side": side});
@@ -656,7 +657,6 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
             // path extension unless overridden.
             let bytes = std::fs::read(&path)
                 .map_err(|e| ParseError::at(line, format!("attach: cannot read {path}: {e}")))?;
-            use base64::Engine;
             let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
             let filename = std::path::Path::new(&path)
                 .file_name()
@@ -1052,8 +1052,8 @@ fn expand_side(s: &str, line: usize) -> Result<String, ParseError> {
     })
 }
 
-/// Canonical PinRole name (snake_case) the JSON layer expects, with
-/// short aliases ("in", "out", "pwr", "pwr_in") so the agent can be
+/// Canonical `PinRole` name (`snake_case`) the JSON layer expects, with
+/// short aliases ("in", "out", "pwr", "`pwr_in`") so the agent can be
 /// terse in long pin lists.
 fn canonical_pin_role(s: &str, line: usize) -> Result<String, ParseError> {
     Ok(match s.to_ascii_lowercase().as_str() {

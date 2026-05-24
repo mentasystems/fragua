@@ -29,7 +29,7 @@ pub fn render_schematic_svg(schematic: &Schematic) -> String {
     let mut svg = String::with_capacity(2048);
     let _ = write!(
         svg,
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{:.2} {:.2} {:.2} {:.2}" width="100%" height="100%">"##,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{:.2} {:.2} {:.2} {:.2}" width="100%" height="100%">"#,
         view.0, view.1, view.2, view.3,
     );
     let _ = write!(
@@ -104,7 +104,7 @@ fn write_grid(svg: &mut String, view: (f64, f64, f64, f64)) {
     while x <= vx + vw {
         let _ = write!(
             svg,
-            r##"<line x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}"/>"##,
+            r#"<line x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}"/>"#,
             x,
             vy,
             x,
@@ -116,7 +116,7 @@ fn write_grid(svg: &mut String, view: (f64, f64, f64, f64)) {
     while y <= vy + vh {
         let _ = write!(
             svg,
-            r##"<line x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}"/>"##,
+            r#"<line x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}"/>"#,
             vx,
             y,
             vx + vw,
@@ -137,8 +137,7 @@ fn write_symbol(svg: &mut String, schematic: &Schematic, sym: &Symbol) {
     // Body box.
     let _ = write!(
         svg,
-        r##"<rect x="{:.2}" y="{:.2}" width="{:.2}" height="{:.2}" fill="#161b22" stroke="#7d8590" stroke-width="0.15"/>"##,
-        bx, by, bw, bh
+        r##"<rect x="{bx:.2}" y="{by:.2}" width="{bw:.2}" height="{bh:.2}" fill="#161b22" stroke="#7d8590" stroke-width="0.15"/>"##
     );
 
     // Reference designator above the symbol.
@@ -260,8 +259,7 @@ fn write_pin(
     // Pin stub line.
     let _ = write!(
         svg,
-        r##"<line x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}" stroke="#c97a2b" stroke-width="0.2"/>"##,
-        start_x, start_y, end_x, end_y
+        r##"<line x1="{start_x:.2}" y1="{start_y:.2}" x2="{end_x:.2}" y2="{end_y:.2}" stroke="#c97a2b" stroke-width="0.2"/>"##
     );
     // Pin number, just inside the body next to the stub root.
     let (num_x, num_y, num_anchor) = match pin.side {
@@ -292,7 +290,7 @@ fn write_pin(
         };
         let _ = write!(
             svg,
-            r##"<text x="{:.2}" y="{:.2}" text-anchor="{}" font-family="ui-monospace, monospace" font-size="1.0" fill="{}">{}</text>"##,
+            r#"<text x="{:.2}" y="{:.2}" text-anchor="{}" font-family="ui-monospace, monospace" font-size="1.0" fill="{}">{}</text>"#,
             label_x,
             label_y,
             label_anchor,

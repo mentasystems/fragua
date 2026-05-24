@@ -34,22 +34,18 @@ pub fn render_svg(board: &Board) -> String {
     let mut svg = String::with_capacity(2048);
     let _ = write!(
         svg,
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{x:.3} {y:.3} {w:.3} {h:.3}" width="100%" height="100%">"##,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{x:.3} {y:.3} {w:.3} {h:.3}" width="100%" height="100%">"#,
         x = view_x_mm,
         y = -(view_y_mm + view_h_mm),
         w = view_w_mm,
         h = view_h_mm,
     );
-    svg.push_str(r##"<g transform="scale(1,-1)">"##);
+    svg.push_str(r#"<g transform="scale(1,-1)">"#);
 
     // Background.
     let _ = write!(
         svg,
-        r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="#0e1116"/>"##,
-        x = view_x_mm,
-        y = view_y_mm,
-        w = view_w_mm,
-        h = view_h_mm,
+        r##"<rect x="{view_x_mm:.3}" y="{view_y_mm:.3}" width="{view_w_mm:.3}" height="{view_h_mm:.3}" fill="#0e1116"/>"##,
     );
 
     // Millimetre grid: drawn under everything so the agent can read
@@ -138,7 +134,7 @@ fn write_silk_layer(svg: &mut String, board: &Board, side: SilkLayer) {
     };
     let _ = write!(
         svg,
-        r##"<g pointer-events="none" stroke="{SILK_COLOR}" stroke-linecap="round" fill="none" opacity="{opacity}">"##,
+        r#"<g pointer-events="none" stroke="{SILK_COLOR}" stroke-linecap="round" fill="none" opacity="{opacity}">"#,
     );
     for line in board.silk_lines.iter().filter(|l| l.layer == side) {
         write_silk_segment(svg, line.start, line.end, line.width.to_mm());
@@ -286,7 +282,7 @@ fn write_footprint_silk(svg: &mut String, fp: &Footprint, side: SilkLayer, outli
 fn write_silk_segment(svg: &mut String, a: Point, b: Point, width_mm: f64) {
     let _ = write!(
         svg,
-        r##"<line x1="{x1:.3}" y1="{y1:.3}" x2="{x2:.3}" y2="{y2:.3}" stroke-width="{w:.3}"/>"##,
+        r#"<line x1="{x1:.3}" y1="{y1:.3}" x2="{x2:.3}" y2="{y2:.3}" stroke-width="{w:.3}"/>"#,
         x1 = a.x.to_mm(),
         y1 = a.y.to_mm(),
         x2 = b.x.to_mm(),
@@ -383,8 +379,8 @@ fn safe_silk_text_pos(
     // Candidate anchor points (in world coords) ordered by visual
     // preference: above body, below body, then horizontally-offset
     // alternatives. The first whose rendered bbox fits wins.
-    let bx_mid = pcb_core::Length((body.min.x.0 + body.max.x.0) / 2);
-    let by_mid = pcb_core::Length((body.min.y.0 + body.max.y.0) / 2);
+    let bx_mid = pcb_core::Length(i64::midpoint(body.min.x.0, body.max.x.0));
+    let by_mid = pcb_core::Length(i64::midpoint(body.min.y.0, body.max.y.0));
     let candidates = [
         Point::new(bx_mid, body.max.y + pad),
         Point::new(bx_mid, body.min.y - pad - size),
@@ -435,7 +431,7 @@ fn write_mm_grid(svg: &mut String, view: Rect) {
         let stroke = if major { "#222a35" } else { "#161b22" };
         let _ = write!(
             svg,
-            r##"<line x1="{x:.3}" y1="{y1:.3}" x2="{x:.3}" y2="{y2:.3}" stroke="{stroke}"/>"##,
+            r#"<line x1="{x:.3}" y1="{y1:.3}" x2="{x:.3}" y2="{y2:.3}" stroke="{stroke}"/>"#,
             y1 = vy,
             y2 = vy + vh,
         );
@@ -447,7 +443,7 @@ fn write_mm_grid(svg: &mut String, view: Rect) {
         let stroke = if major { "#222a35" } else { "#161b22" };
         let _ = write!(
             svg,
-            r##"<line x1="{x1:.3}" y1="{y:.3}" x2="{x2:.3}" y2="{y:.3}" stroke="{stroke}"/>"##,
+            r#"<line x1="{x1:.3}" y1="{y:.3}" x2="{x2:.3}" y2="{y:.3}" stroke="{stroke}"/>"#,
             x1 = vx,
             x2 = vx + vw,
         );
@@ -491,8 +487,8 @@ fn write_origin_marker(svg: &mut String) {
 fn write_outline_dimensions(svg: &mut String, outline: Rect) {
     let w = outline.width().to_mm();
     let h = outline.height().to_mm();
-    let cx = (outline.min.x.to_mm() + outline.max.x.to_mm()) / 2.0;
-    let cy = (outline.min.y.to_mm() + outline.max.y.to_mm()) / 2.0;
+    let cx = f64::midpoint(outline.min.x.to_mm(), outline.max.x.to_mm());
+    let cy = f64::midpoint(outline.min.y.to_mm(), outline.max.y.to_mm());
     // Width label hovering above the top edge.
     let _ = write!(
         svg,
@@ -542,7 +538,7 @@ fn write_footprint(svg: &mut String, fp: &Footprint, pours: &[pcb_core::Pour]) {
     // cross-reference the library panel.
     let _ = write!(
         svg,
-        r##"<g data-board-ref="{r}" data-library-key="{k}" transform="translate({x:.3},{y:.3}) rotate({deg:.2})">"##,
+        r#"<g data-board-ref="{r}" data-library-key="{k}" transform="translate({x:.3},{y:.3}) rotate({deg:.2})">"#,
         r = escape(&fp.reference),
         k = escape(&fp.key),
         x = fx,
@@ -574,10 +570,7 @@ fn write_footprint(svg: &mut String, fp: &Footprint, pours: &[pcb_core::Pour]) {
     // SVG `<text>` because it is metadata (run-time only) and the
     // Hershey vectorisation hurts readability at the small font size
     // we use for it.
-    let _ = write!(
-        svg,
-        r##"<g transform="scale(1,-1)" pointer-events="none">"##,
-    );
+    let _ = write!(svg, r#"<g transform="scale(1,-1)" pointer-events="none">"#,);
     // The "REF · VALUE" caption used to live here as a plain SVG
     // <text> below the body. It overlapped the silk-text labels
     // emitted by the silkscreen pipeline (`{REF}`/`{KEY}` templates)
@@ -671,7 +664,7 @@ fn write_pad(svg: &mut String, pad: &Pad, pours: &[pcb_core::Pour]) {
     };
     let _ = write!(
         svg,
-        r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="{fill}" pointer-events="none"/>"##,
+        r#"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="{fill}" pointer-events="none"/>"#,
         x = cx - w / 2.0,
         y = cy - h / 2.0,
     );
@@ -768,7 +761,7 @@ pub fn render_library_entry_svg(entry: &pcb_core::LibraryEntry) -> String {
     let mut svg = String::with_capacity(2048);
     let _ = write!(
         svg,
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{x:.3} {y:.3} {w:.3} {h:.3}" width="100%" height="100%">"##,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{x:.3} {y:.3} {w:.3} {h:.3}" width="100%" height="100%">"#,
         // Flip Y so positive Y is up — TOP view, matching how the rest
         // of the board canvas behaves.
         x = min_x,
@@ -785,7 +778,7 @@ pub fn render_library_entry_svg(entry: &pcb_core::LibraryEntry) -> String {
         w = w,
         h = h,
     );
-    svg.push_str(r##"<g transform="scale(1,-1)">"##);
+    svg.push_str(r#"<g transform="scale(1,-1)">"#);
 
     // Light millimetre grid for scale.
     let grid_step = 1.0;
@@ -798,10 +791,7 @@ pub fn render_library_entry_svg(entry: &pcb_core::LibraryEntry) -> String {
     while gx <= gx1 + 1e-9 {
         let _ = write!(
             svg,
-            r##"<line x1="{x:.3}" y1="{y0:.3}" x2="{x:.3}" y2="{y1:.3}"/>"##,
-            x = gx,
-            y0 = min_y,
-            y1 = max_y,
+            r#"<line x1="{gx:.3}" y1="{min_y:.3}" x2="{gx:.3}" y2="{max_y:.3}"/>"#,
         );
         gx += grid_step;
     }
@@ -809,10 +799,7 @@ pub fn render_library_entry_svg(entry: &pcb_core::LibraryEntry) -> String {
     while gy <= gy1 + 1e-9 {
         let _ = write!(
             svg,
-            r##"<line x1="{x0:.3}" y1="{y:.3}" x2="{x1:.3}" y2="{y:.3}"/>"##,
-            x0 = min_x,
-            y = gy,
-            x1 = max_x,
+            r#"<line x1="{min_x:.3}" y1="{gy:.3}" x2="{max_x:.3}" y2="{gy:.3}"/>"#,
         );
         gy += grid_step;
     }
@@ -827,7 +814,7 @@ pub fn render_library_entry_svg(entry: &pcb_core::LibraryEntry) -> String {
         let fill = "#c97a2b";
         let _ = write!(
             svg,
-            r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="{fill}"/>"##,
+            r#"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="{fill}"/>"#,
             x = x,
             y = y,
             w = pad.w_mm,
@@ -864,7 +851,7 @@ pub fn render_library_entry_svg(entry: &pcb_core::LibraryEntry) -> String {
         let label_color = if is_gnd { "#ff2bd6" } else { "#0e1116" };
         let _ = write!(
             svg,
-            r##"<g transform="translate({cx:.3},{cy:.3}) scale(1,-1)"><text x="0" y="0" text-anchor="middle" dominant-baseline="middle" font-family="ui-monospace, monospace" font-size="{sz:.2}" fill="{label_color}" font-weight="bold">{lab}</text></g>"##,
+            r#"<g transform="translate({cx:.3},{cy:.3}) scale(1,-1)"><text x="0" y="0" text-anchor="middle" dominant-baseline="middle" font-family="ui-monospace, monospace" font-size="{sz:.2}" fill="{label_color}" font-weight="bold">{lab}</text></g>"#,
             cx = pad.x_mm,
             cy = -pad.y_mm,
             sz = sz,
@@ -881,8 +868,6 @@ pub fn render_library_entry_svg(entry: &pcb_core::LibraryEntry) -> String {
         let _ = write!(
             svg,
             r##"<circle cx="{x:.3}" cy="{y:.3}" r="0.3" fill="#ffd166"/>"##,
-            x = x,
-            y = y,
         );
     }
 
@@ -966,7 +951,7 @@ fn write_trace(svg: &mut String, trace: &Trace) {
     };
     let _ = write!(
         svg,
-        r##"<line data-trace-id="{id}" pathLength="1" x1="{x1:.3}" y1="{y1:.3}" x2="{x2:.3}" y2="{y2:.3}" stroke="{stroke}" stroke-width="{w:.3}" stroke-linecap="round"><title>{net} ({layer_label})</title></line>"##,
+        r#"<line data-trace-id="{id}" pathLength="1" x1="{x1:.3}" y1="{y1:.3}" x2="{x2:.3}" y2="{y2:.3}" stroke="{stroke}" stroke-width="{w:.3}" stroke-linecap="round"><title>{net} ({layer_label})</title></line>"#,
         id = trace.id.0,
         x1 = trace.start.x.to_mm(),
         y1 = trace.start.y.to_mm(),
@@ -996,8 +981,8 @@ fn write_via(svg: &mut String, via: &Via) {
 /// drafted but not yet wired into the render pipeline.
 #[allow(dead_code)]
 fn write_outline_handles(svg: &mut String, outline: Rect) {
-    let cx = (outline.min.x.to_mm() + outline.max.x.to_mm()) / 2.0;
-    let cy = (outline.min.y.to_mm() + outline.max.y.to_mm()) / 2.0;
+    let cx = f64::midpoint(outline.min.x.to_mm(), outline.max.x.to_mm());
+    let cy = f64::midpoint(outline.min.y.to_mm(), outline.max.y.to_mm());
     let w = (outline.max.x - outline.min.x).to_mm();
     let h = (outline.max.y - outline.min.y).to_mm();
     // Handle is a small square sitting on the edge midpoint.
@@ -1038,12 +1023,12 @@ const POUR_GRID_MM: f64 = 0.125;
 /// Minimum continuous-copper strip width the pour will tolerate,
 /// in mm. Slivers of pour below this width are removed by a
 /// morphological CLOSE on the void grid (dilate-then-erode by half
-/// the strip). Roughly matches what KiCad calls "min copper width".
+/// the strip). Roughly matches what `KiCad` calls "min copper width".
 const POUR_MIN_STRIP_MM: f64 = 1.2;
 /// Smallest connected pour island the renderer will keep, in mm².
 /// After identifying the largest pour component as "the main
 /// plane", every OTHER pour blob whose total area is under this
-/// threshold gets converted into void. Matches KiCad's "min
+/// threshold gets converted into void. Matches `KiCad`'s "min
 /// island area".
 const POUR_MIN_ISLAND_MM2: f64 = 30.0;
 
@@ -1074,7 +1059,7 @@ fn write_substrate_fill(svg: &mut String, outline: Rect, corner_radius_mm: f64) 
 /// appears exactly where the user expects continuous clearance. SVG
 /// masks solve it directly: `black + black` in the mask is still
 /// black, so overlapping cutouts naturally form one continuous
-/// keepout. Same trick KiCad uses internally for its plot output.
+/// keepout. Same trick `KiCad` uses internally for its plot output.
 ///
 /// Mask convention: white pixels show the underlying fill, black
 /// pixels hide it. So the mask starts as a fully-white rect (pour
@@ -1267,7 +1252,7 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
     //    White = pour visible; black = pour hidden (void).
     let _ = write!(
         svg,
-        r##"<defs><mask id="{mask_id}" maskUnits="userSpaceOnUse" x="{x0:.3}" y="{y0:.3}" width="{w:.3}" height="{h:.3}"><rect x="{x0:.3}" y="{y0:.3}" width="{w:.3}" height="{h:.3}" fill="white"/>"##,
+        r#"<defs><mask id="{mask_id}" maskUnits="userSpaceOnUse" x="{x0:.3}" y="{y0:.3}" width="{w:.3}" height="{h:.3}"><rect x="{x0:.3}" y="{y0:.3}" width="{w:.3}" height="{h:.3}" fill="white"/>"#,
     );
 
     // 4. Run-length encode horizontal void runs into black rects.
@@ -1289,9 +1274,7 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
             let rw = (i - start) as f64 * cell;
             let _ = write!(
                 svg,
-                r##"<rect x="{rx:.3}" y="{ry:.3}" width="{rw:.3}" height="{rh:.3}" fill="black"/>"##,
-                ry = row_y,
-                rh = cell,
+                r#"<rect x="{rx:.3}" y="{row_y:.3}" width="{rw:.3}" height="{cell:.3}" fill="black"/>"#,
             );
         }
     }
@@ -1302,8 +1285,7 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
     //    inset area, masked by the rasterised void above.
     let _ = write!(
         svg,
-        r##"<rect x="{x0:.3}" y="{y0:.3}" width="{w:.3}" height="{h:.3}" rx="{pr:.3}" ry="{pr:.3}" fill="#0e1116" fill-opacity="0.78" mask="url(#{mask_id})" pointer-events="none"/>"##,
-        pr = pour_radius,
+        r##"<rect x="{x0:.3}" y="{y0:.3}" width="{w:.3}" height="{h:.3}" rx="{pour_radius:.3}" ry="{pour_radius:.3}" fill="#0e1116" fill-opacity="0.78" mask="url(#{mask_id})" pointer-events="none"/>"##,
     );
 }
 
@@ -1496,7 +1478,7 @@ fn write_rect_stroke(
     let r = corner_radius_mm.max(0.0);
     let _ = write!(
         svg,
-        r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" rx="{r:.3}" ry="{r:.3}" fill="none" stroke="{stroke}" stroke-width="{sw:.3}"/>"##,
+        r#"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" rx="{r:.3}" ry="{r:.3}" fill="none" stroke="{stroke}" stroke-width="{sw:.3}"/>"#,
         x = rect.min.x.to_mm(),
         y = rect.min.y.to_mm(),
         w = rect.width().to_mm(),
@@ -1524,7 +1506,16 @@ mod tests {
         ] {
             assert!(is_ground_net(n), "expected {n} to read as ground");
         }
-        for n in ["VCC", "VDD", "3V3", "5V", "SDA", "MISO", "GNDB", "MY_GND_NET"] {
+        for n in [
+            "VCC",
+            "VDD",
+            "3V3",
+            "5V",
+            "SDA",
+            "MISO",
+            "GNDB",
+            "MY_GND_NET",
+        ] {
             assert!(!is_ground_net(n), "expected {n} NOT to read as ground");
         }
     }

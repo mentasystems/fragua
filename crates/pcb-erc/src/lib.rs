@@ -26,7 +26,7 @@ pub struct ErcOptions {
     /// with `erc strict_only=true` when you want only the always-bug
     /// findings.
     pub heuristics: bool,
-    /// Maximum body-to-body distance (mm) between a chip's PowerIn
+    /// Maximum body-to-body distance (mm) between a chip's `PowerIn`
     /// pin and a capacitor on the same net for the cap to count as
     /// a decoupling cap for that pin. Beyond this the heuristic
     /// fires `MissingDecouplingCap`.
@@ -330,17 +330,17 @@ fn check_phantom_nets(board: &Board, sch: &Schematic, report: &mut ErcReport) {
 
 /// Per-net checks that depend on `PinRole`:
 ///
-/// - **MultipleDrivers**: 2+ `Output` pins on the same net.
-/// - **UnpoweredPowerNet**: at least one `PowerIn` and no `PowerOut`
+/// - **`MultipleDrivers`**: 2+ `Output` pins on the same net.
+/// - **`UnpoweredPowerNet`**: at least one `PowerIn` and no `PowerOut`
 ///   source. (A net with only `PowerIn` pins is sinking energy from
 ///   nowhere — the agent forgot to wire a regulator or supply.)
-/// - **UnconnectedInput**: an `Input` pin on a net that has no
-///   driver (no Output, Bidir, or PowerOut). The input is left
+/// - **`UnconnectedInput`**: an `Input` pin on a net that has no
+///   driver (no Output, Bidir, or `PowerOut`). The input is left
 ///   electrically floating; if intentional the agent should re-wire
 ///   it to GND or VCC explicitly.
 ///
 /// Pours of a power net (e.g. a bottom-layer GND pour) count as a
-/// PowerOut source: the pour itself is the supply geometry, even if
+/// `PowerOut` source: the pour itself is the supply geometry, even if
 /// no schematic pin declares Power explicitly. Avoids spurious
 /// "unpowered GND" warnings on every project that uses a ground pour.
 fn check_role_based_rules(board: &Board, sch: &Schematic, report: &mut ErcReport) {
@@ -395,7 +395,7 @@ fn check_role_based_rules(board: &Board, sch: &Schematic, report: &mut ErcReport
                     n = outputs.len(),
                 ),
                 involved: std::iter::once(net_name.clone())
-                    .chain(outputs.iter().map(|s| s.to_string()))
+                    .chain(outputs.iter().map(std::string::ToString::to_string))
                     .collect(),
             });
         }
@@ -494,16 +494,13 @@ fn check_decoupling(board: &Board, sch: &Schematic, max_dist_mm: f64, report: &m
                 continue;
             }
             // Cap on this net within max_dist_mm of this chip?
-            let close_cap = caps_by_net
-                .get(net_name)
-                .map(|caps| {
-                    caps.iter().any(|(_, cx, cy)| {
-                        let dx = cx - sx;
-                        let dy = cy - sy;
-                        (dx * dx + dy * dy).sqrt() <= max_dist_mm
-                    })
+            let close_cap = caps_by_net.get(net_name).is_some_and(|caps| {
+                caps.iter().any(|(_, cx, cy)| {
+                    let dx = cx - sx;
+                    let dy = cy - sy;
+                    (dx * dx + dy * dy).sqrt() <= max_dist_mm
                 })
-                .unwrap_or(false);
+            });
             if !close_cap {
                 let label = format!("{}.{}", sym.reference, pin.number);
                 report.push(Violation {
@@ -567,8 +564,8 @@ fn check_i2c_pullups(sch: &Schematic, report: &mut ErcReport) {
 }
 
 fn pin_label(sch: &Schematic, sym_id: pcb_core::Id, pin: &str) -> String {
-    sch.symbols
-        .get(&sym_id)
-        .map(|s| format!("{}.{}", s.reference, pin))
-        .unwrap_or_else(|| format!("?.{pin}"))
+    sch.symbols.get(&sym_id).map_or_else(
+        || format!("?.{pin}"),
+        |s| format!("{}.{}", s.reference, pin),
+    )
 }

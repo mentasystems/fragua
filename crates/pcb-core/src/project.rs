@@ -145,8 +145,7 @@ impl Project {
             }
             buf.len()
         };
-        self.bus
-            .publish(Event::PendingLibraryChanged { count });
+        self.bus.publish(Event::PendingLibraryChanged { count });
         count
     }
 
@@ -173,8 +172,7 @@ impl Project {
                 .attach(&stored.key, att.kind, att.filename, att.mime, &att.data)?;
         }
         let lib_count = self.library.list().len();
-        self.bus
-            .publish(Event::LibraryChanged { count: lib_count });
+        self.bus.publish(Event::LibraryChanged { count: lib_count });
         let pending_count = self
             .pending_library
             .read()
@@ -422,7 +420,7 @@ impl Project {
             let mut inner = self.inner.write().expect("project lock poisoned");
             let outline = inner.board.outline;
             let mut salvaged: Vec<Footprint> = inner.board.footprints_in_order().cloned().collect();
-            for fp in salvaged.iter_mut() {
+            for fp in &mut salvaged {
                 fp.position = Point::new(Length::from_mm(-100.0), Length::from_mm(-100.0));
             }
             inner.board = Board::new();
@@ -733,6 +731,7 @@ impl Project {
 
     /// consistent so downstream tools (router, BOM) never see dangling
     /// references.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn set_net(&self, net: Net) -> Result<(), String> {
         let mut inner = self.inner.write().expect("project lock poisoned");
         for c in &net.connections {

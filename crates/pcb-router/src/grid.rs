@@ -5,10 +5,10 @@
 //! - `Free`        — routable.
 //! - `Obstacle`    — never enter (foreign pad, board edge).
 //! - `NetPad(u32)` — entrance point for the named net; obstacle for
-//!                   every other net.
+//!   every other net.
 //! - `Trace(u32)`  — already routed by another net; obstacle for
-//!                   everyone else, free for the same net (allows
-//!                   multi-segment polylines on a star route).
+//!   everyone else, free for the same net (allows
+//!   multi-segment polylines on a star route).
 
 use pcb_core::{Board, CopperLayer, Length, Point, Rect};
 
@@ -157,8 +157,8 @@ impl Grid {
     /// Convert a grid point back to a board-coord `Point`.
     pub fn unsnap(&self, p: GridPoint) -> Point {
         Point::new(
-            Length(self.origin_nm.0 + p.col as i64 * self.cell_nm),
-            Length(self.origin_nm.1 + p.row as i64 * self.cell_nm),
+            Length(self.origin_nm.0 + i64::from(p.col) * self.cell_nm),
+            Length(self.origin_nm.1 + i64::from(p.row) * self.cell_nm),
         )
     }
 

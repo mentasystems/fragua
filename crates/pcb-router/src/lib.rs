@@ -7,8 +7,8 @@
 //! switch sides when a same-layer detour is more expensive than punching
 //! through.
 //!
-//! No external router binaries, no FreeRouting wrappers — everything
-//! here is ours. KiCad and FreeRouting are reference material only.
+//! No external router binaries, no `FreeRouting` wrappers — everything
+//! here is ours. `KiCad` and `FreeRouting` are reference material only.
 //!
 //! Phase 5 limitations (intentional, will lift in later phases):
 //! - Single net routed at a time, no rip-up-and-retry. A net that fails

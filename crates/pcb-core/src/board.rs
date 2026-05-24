@@ -57,17 +57,12 @@ pub enum SilkLayer {
 /// Horizontal anchor for a silk text run. Identical semantics to
 /// SVG's `text-anchor`: where on the rendered glyph ribbon the
 /// `position` point lands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum SilkAnchor {
     Start,
+    #[default]
     Middle,
     End,
-}
-
-impl Default for SilkAnchor {
-    fn default() -> Self {
-        Self::Middle
-    }
 }
 
 /// A straight silkscreen line segment in board coordinates.
@@ -362,6 +357,9 @@ pub struct Board {
 /// zero, so existing on-disk projects (which never serialised it)
 /// stay byte-identical and new projects with sharp corners don't
 /// gain a noisy `outline_corner_radius: 0` field on disk.
+// serde's `skip_serializing_if` calls this with a `&T`, so the
+// pass-by-ref-vs-value lint doesn't apply here.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_zero_length(v: &Length) -> bool {
     v.0 == 0
 }
@@ -404,7 +402,6 @@ impl Board {
         self.footprints.remove(&id)
     }
 
-    #[must_use]
     pub fn footprints_in_order(&self) -> impl Iterator<Item = &Footprint> {
         self.footprint_order
             .iter()

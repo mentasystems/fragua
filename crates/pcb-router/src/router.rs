@@ -158,7 +158,7 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     // as before — gets the unconstrained nets to lay copper before the
     // hairy ones contend for space.
     let mut order: Vec<String> = nets.keys().cloned().collect();
-    order.sort_by_key(|n| nets.get(n).map(Vec::len).unwrap_or(0));
+    order.sort_by_key(|n| nets.get(n).map_or(0, Vec::len));
 
     // Cost map shared across iterations: starts at 0, accumulates bias
     // around the corridors of failed/inefficient nets so the next pass
@@ -226,7 +226,7 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
             bump_corridor(
                 &snap_grid,
                 &mut cost_map,
-                nets.get(name).map(Vec::as_slice).unwrap_or(&[]),
+                nets.get(name).map_or(&[], Vec::as_slice),
                 CONGESTION_BUMP_FAILED * bump_factor,
             );
         }
@@ -234,7 +234,7 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
             bump_corridor(
                 &snap_grid,
                 &mut cost_map,
-                nets.get(name).map(Vec::as_slice).unwrap_or(&[]),
+                nets.get(name).map_or(&[], Vec::as_slice),
                 CONGESTION_BUMP_INEFFICIENT * bump_factor,
             );
         }

@@ -226,7 +226,7 @@ pub fn place(
         let Some(fp) = board.footprints.get(&id) else {
             continue;
         };
-        let move_kind = if rng.next_u32() % 8 == 0 {
+        let move_kind = if rng.next_u32().is_multiple_of(8) {
             // 1/8 of the moves try a 90° rotation in place — cheap way
             // to fix orientation without burning translation moves.
             MoveKind::Rotate90 { footprint: id }
@@ -425,7 +425,7 @@ fn net_hpwl(board: &Board, net: &str) -> f64 {
 /// about pad rotation, individual trace widths, or the layered grid.
 /// What it captures is the basic "did the placer cluster too many
 /// signals through one bottleneck" failure mode that pure HPWL
-/// minimisation produces. Cheap to compute (O(N_nets × cells)).
+/// minimisation produces. Cheap to compute (`O(N_nets` × cells)).
 fn congestion_overflow(board: &Board, outline: pcb_core::Rect, res: u32) -> f64 {
     if res == 0 {
         return 0.0;
@@ -438,8 +438,8 @@ fn congestion_overflow(board: &Board, outline: pcb_core::Rect, res: u32) -> f64 
     if w <= 0.0 || h <= 0.0 {
         return 0.0;
     }
-    let cell_w = w / res as f64;
-    let cell_h = h / res as f64;
+    let cell_w = w / f64::from(res);
+    let cell_h = h / f64::from(res);
 
     // Per-net pad-bbox in mm.
     let mut net_bbox: HashMap<&str, [f64; 4]> = HashMap::new();
@@ -483,7 +483,7 @@ fn congestion_overflow(board: &Board, outline: pcb_core::Rect, res: u32) -> f64 
 
     counts
         .iter()
-        .map(|&n| if n > 1 { (n - 1) as f64 } else { 0.0 })
+        .map(|&n| if n > 1 { f64::from(n - 1) } else { 0.0 })
         .sum()
 }
 
@@ -673,7 +673,7 @@ impl Rng {
         x ^= x << 25;
         x ^= x >> 27;
         self.state = x;
-        x.wrapping_mul(2685821657736338717)
+        x.wrapping_mul(2_685_821_657_736_338_717)
     }
     fn next_u32(&mut self) -> u32 {
         (self.next_u64() >> 32) as u32

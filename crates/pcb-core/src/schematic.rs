@@ -4,7 +4,7 @@
 //! symbols (by kind) and conectividad por nets — `R1.1` and `U1.8`
 //! are both on net `VCC`, etc. Wires are not stored: rendering uses a
 //! labels-only style (each pin stub carries its net name), which is a
-//! valid KiCad convention and keeps the model identical to what the
+//! valid `KiCad` convention and keeps the model identical to what the
 //! agent reasons about.
 
 use std::collections::HashMap;
@@ -149,10 +149,10 @@ pub struct Symbol {
     pub position: Point,
     pub rotation: f32,
     /// Optional library key the agent picked for this symbol — e.g.
-    /// "esp32_s3_zero", "lora_xl1262", "screw_term_2p_5.08mm". When set,
+    /// "`esp32_s3_zero`", "`lora_xl1262`", "`screw_term_2p_5.08mm`". When set,
     /// `palette.add_from_library` can spin up the matching footprint
     /// without the agent having to spell every pad geometry by hand.
-    /// Always lowercase snake_case so lookups are deterministic.
+    /// Always lowercase `snake_case` so lookups are deterministic.
     #[serde(default)]
     pub key: String,
     /// Free-form intent the agent records when creating the symbol —

@@ -1,21 +1,21 @@
 //! `pcb-drc` — native design rule checker.
 //!
 //! Phase 4 implementation: five geometric checks over a `Board`.
-//! - **PadPadClearance**: two pads on the same copper layer that
+//! - **`PadPadClearance`**: two pads on the same copper layer that
 //!   belong to different nets must keep `min_clearance` of breathing
 //!   room between their outer edges.
-//! - **TraceTraceClearance**: two trace segments on the same layer
+//! - **`TraceTraceClearance`**: two trace segments on the same layer
 //!   from different nets must do likewise (edge-to-edge after
 //!   subtracting the trace half-widths).
-//! - **TracePadClearance**: trace edge vs pad edge across nets.
-//! - **EdgeClearance**: every copper item (pad, trace, via) must sit
+//! - **`TracePadClearance`**: trace edge vs pad edge across nets.
+//! - **`EdgeClearance`**: every copper item (pad, trace, via) must sit
 //!   at least `edge_clearance` inside the board outline.
-//! - **UnconnectedPad**: a pad declares a net but no copper item of
+//! - **`UnconnectedPad`**: a pad declares a net but no copper item of
 //!   that net touches it — usually means the router gave up.
-//! - **SmallComponentDangling**: a footprint with fewer than 8 pads
+//! - **`SmallComponentDangling`**: a footprint with fewer than 8 pads
 //!   has at least one pad that is either unrouted or carries no net at
 //!   all. Surfaces the kind of dangling resistor / cap / 2-pin module
-//!   pad that the per-pad UnconnectedPad warning would also catch, but
+//!   pad that the per-pad `UnconnectedPad` warning would also catch, but
 //!   raises it once per component so the agent sees a tight summary.
 //!
 //! Pads are axis-aligned in world coords because we only model 90°
@@ -260,12 +260,12 @@ fn check_trace_trace(board: &Board, opts: &DrcOptions, report: &mut DrcReport) {
             let gap = centerline_dist - half_a - half_b;
             if gap + 1e-6 < clr {
                 let pa_mid = (
-                    (a.start.x.to_mm() + a.end.x.to_mm()) / 2.0,
-                    (a.start.y.to_mm() + a.end.y.to_mm()) / 2.0,
+                    f64::midpoint(a.start.x.to_mm(), a.end.x.to_mm()),
+                    f64::midpoint(a.start.y.to_mm(), a.end.y.to_mm()),
                 );
                 let pb_mid = (
-                    (b.start.x.to_mm() + b.end.x.to_mm()) / 2.0,
-                    (b.start.y.to_mm() + b.end.y.to_mm()) / 2.0,
+                    f64::midpoint(b.start.x.to_mm(), b.end.x.to_mm()),
+                    f64::midpoint(b.start.y.to_mm(), b.end.y.to_mm()),
                 );
                 report.push(Violation {
                     kind: ViolationKind::TraceTraceClearance,
@@ -274,8 +274,8 @@ fn check_trace_trace(board: &Board, opts: &DrcOptions, report: &mut DrcReport) {
                         "trace {} – trace {}: {gap:.3} mm < {clr:.3} mm",
                         a.net, b.net
                     ),
-                    x_mm: (pa_mid.0 + pb_mid.0) / 2.0,
-                    y_mm: (pa_mid.1 + pb_mid.1) / 2.0,
+                    x_mm: f64::midpoint(pa_mid.0, pb_mid.0),
+                    y_mm: f64::midpoint(pa_mid.1, pb_mid.1),
                     involved: vec![a.net.clone(), b.net.clone()],
                 });
             }
@@ -377,8 +377,8 @@ fn check_edge(
         let ymax = trace.start.y.to_mm().max(trace.end.y.to_mm()) + half;
         let gap = edge_gap(xmin, ymin, xmax, ymax);
         if gap + 1e-6 < clr {
-            let mx = (trace.start.x.to_mm() + trace.end.x.to_mm()) / 2.0;
-            let my = (trace.start.y.to_mm() + trace.end.y.to_mm()) / 2.0;
+            let mx = f64::midpoint(trace.start.x.to_mm(), trace.end.x.to_mm());
+            let my = f64::midpoint(trace.start.y.to_mm(), trace.end.y.to_mm());
             report.push(Violation {
                 kind: ViolationKind::EdgeClearance,
                 severity: Severity::Error,
@@ -491,9 +491,8 @@ fn check_small_component_dangling(board: &Board, pads: &[PadGeom], report: &mut 
 }
 
 fn pad_has_same_net_neighbour(pads: &[PadGeom], pad: &PadGeom) -> bool {
-    let net = match pad.net {
-        Some(n) => n,
-        None => return false,
+    let Some(net) = pad.net else {
+        return false;
     };
     for other in pads {
         if std::ptr::eq(other, pad) {
@@ -561,8 +560,8 @@ fn check_narrow_traces(board: &Board, opts: &DrcOptions, report: &mut DrcReport)
     for trace in &board.traces {
         let w = trace.width.to_mm();
         if w + 1e-6 < min_w {
-            let mx = (trace.start.x.to_mm() + trace.end.x.to_mm()) / 2.0;
-            let my = (trace.start.y.to_mm() + trace.end.y.to_mm()) / 2.0;
+            let mx = f64::midpoint(trace.start.x.to_mm(), trace.end.x.to_mm());
+            let my = f64::midpoint(trace.start.y.to_mm(), trace.end.y.to_mm());
             report.push(Violation {
                 kind: ViolationKind::NarrowTrace,
                 severity: Severity::Warning,
@@ -715,15 +714,15 @@ fn aabb_gap_mm(a: Rect, b: Rect) -> f64 {
 
 fn pad_center(r: Rect) -> (f64, f64) {
     (
-        (r.min.x.to_mm() + r.max.x.to_mm()) / 2.0,
-        (r.min.y.to_mm() + r.max.y.to_mm()) / 2.0,
+        f64::midpoint(r.min.x.to_mm(), r.max.x.to_mm()),
+        f64::midpoint(r.min.y.to_mm(), r.max.y.to_mm()),
     )
 }
 
 fn midpoint(a: Rect, b: Rect) -> (f64, f64) {
     let pa = pad_center(a);
     let pb = pad_center(b);
-    ((pa.0 + pb.0) / 2.0, (pa.1 + pb.1) / 2.0)
+    (f64::midpoint(pa.0, pb.0), f64::midpoint(pa.1, pb.1))
 }
 
 fn point_segment_distance(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {

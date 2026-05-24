@@ -81,7 +81,7 @@ pub struct LibraryPad {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Attachment {
-    /// UUIDv4. Also the on-disk basename (extension follows the mime).
+    /// `UUIDv4`. Also the on-disk basename (extension follows the mime).
     pub id: String,
     /// What the agent thinks this file is — free text, but we suggest
     /// "photo", "datasheet", "note".
@@ -96,7 +96,7 @@ pub struct Attachment {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LibraryEntry {
-    /// Stable identifier (snake_case). Used by `palette.add_from_library`.
+    /// Stable identifier (`snake_case`). Used by `palette.add_from_library`.
     pub key: String,
     /// What the part is + any orientation / role intent. The agent
     /// writes this when creating the entry, often after looking at an
@@ -154,9 +154,7 @@ pub struct Library {
 
 /// Default location: `~/.pcb-library/`. Created on first access.
 fn default_root() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
     home.join(".pcb-library")
 }
 
@@ -242,7 +240,9 @@ impl Library {
             // Preserve attachments from the existing entry if the
             // caller didn't override them.
             if entry.attachments.is_empty() {
-                entry.attachments = inner.entries[existing].attachments.clone();
+                entry
+                    .attachments
+                    .clone_from(&inner.entries[existing].attachments);
             }
             inner.entries[existing] = entry.clone();
         } else {

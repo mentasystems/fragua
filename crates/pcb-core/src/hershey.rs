@@ -27,7 +27,7 @@
 //! Each glyph is hand-authored to be readable as a plotter trace, NOT
 //! to look like a serif typeface. Diagonals are drawn with single
 //! strokes; round letters (O, C, G, S) are approximated with 4-8
-//! straight segments — the same visual style KiCad uses for its
+//! straight segments — the same visual style `KiCad` uses for its
 //! built-in stroke font.
 
 use crate::board::SilkAnchor;
@@ -170,7 +170,7 @@ pub fn text_polylines(
                 continue;
             }
             let mut poly = Vec::with_capacity(stroke.len());
-            for &(xu, yu) in stroke.iter() {
+            for &(xu, yu) in *stroke {
                 poly.push(to_world(pen_x + f64::from(xu), f64::from(yu)));
             }
             out.push(poly);

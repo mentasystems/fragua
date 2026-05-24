@@ -362,7 +362,7 @@ pub fn write_bom(
                 } else {
                     library_lookup(key)
                 };
-                let footprint = fps.first().map(|f| f.library.as_str()).unwrap_or("");
+                let footprint = fps.first().map_or("", |f| f.library.as_str());
                 let lcsc = entry
                     .as_ref()
                     .and_then(|e| e.lcsc_id.as_deref())
@@ -374,7 +374,7 @@ pub fn write_bom(
                     format!("{value} ({mpn})")
                 };
                 let mut refs: Vec<&str> = fps.iter().map(|f| f.reference.as_str()).collect();
-                refs.sort();
+                refs.sort_unstable();
                 writeln!(
                     w,
                     "{},{},{},{}",
@@ -397,14 +397,14 @@ pub fn write_bom(
                 } else {
                     library_lookup(key)
                 };
-                let footprint = fps.first().map(|f| f.library.as_str()).unwrap_or("");
+                let footprint = fps.first().map_or("", |f| f.library.as_str());
                 let lcsc = entry
                     .as_ref()
                     .and_then(|e| e.lcsc_id.as_deref())
                     .unwrap_or("");
                 let mpn = entry.as_ref().and_then(|e| e.mpn.as_deref()).unwrap_or("");
                 let mut refs: Vec<&str> = fps.iter().map(|f| f.reference.as_str()).collect();
-                refs.sort();
+                refs.sort_unstable();
                 writeln!(
                     w,
                     "{},{},{},{},{},{}",

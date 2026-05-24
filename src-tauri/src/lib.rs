@@ -324,8 +324,7 @@ fn pending_library_entries(state: State<'_, AppState>) -> serde_json::Value {
                 .attachments
                 .iter()
                 .map(|a| {
-                    let b64 =
-                        base64::engine::general_purpose::STANDARD.encode(&a.data);
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&a.data);
                     serde_json::json!({
                         "kind": a.kind,
                         "filename": a.filename,
@@ -369,10 +368,7 @@ fn pending_library_entries(state: State<'_, AppState>) -> serde_json::Value {
 /// (plus any staged attachments). The script-side agent does NOT have
 /// a verb for this — confirmation is human-only, by design.
 #[tauri::command]
-fn confirm_pending_library_entry(
-    state: State<'_, AppState>,
-    key: String,
-) -> Result<bool, String> {
+fn confirm_pending_library_entry(state: State<'_, AppState>, key: String) -> Result<bool, String> {
     let ok = state.project.confirm_pending_library_entry(&key)?;
     state.project.log(
         pcb_core::ActivityLevel::Info,

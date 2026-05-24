@@ -830,9 +830,7 @@ fn tool_view_summary(project: &Project) -> Result<Value, ToolError> {
         .iter()
         .map(|fp| {
             let bounds = fp.bounds();
-            let (bw, bh) = bounds
-                .map(|r| (r.width().to_mm(), r.height().to_mm()))
-                .unwrap_or((0.0, 0.0));
+            let (bw, bh) = bounds.map_or((0.0, 0.0), |r| (r.width().to_mm(), r.height().to_mm()));
             json!({
                 "reference": fp.reference,
                 "key": fp.key,
@@ -867,7 +865,7 @@ fn tool_view_summary(project: &Project) -> Result<Value, ToolError> {
         .filter(|n| {
             n["unconnected_pads"]
                 .as_array()
-                .map_or(false, |a| !a.is_empty())
+                .is_some_and(|a| !a.is_empty())
         })
         .count();
 
@@ -949,10 +947,10 @@ fn collect_net_status(board: &pcb_core::Board, sch: &pcb_core::schematic::Schema
                 .unwrap_or_default();
             let is_unconnected =
                 unconnected_pads.contains(&(symbol.reference.clone(), conn.pin_number.clone()));
-            if !is_unconnected {
-                connected_count += 1;
-            } else {
+            if is_unconnected {
                 unconnected.push(pad_ref.clone());
+            } else {
+                connected_count += 1;
             }
             pads_expected.push(json!({
                 "ref": pad_ref,
@@ -980,7 +978,7 @@ fn tool_net_status(project: &Project) -> Result<Value, ToolError> {
         .filter(|n| {
             n["unconnected_pads"]
                 .as_array()
-                .map_or(false, |a| !a.is_empty())
+                .is_some_and(|a| !a.is_empty())
         })
         .filter_map(|n| n["net"].as_str())
         .collect();
@@ -1011,8 +1009,8 @@ struct SymbolInput {
     y_mm: Option<f64>,
     #[serde(default)]
     rotation: f32,
-    /// Library key the agent picked (snake_case, e.g.
-    /// "esp32_s3_zero"). Empty string means "no library entry".
+    /// Library key the agent picked (`snake_case`, e.g.
+    /// "`esp32_s3_zero`"). Empty string means "no library entry".
     #[serde(default)]
     key: String,
     /// Free-form intent / role / orientation notes.
@@ -1169,7 +1167,7 @@ struct ConnectInput {
     pins: Vec<String>,
     /// Optional `NetClass` name to attach to this net. If unset (or
     /// the named class doesn't exist) the router and DRC fall back to
-    /// their default trace_width/clearance.
+    /// their default `trace_width/clearance`.
     #[serde(default)]
     class: Option<String>,
 }
@@ -1201,8 +1199,7 @@ fn tool_schematic_connect(project: &Project, args: &Value) -> Result<Value, Tool
                 .pins()
                 .iter()
                 .find(|p| p.number == pin_token || p.name.eq_ignore_ascii_case(pin_token))
-                .map(|p| p.number.clone())
-                .unwrap_or_else(|| pin_token.to_string());
+                .map_or_else(|| pin_token.to_string(), |p| p.number.clone());
             connections.push(NetConnection {
                 symbol_id: symbol.id,
                 pin_number,
@@ -1271,7 +1268,7 @@ struct PaletteFootprint {
     #[serde(default = "default_layer")]
     layer: LayerInput,
     pads: Vec<PadPlan>,
-    /// Override edge_mounted from the schematic side. Useful when the
+    /// Override `edge_mounted` from the schematic side. Useful when the
     /// agent decides at placement time that this instance must hug a
     /// specific edge (e.g. the on-module USB).
     #[serde(default)]
@@ -1376,11 +1373,9 @@ fn tool_palette_list(project: &Project) -> Result<Value, ToolError> {
         .iter()
         .map(|fp| {
             let bounds = fp.bounds();
-            let (bw, bh) = bounds
-                .map(|r| (r.width().to_mm(), r.height().to_mm()))
-                .unwrap_or((0.0, 0.0));
+            let (bw, bh) = bounds.map_or((0.0, 0.0), |r| (r.width().to_mm(), r.height().to_mm()));
             let mut nets: Vec<&str> = fp.pads.iter().filter_map(|p| p.net.as_deref()).collect();
-            nets.sort();
+            nets.sort_unstable();
             nets.dedup();
             json!({
                 "reference": fp.reference,
@@ -1721,13 +1716,11 @@ fn tool_library_create(project: &Project, args: &Value) -> Result<Value, ToolErr
     project.log(
         ActivityLevel::Info,
         format!(
-            "library.create: {} ({} pads) — pending human confirmation ({} queued)",
-            key, pad_count, pending_count
+            "library.create: {key} ({pad_count} pads) — pending human confirmation ({pending_count} queued)"
         ),
     );
     Ok(text_result(format!(
-        "Queued {} for review — open the library review pane (or the auto-popup) and confirm before it lands in the on-disk library. Attach the component photo via `library.attach` before confirming so the reviewer can compare pinout vs. reality.",
-        key
+        "Queued {key} for review — open the library review pane (or the auto-popup) and confirm before it lands in the on-disk library. Attach the component photo via `library.attach` before confirming so the reviewer can compare pinout vs. reality."
     ))
     .with_data(library_entry_full(&entry)))
 }
@@ -2366,8 +2359,7 @@ fn tool_silk_add_text(project: &Project, args: &Value) -> Result<Value, ToolErro
         anchor: input.anchor.into(),
         width: input
             .width_mm
-            .map(Length::from_mm)
-            .unwrap_or_else(|| SilkText::default_stroke(size)),
+            .map_or_else(|| SilkText::default_stroke(size), Length::from_mm),
     };
     project.add_silk_text(text);
     project.log(
@@ -2788,7 +2780,7 @@ fn tool_drc_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
     // Surface schematic net classes as DRC overrides so a class with
     // tighter clearance than the global default actually gets enforced.
     let sch = snap.schematic();
-    for (net_name, _net) in &sch.nets {
+    for net_name in sch.nets.keys() {
         let Some(class) = sch.class_for_net(net_name) else {
             continue;
         };
@@ -2861,7 +2853,10 @@ fn tool_schematic_set_class(project: &Project, args: &Value) -> Result<Value, To
         name: input.name.clone(),
         trace_width_mm: input.trace_width_mm,
         clearance_mm: input.clearance_mm,
-        pour_layers: input.pour.map(|p| p.to_layers()).unwrap_or_default(),
+        pour_layers: input
+            .pour
+            .map(PourLayersInput::to_layers)
+            .unwrap_or_default(),
     };
     project.set_net_class(class);
     let mut text = format!("class {} set", input.name);
@@ -2903,7 +2898,7 @@ fn materialize_class_pours(project: &Project) -> ClassPourSummary {
         .map(|p| (p.net.clone(), p.layer))
         .collect();
     let mut to_add: Vec<(String, CopperLayer)> = Vec::new();
-    for (net_name, _net) in &sch.nets {
+    for net_name in sch.nets.keys() {
         let Some(class) = sch.class_for_net(net_name) else {
             continue;
         };
@@ -2991,9 +2986,10 @@ fn tool_fab_pack(project: &Project, args: &Value) -> Result<Value, ToolError> {
 
     let out_dir = match input.out_dir {
         Some(p) => std::path::PathBuf::from(p),
-        None => std::env::var_os("HOME")
-            .map(|h| std::path::PathBuf::from(h).join("Downloads"))
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp")),
+        None => std::env::var_os("HOME").map_or_else(
+            || std::path::PathBuf::from("/tmp"),
+            |h| std::path::PathBuf::from(h).join("Downloads"),
+        ),
     };
 
     let report = pcb_fab::pack(project, provider, &out_dir)
