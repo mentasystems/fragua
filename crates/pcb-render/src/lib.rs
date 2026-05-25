@@ -1566,6 +1566,8 @@ mod tests {
             mpn: None,
             attachments: Vec::new(),
             created_at: 0,
+            footprint_view_transform: pcb_core::ViewTransform::default(),
+            placement_margin: pcb_core::PlacementMargin::default(),
         };
         let svg = render_library_entry_svg(&entry);
         // GND highlight colour appears.
@@ -1594,6 +1596,8 @@ mod tests {
             mpn: None,
             attachments: Vec::new(),
             created_at: 0,
+            footprint_view_transform: pcb_core::ViewTransform::default(),
+            placement_margin: pcb_core::PlacementMargin::default(),
         };
         let svg = render_library_entry_svg(&entry);
         assert!(svg.starts_with("<svg"));

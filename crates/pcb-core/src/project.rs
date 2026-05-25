@@ -218,6 +218,14 @@ impl Project {
         &self.library
     }
 
+    /// Publish a `LibraryChanged` event with the current entry count.
+    /// Called by hosts (Tauri commands, etc.) after they mutate the
+    /// library directly so the frontend refetches its review pane.
+    pub fn notify_library_changed(&self) {
+        let count = self.library.list().len();
+        self.bus.publish(Event::LibraryChanged { count });
+    }
+
     /// Project name (used as the on-disk directory under
     /// `~/.pcb-projects/`). Borrowing-friendly accessor; the lock is
     /// only held for the time it takes to clone the string.

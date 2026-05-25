@@ -1772,6 +1772,8 @@ fn tool_library_create(project: &Project, args: &Value) -> Result<Value, ToolErr
         mpn: input.mpn,
         attachments: Vec::new(),
         created_at: 0,
+        footprint_view_transform: pcb_core::ViewTransform::default(),
+        placement_margin: pcb_core::PlacementMargin::default(),
     };
     // HARD GUARD: a library entry the agent generates does NOT land in
     // the on-disk library until a human eyeballs the rendered footprint
@@ -2554,7 +2556,24 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
     // the resulting positions back through the regular `move_footprint_to`
     // / `rotate_footprint` APIs so the UI sees the moves event by event.
     let mut work = project.read().board().clone();
-    let report = pcb_placer::place(&mut work, &input.refs, &opts)
+    // Build a per-id margin map from the library so footprints linked
+    // to a `LibraryEntry::placement_margin` get extra body-to-body
+    // breathing room during the SA search.
+    let margins: pcb_placer::MarginMap = work
+        .footprints_in_order()
+        .filter_map(|fp| {
+            if fp.key.is_empty() {
+                return None;
+            }
+            let entry = project.library().find(&fp.key)?;
+            let m = entry.placement_margin;
+            if m.top_mm <= 0.0 && m.right_mm <= 0.0 && m.bottom_mm <= 0.0 && m.left_mm <= 0.0 {
+                return None;
+            }
+            Some((fp.id, [m.top_mm, m.right_mm, m.bottom_mm, m.left_mm]))
+        })
+        .collect();
+    let report = pcb_placer::place(&mut work, &input.refs, &opts, &margins)
         .map_err(|e| ToolError::invalid_params(format!("auto-place: {e}")))?;
 
     // Push back any positions / rotations that actually changed. We

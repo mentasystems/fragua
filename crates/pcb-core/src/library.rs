@@ -79,6 +79,41 @@ pub struct LibraryPad {
     pub drill_mm: Option<f64>,
 }
 
+/// Purely visual orientation tweak applied by the review UI when the
+/// stored image / footprint doesn't quite match how the user wants to
+/// see it (e.g. a photo taken upside-down). Has NO effect on the
+/// footprint geometry the placer / DRC / Gerber writer see — the
+/// frontend just multiplies a CSS transform onto the `<img>` or
+/// `<svg>`. Default = identity.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ViewTransform {
+    /// 0, 90, 180 or 270 (clockwise). Anything else is treated as
+    /// modulo 360 by the frontend, but the UI only writes the four
+    /// canonical values.
+    #[serde(default)]
+    pub rotation_deg: u16,
+    #[serde(default)]
+    pub flip_h: bool,
+    #[serde(default)]
+    pub flip_v: bool,
+}
+
+/// Per-side keep-out around a footprint, in mm, used by the placer's
+/// gap penalty / overlap check. Pads + silk are NOT moved by this; the
+/// margin only inflates the bounding box the placer sees, so adjacent
+/// components stay further away. Default = all zeros.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct PlacementMargin {
+    #[serde(default)]
+    pub top_mm: f64,
+    #[serde(default)]
+    pub right_mm: f64,
+    #[serde(default)]
+    pub bottom_mm: f64,
+    #[serde(default)]
+    pub left_mm: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Attachment {
     /// `UUIDv4`. Also the on-disk basename (extension follows the mime).
@@ -92,6 +127,10 @@ pub struct Attachment {
     pub mime: String,
     /// Unix seconds — kept simple to avoid a chrono dep for one field.
     pub added_at: u64,
+    /// Visual-only orientation tweak applied by the review UI. Does
+    /// not change anything in the design pipeline. Default = identity.
+    #[serde(default)]
+    pub view_transform: ViewTransform,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -137,6 +176,18 @@ pub struct LibraryEntry {
     pub attachments: Vec<Attachment>,
     /// Unix seconds at creation.
     pub created_at: u64,
+    /// Visual-only orientation tweak for the rendered footprint SVG in
+    /// the review pane. Independent from `Attachment::view_transform`
+    /// (which targets photos). Does NOT alter the routed/placed
+    /// footprint geometry. Default = identity.
+    #[serde(default)]
+    pub footprint_view_transform: ViewTransform,
+    /// Extra keep-out around the footprint's pad bounding box, in mm,
+    /// applied per side. Honoured by the placer's overlap check and
+    /// min-gap penalty so AI-authored pad-only footprints get enough
+    /// breathing room for the real component body. Default = all zeros.
+    #[serde(default)]
+    pub placement_margin: PlacementMargin,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -291,6 +342,7 @@ impl Library {
             filename,
             mime,
             added_at: now_secs(),
+            view_transform: ViewTransform::default(),
         };
         let mut inner = self.inner.write().expect("library lock poisoned");
         let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) else {
@@ -334,5 +386,63 @@ impl Library {
     pub fn read_attachment(&self, att: &Attachment) -> Result<Vec<u8>, String> {
         let path = self.attachment_path(att);
         fs::read(&path).map_err(|e| format!("library: read {}: {e}", path.display()))
+    }
+
+    /// Overwrite the visual transform on one attachment. Returns `true`
+    /// if the attachment was found.
+    pub fn set_attachment_view_transform(
+        &self,
+        key: &str,
+        attachment_id: &str,
+        transform: ViewTransform,
+    ) -> Result<bool, String> {
+        let mut inner = self.inner.write().expect("library lock poisoned");
+        let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) else {
+            return Err(format!("library: no entry with key {key}"));
+        };
+        let Some(att) = entry.attachments.iter_mut().find(|a| a.id == attachment_id) else {
+            return Ok(false);
+        };
+        att.view_transform = transform;
+        let snapshot = inner.clone();
+        drop(inner);
+        self.save(&snapshot)?;
+        Ok(true)
+    }
+
+    /// Overwrite the visual transform on the rendered-footprint cell of
+    /// an entry's review card. Returns `true` if the entry was found.
+    pub fn set_footprint_view_transform(
+        &self,
+        key: &str,
+        transform: ViewTransform,
+    ) -> Result<bool, String> {
+        let mut inner = self.inner.write().expect("library lock poisoned");
+        let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) else {
+            return Err(format!("library: no entry with key {key}"));
+        };
+        entry.footprint_view_transform = transform;
+        let snapshot = inner.clone();
+        drop(inner);
+        self.save(&snapshot)?;
+        Ok(true)
+    }
+
+    /// Overwrite the per-side placement margin on an entry. Returns
+    /// `true` if the entry was found.
+    pub fn set_placement_margin(
+        &self,
+        key: &str,
+        margin: PlacementMargin,
+    ) -> Result<bool, String> {
+        let mut inner = self.inner.write().expect("library lock poisoned");
+        let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) else {
+            return Err(format!("library: no entry with key {key}"));
+        };
+        entry.placement_margin = margin;
+        let snapshot = inner.clone();
+        drop(inner);
+        self.save(&snapshot)?;
+        Ok(true)
     }
 }

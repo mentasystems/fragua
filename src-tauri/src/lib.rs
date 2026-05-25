@@ -306,13 +306,117 @@ fn library_review_state(state: State<'_, AppState>) -> serde_json::Value {
                     "filename": a.filename,
                     "mime": a.mime,
                     "added_at": a.added_at,
+                    "view_transform": {
+                        "rotation_deg": a.view_transform.rotation_deg,
+                        "flip_h": a.view_transform.flip_h,
+                        "flip_v": a.view_transform.flip_v,
+                    },
                 })).collect::<Vec<_>>(),
                 "created_at": e.created_at,
                 "review_svg": pcb_render::render_library_entry_svg(e),
+                "footprint_view_transform": {
+                    "rotation_deg": e.footprint_view_transform.rotation_deg,
+                    "flip_h": e.footprint_view_transform.flip_h,
+                    "flip_v": e.footprint_view_transform.flip_v,
+                },
+                "placement_margin": {
+                    "top_mm": e.placement_margin.top_mm,
+                    "right_mm": e.placement_margin.right_mm,
+                    "bottom_mm": e.placement_margin.bottom_mm,
+                    "left_mm": e.placement_margin.left_mm,
+                },
             })
         })
         .collect();
     serde_json::json!({ "entries": items })
+}
+
+/// Persist a visual-only transform on one library attachment (the
+/// photo cell in the review card). Touches only `~/.pcb-library/`; the
+/// project file is untouched.
+#[tauri::command]
+fn library_set_attachment_view_transform(
+    state: State<'_, AppState>,
+    key: String,
+    attachment_id: String,
+    rotation_deg: u16,
+    flip_h: bool,
+    flip_v: bool,
+) -> Result<(), String> {
+    let transform = pcb_core::ViewTransform {
+        rotation_deg: rotation_deg % 360,
+        flip_h,
+        flip_v,
+    };
+    state
+        .project
+        .library()
+        .set_attachment_view_transform(&key, &attachment_id, transform)?;
+    state.project.notify_library_changed();
+    Ok(())
+}
+
+/// Persist a visual-only transform on the rendered-footprint cell of
+/// a library entry's review card.
+#[tauri::command]
+fn library_set_footprint_view_transform(
+    state: State<'_, AppState>,
+    key: String,
+    rotation_deg: u16,
+    flip_h: bool,
+    flip_v: bool,
+) -> Result<(), String> {
+    let transform = pcb_core::ViewTransform {
+        rotation_deg: rotation_deg % 360,
+        flip_h,
+        flip_v,
+    };
+    state
+        .project
+        .library()
+        .set_footprint_view_transform(&key, transform)?;
+    state.project.notify_library_changed();
+    Ok(())
+}
+
+/// Persist the per-side placement margin on a library entry. Picked up
+/// by the next auto-place run via the script tool.
+#[tauri::command]
+fn library_set_placement_margin(
+    state: State<'_, AppState>,
+    key: String,
+    top_mm: f64,
+    right_mm: f64,
+    bottom_mm: f64,
+    left_mm: f64,
+) -> Result<(), String> {
+    let margin = pcb_core::PlacementMargin {
+        top_mm: top_mm.max(0.0),
+        right_mm: right_mm.max(0.0),
+        bottom_mm: bottom_mm.max(0.0),
+        left_mm: left_mm.max(0.0),
+    };
+    state
+        .project
+        .library()
+        .set_placement_margin(&key, margin)?;
+    state.project.notify_library_changed();
+    Ok(())
+}
+
+/// Drop an entry (and all its attachment files) from the global
+/// library. The review pane refetches via the `LibraryChanged` event.
+#[tauri::command]
+fn library_delete_entry(state: State<'_, AppState>, key: String) -> Result<bool, String> {
+    let removed = state.project.library().delete(&key)?;
+    if removed {
+        state.project.log(
+            pcb_core::ActivityLevel::Warn,
+            format!("library.delete: {key}"),
+        );
+        state.project.notify_library_changed();
+    }
+    Ok(removed)
 }
 
 /// Snapshot of every library entry the agent has queued but a human
@@ -745,6 +849,10 @@ pub fn run() {
             library_state,
             library_review_state,
             library_attachment_data_uri,
+            library_set_attachment_view_transform,
+            library_set_footprint_view_transform,
+            library_set_placement_margin,
+            library_delete_entry,
             component_info,
             pending_library_entries,
             confirm_pending_library_entry,

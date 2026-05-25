@@ -23,7 +23,9 @@ pub use board::{
 };
 pub use event::{ActivityLevel, Event, EventBus};
 pub use geometry::{Point, Rect};
-pub use library::{Attachment, Library, LibraryEntry, LibraryPad, LibrarySilk};
+pub use library::{
+    Attachment, Library, LibraryEntry, LibraryPad, LibrarySilk, PlacementMargin, ViewTransform,
+};
 pub use project::{PendingAttachment, PendingLibraryEntry, Project, ProjectSnapshot};
 pub use schematic::{
     Net, NetClass, NetConnection, PinRole, PinSide, SchPin, Schematic, Symbol, SymbolKind,

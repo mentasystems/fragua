@@ -18,7 +18,70 @@
 
 use std::collections::HashMap;
 
-use pcb_core::{Board, Footprint, Id, Length, Point};
+use pcb_core::{Board, Footprint, Id, Length, Point, Rect};
+
+/// Per-footprint placement margin in mm, in the footprint's LOCAL
+/// frame: `[top, right, bottom, left]`. Stored on `LibraryEntry` and
+/// resolved by the caller into a map keyed by footprint id.
+pub type MarginMap = HashMap<Id, [f64; 4]>;
+
+/// Rotate a `[top, right, bottom, left]` local-frame margin into the
+/// world-aligned `[top, right, bottom, left]` AABB inflation, given a
+/// footprint rotation in degrees CCW. We only handle 90° increments
+/// (matching the placer's `Rotate90` move); anything off-axis snaps to
+/// the nearest quadrant — for placement keep-out this rounding error
+/// is irrelevant compared to the user-set margins (usually >= 0.5 mm).
+fn rotated_margin(local: [f64; 4], rotation_deg: f32) -> [f64; 4] {
+    let r = f64::from(rotation_deg).rem_euclid(360.0);
+    // local order: [top, right, bottom, left]
+    let [t, r2, b, l] = local;
+    if (45.0..135.0).contains(&r) {
+        // +90° CCW: local +Y (top) maps to world -X (left); local +X
+        // (right) maps to world +Y (top).
+        [r2, b, l, t]
+    } else if (135.0..225.0).contains(&r) {
+        // 180°: flip both axes.
+        [b, l, t, r2]
+    } else if (225.0..315.0).contains(&r) {
+        // +270° CCW.
+        [l, t, r2, b]
+    } else {
+        local
+    }
+}
+
+/// Inflate `bounds` by per-side world-aligned margins (`[top, right,
+/// bottom, left]`, mm).
+fn inflate_rect(bounds: Rect, sides: [f64; 4]) -> Rect {
+    let [t, r, b, l] = sides;
+    Rect {
+        min: Point::new(
+            bounds.min.x - Length::from_mm(l),
+            bounds.min.y - Length::from_mm(b),
+        ),
+        max: Point::new(
+            bounds.max.x + Length::from_mm(r),
+            bounds.max.y + Length::from_mm(t),
+        ),
+    }
+}
+
+/// World-frame bounding box of `fp` already inflated by the placement
+/// margin recorded for it in `margins` (if any). Used everywhere the
+/// placer wants "where is this part for component-to-component
+/// purposes" — pad clearance is still pad-level in DRC, so the margin
+/// only matters for body-to-body separation here.
+fn fp_bounds_with_margin(fp: &Footprint, margins: &MarginMap) -> Option<Rect> {
+    let b = fp.bounds()?;
+    let Some(local) = margins.get(&fp.id) else {
+        return Some(b);
+    };
+    if local.iter().all(|v| *v <= 0.0) {
+        return Some(b);
+    }
+    let world = rotated_margin(*local, fp.rotation);
+    Some(inflate_rect(b, world))
+}
 
 /// Tunables for the SA search. Defaults are calibrated on the
 /// door-controller test project: ~3 s wall-clock, reliably converges
@@ -136,6 +199,7 @@ pub fn place(
     board: &mut Board,
     movable: &[String],
     opts: &PlaceOptions,
+    margins: &MarginMap,
 ) -> Result<PlaceReport, String> {
     let outline = board.outline.ok_or_else(|| {
         "auto-place needs a board outline; set one with `outline W H`".to_string()
@@ -191,7 +255,7 @@ pub fn place(
         0.0
     };
     let initial_score = initial_hpwl
-        + opts.gap_penalty_factor * total_gap_penalty(board, opts.min_gap_mm)
+        + opts.gap_penalty_factor * total_gap_penalty(board, opts.min_gap_mm, margins)
         + opts.congestion_penalty_factor * initial_congestion;
     let mut current_score = initial_score;
     let mut best_score = initial_score;
@@ -247,7 +311,7 @@ pub fn place(
         // check constraints. Reject hard violations outright.
         let (probe, original_position, original_rotation) = make_probe(board, &move_kind);
         let Some(probe) = probe else { continue };
-        if !inside_outline(&probe, outline) {
+        if !inside_outline(&probe, outline, margins) {
             continue;
         }
         // Hard reject: actual pad-on-pad overlap is an electrical
@@ -255,7 +319,7 @@ pub fn place(
         // The soft `min_gap_mm` preference is folded into the score
         // delta below so SA can climb out of a tight starting state
         // instead of being stuck.
-        if would_overlap(board, &probe, Some(probe.id), 0.0) {
+        if would_overlap(board, &probe, Some(probe.id), 0.0, margins) {
             continue;
         }
         if board.edge_mount_violation(&probe).is_some() {
@@ -269,7 +333,7 @@ pub fn place(
         // and after applying the move.
         let nets = nets_of_id.get(&probe.id).cloned().unwrap_or_default();
         let before_hpwl: f64 = nets.iter().map(|n| net_hpwl(board, n)).sum();
-        let before_pen = footprint_gap_penalty(board, probe.id, opts.min_gap_mm);
+        let before_pen = footprint_gap_penalty(board, probe.id, opts.min_gap_mm, margins);
         let before_cong = if opts.congestion_resolution > 0 {
             congestion_overflow(board, outline, opts.congestion_resolution)
         } else {
@@ -279,7 +343,7 @@ pub fn place(
         // affected nets.
         apply_move_in_place(board, &move_kind);
         let after_hpwl: f64 = nets.iter().map(|n| net_hpwl(board, n)).sum();
-        let after_pen = footprint_gap_penalty(board, probe.id, opts.min_gap_mm);
+        let after_pen = footprint_gap_penalty(board, probe.id, opts.min_gap_mm, margins);
         let after_cong = if opts.congestion_resolution > 0 {
             congestion_overflow(board, outline, opts.congestion_resolution)
         } else {
@@ -522,10 +586,17 @@ fn aabb_gap_mm(a: pcb_core::Rect, b: pcb_core::Rect) -> f64 {
 }
 
 /// Quadratic shortfall against `min_gap_mm` for a single pair, mm².
-/// 0 if the pair is clear by at least `min_gap_mm`.
-fn pair_gap_penalty(a: &Footprint, b: &Footprint, min_gap_mm: f64) -> f64 {
-    let Some(ab) = a.bounds() else { return 0.0 };
-    let Some(bb) = b.bounds() else { return 0.0 };
+/// 0 if the pair is clear by at least `min_gap_mm`. Margins from
+/// `LibraryEntry::placement_margin` are folded in by inflating each
+/// footprint's bbox before measuring the gap — so a part with a
+/// 1 mm top margin reads "1 mm closer" to anything north of it.
+fn pair_gap_penalty(a: &Footprint, b: &Footprint, min_gap_mm: f64, margins: &MarginMap) -> f64 {
+    let Some(ab) = fp_bounds_with_margin(a, margins) else {
+        return 0.0;
+    };
+    let Some(bb) = fp_bounds_with_margin(b, margins) else {
+        return 0.0;
+    };
     let gap = aabb_gap_mm(ab, bb);
     if gap >= min_gap_mm {
         0.0
@@ -542,36 +613,46 @@ fn pair_gap_penalty(a: &Footprint, b: &Footprint, min_gap_mm: f64) -> f64 {
 /// Sum of `pair_gap_penalty` over every pair `(fp_id, other)`. Cheap
 /// when called in the SA loop because only one footprint moved per
 /// iteration; everything else is reused.
-fn footprint_gap_penalty(board: &Board, fp_id: Id, min_gap_mm: f64) -> f64 {
+fn footprint_gap_penalty(board: &Board, fp_id: Id, min_gap_mm: f64, margins: &MarginMap) -> f64 {
     let Some(fp) = board.footprints.get(&fp_id) else {
         return 0.0;
     };
     board
         .footprints_in_order()
         .filter(|other| other.id != fp_id)
-        .map(|other| pair_gap_penalty(fp, other, min_gap_mm))
+        .map(|other| pair_gap_penalty(fp, other, min_gap_mm, margins))
         .sum()
 }
 
 /// Sum of `pair_gap_penalty` over every unordered pair on the board.
-fn total_gap_penalty(board: &Board, min_gap_mm: f64) -> f64 {
+fn total_gap_penalty(board: &Board, min_gap_mm: f64, margins: &MarginMap) -> f64 {
     let fps: Vec<&Footprint> = board.footprints_in_order().collect();
     let mut sum = 0.0;
     for i in 0..fps.len() {
         for j in (i + 1)..fps.len() {
-            sum += pair_gap_penalty(fps[i], fps[j], min_gap_mm);
+            sum += pair_gap_penalty(fps[i], fps[j], min_gap_mm, margins);
         }
     }
     sum
 }
 
-/// True if `probe` (after inflating its bbox by `gap_mm` on every side)
-/// would intersect any other footprint's inflated bbox. The placer
-/// uses this only for the hard pad-overlap check (`gap_mm = 0`); the
-/// soft min-gap preference is enforced via the SA score, not by reject.
-fn would_overlap(board: &Board, probe: &Footprint, ignore_id: Option<Id>, gap_mm: f64) -> bool {
+/// True if `probe` (after inflating its bbox by `gap_mm` on every side,
+/// plus its library-authored placement margin) would intersect any
+/// other footprint's inflated bbox. The placer uses this only for the
+/// hard pad-overlap check (`gap_mm = 0`); the soft min-gap preference
+/// is enforced via the SA score, not by reject. Folding the margin in
+/// here means "do not let the bodies of two parts overlap their
+/// keep-outs" is a hard reject — exactly what AI-authored pad-only
+/// footprints need when the real part body is wider than the pads.
+fn would_overlap(
+    board: &Board,
+    probe: &Footprint,
+    ignore_id: Option<Id>,
+    gap_mm: f64,
+    margins: &MarginMap,
+) -> bool {
     let extra = Length::from_mm(gap_mm);
-    let Some(probe_bounds) = probe.bounds() else {
+    let Some(probe_bounds) = fp_bounds_with_margin(probe, margins) else {
         return false;
     };
     let probe_bounds = probe_bounds.expand(extra);
@@ -579,7 +660,7 @@ fn would_overlap(board: &Board, probe: &Footprint, ignore_id: Option<Id>, gap_mm
         if Some(fp.id) == ignore_id {
             continue;
         }
-        if let Some(b) = fp.bounds() {
+        if let Some(b) = fp_bounds_with_margin(fp, margins) {
             if probe_bounds.intersects(&b.expand(extra)) {
                 return true;
             }
@@ -588,9 +669,12 @@ fn would_overlap(board: &Board, probe: &Footprint, ignore_id: Option<Id>, gap_mm
     false
 }
 
-/// True if every corner of `probe`'s bbox sits inside `outline`.
-fn inside_outline(probe: &Footprint, outline: pcb_core::Rect) -> bool {
-    let Some(b) = probe.bounds() else {
+/// True if every corner of `probe`'s bbox (margins included) sits
+/// inside `outline`. The margin pushes a part off the edge if it has
+/// `top_mm`/etc. set — useful for connectors that need clearance from
+/// the cut line.
+fn inside_outline(probe: &Footprint, outline: pcb_core::Rect, margins: &MarginMap) -> bool {
+    let Some(b) = fp_bounds_with_margin(probe, margins) else {
         return false;
     };
     b.min.x.0 >= outline.min.x.0

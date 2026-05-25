@@ -45,12 +45,26 @@ type AnyEvent =
   | { kind: "LibraryChanged"; count: number }
   | { kind: "PendingLibraryChanged"; count: number };
 
+type ViewTransform = {
+  rotation_deg: number;
+  flip_h: boolean;
+  flip_v: boolean;
+};
+
+type PlacementMargin = {
+  top_mm: number;
+  right_mm: number;
+  bottom_mm: number;
+  left_mm: number;
+};
+
 type LibraryAttachment = {
   id: string;
   kind: string;
   filename: string;
   mime: string;
   added_at: number;
+  view_transform?: ViewTransform;
 };
 
 type LibraryEntry = {
@@ -78,6 +92,8 @@ type ReviewEntry = {
   attachments: LibraryAttachment[];
   created_at: number;
   review_svg: string;
+  footprint_view_transform: ViewTransform;
+  placement_margin: PlacementMargin;
 };
 
 type PendingPad = {
@@ -510,11 +526,309 @@ els.infoModal.addEventListener("click", (ev) => {
   if (ev.target === els.infoModal) closeComponentModal();
 });
 
+/// Compose a CSS transform string for a `ViewTransform`. Identity
+/// when no rotation / flip is set so the browser can elide it.
+function viewTransformCss(t: ViewTransform | undefined): string {
+  if (!t) return "";
+  const r = ((t.rotation_deg % 360) + 360) % 360;
+  const sx = t.flip_h ? -1 : 1;
+  const sy = t.flip_v ? -1 : 1;
+  if (r === 0 && sx === 1 && sy === 1) return "";
+  return `rotate(${r}deg) scaleX(${sx}) scaleY(${sy})`;
+}
+
+/// Two-step inline delete-entry confirmation. The first click flips
+/// the trash button into a "✓ confirm" state for `windowMs`; a second
+/// click within the window fires `onConfirm`. Used instead of the
+/// native `confirm()` dialog so we never block the webview.
+function armTwoStepConfirm(
+  btn: HTMLButtonElement,
+  windowMs: number,
+  onConfirm: () => void,
+) {
+  let armed = false;
+  let resetHandle: number | undefined;
+  const original = btn.innerHTML;
+  const reset = () => {
+    armed = false;
+    btn.innerHTML = original;
+    btn.classList.remove("armed");
+    if (resetHandle !== undefined) {
+      window.clearTimeout(resetHandle);
+      resetHandle = undefined;
+    }
+  };
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    if (armed) {
+      reset();
+      onConfirm();
+      return;
+    }
+    armed = true;
+    btn.innerHTML = "confirm?";
+    btn.classList.add("armed");
+    resetHandle = window.setTimeout(reset, windowMs);
+  });
+}
+
+/// Increments while an optimistic review-pane mutation is in flight.
+/// Backend mutations publish a `LibraryChanged` event that would
+/// otherwise trigger a full `paintReview()` and lose scroll position.
+let reviewMutationInFlight = 0;
+
+type ReviewLocalState = {
+  photoT: ViewTransform;
+  fpT: ViewTransform;
+  margin: PlacementMargin;
+};
+
+/// Parse the embedded review SVG's viewBox to derive the body's mm
+/// dimensions, then auto-rescale a composition of [footprint body] +
+/// [keep-out outline + four edge handles] to fit the cell. The
+/// drawing rescales live during a drag so handles never escape the
+/// cell. The body+keep-out outlines remain axis-aligned regardless
+/// of the SVG's rotate/flip visual transform.
+function wireMarginHandles(
+  card: HTMLElement,
+  key: string,
+  localState: Map<string, ReviewLocalState>,
+) {
+  const frameMaybe = card.querySelector(".footprint-frame") as HTMLElement | null;
+  if (!frameMaybe) return;
+  const frame: HTMLElement = frameMaybe;
+  const svgEl = frame.querySelector("svg") as SVGSVGElement | null;
+  if (!svgEl) return;
+  const svg: SVGSVGElement = svgEl;
+  const hostMaybe = frame.querySelector(".footprint-svg-host") as HTMLElement | null;
+  if (!hostMaybe) return;
+  const host: HTMLElement = hostMaybe;
+  const bodyOutline = frame.querySelector(".body-outline") as HTMLElement | null;
+  const keepoutOutline = frame.querySelector(".keepout-outline") as HTMLElement | null;
+
+  // Parse the footprint's viewBox once (the body mm extents are fixed).
+  const vbAttr = svg.getAttribute("viewBox") ?? "";
+  const vbParts = vbAttr.trim().split(/\s+/).map(Number);
+  const vbW = vbParts.length === 4 && Number.isFinite(vbParts[2]) ? vbParts[2] : 0;
+  const vbH = vbParts.length === 4 && Number.isFinite(vbParts[3]) ? vbParts[3] : 0;
+  // Override the renderer's `width="100%" height="100%"` so the SVG
+  // honors the host's pixel size we set below. preserveAspectRatio
+  // defaults to xMidYMid meet — fine because host's aspect matches
+  // the viewBox exactly, so there is no letterboxing.
+  svg.removeAttribute("width");
+  svg.removeAttribute("height");
+
+  type Side = "top" | "right" | "bottom" | "left";
+  const handles: Record<Side, HTMLElement | null> = {
+    top: frame.querySelector(".margin-handle.top"),
+    right: frame.querySelector(".margin-handle.right"),
+    bottom: frame.querySelector(".margin-handle.bottom"),
+    left: frame.querySelector(".margin-handle.left"),
+  };
+
+  // Snap step matches the previous number-input's `step="0.5"`.
+  const SNAP_MM = 0.5;
+  const snap = (mm: number) => Math.round(mm / SNAP_MM) * SNAP_MM;
+  const sideKey = (s: Side): keyof PlacementMargin =>
+    s === "top" ? "top_mm" : s === "right" ? "right_mm" : s === "bottom" ? "bottom_mm" : "left_mm";
+  const fmt = (mm: number) => (Math.abs(mm) < 0.0005 ? "" : `${mm.toFixed(mm % 1 === 0 ? 0 : 1)} mm`);
+
+  // Edge padding (px) reserved for the handle hit-area + labels so
+  // handles are never flush with the cell edge.
+  const EDGE_PAD_PX = 24;
+  // Clamp: at most 50 mm or 5x the body's longest mm dimension,
+  // whichever is larger. Keeps the zoom-out bounded for sane parts.
+  const longest = Math.max(vbW, vbH, 0.001);
+  const MAX_MARGIN_MM = Math.max(50, 5 * longest);
+
+  /// Recompute the pxPerMm that fits [body + current margins] into
+  /// the cell (minus EDGE_PAD_PX on each side), then position every
+  /// element in pixel space relative to the frame.
+  function layout() {
+    const s = localState.get(key);
+    if (!s) return;
+    const cellW = frame.clientWidth;
+    const cellH = frame.clientHeight;
+    if (cellW <= 0 || cellH <= 0 || vbW <= 0 || vbH <= 0) return;
+
+    const totalMmW = vbW + s.margin.left_mm + s.margin.right_mm;
+    const totalMmH = vbH + s.margin.top_mm + s.margin.bottom_mm;
+    const availPxW = Math.max(1, cellW - 2 * EDGE_PAD_PX);
+    const availPxH = Math.max(1, cellH - 2 * EDGE_PAD_PX);
+    const pxPerMm = Math.min(availPxW / totalMmW, availPxH / totalMmH);
+    if (!Number.isFinite(pxPerMm) || pxPerMm <= 0) return;
+
+    const bodyPxW = vbW * pxPerMm;
+    const bodyPxH = vbH * pxPerMm;
+    const leftPx = s.margin.left_mm * pxPerMm;
+    const rightPx = s.margin.right_mm * pxPerMm;
+    const topPx = s.margin.top_mm * pxPerMm;
+    const bottomPx = s.margin.bottom_mm * pxPerMm;
+    const keepoutPxW = bodyPxW + leftPx + rightPx;
+    const keepoutPxH = bodyPxH + topPx + bottomPx;
+
+    // Center the keep-out composition in the cell.
+    const keepoutLeft = (cellW - keepoutPxW) / 2;
+    const keepoutTop = (cellH - keepoutPxH) / 2;
+    const bodyLeft = keepoutLeft + leftPx;
+    const bodyTop = keepoutTop + topPx;
+
+    // SVG host = body bounds in px.
+    host.style.left = `${bodyLeft}px`;
+    host.style.top = `${bodyTop}px`;
+    host.style.width = `${bodyPxW}px`;
+    host.style.height = `${bodyPxH}px`;
+
+    if (bodyOutline) {
+      bodyOutline.style.left = `${bodyLeft}px`;
+      bodyOutline.style.top = `${bodyTop}px`;
+      bodyOutline.style.width = `${bodyPxW}px`;
+      bodyOutline.style.height = `${bodyPxH}px`;
+    }
+    if (keepoutOutline) {
+      keepoutOutline.style.left = `${keepoutLeft}px`;
+      keepoutOutline.style.top = `${keepoutTop}px`;
+      keepoutOutline.style.width = `${keepoutPxW}px`;
+      keepoutOutline.style.height = `${keepoutPxH}px`;
+    }
+
+    // Handles sit on the keep-out edges, spanning the keep-out
+    // span on their axis so the dashed line reads as a full edge.
+    const place = (s2: Side, mm: number) => {
+      const h = handles[s2];
+      if (!h) return;
+      if (s2 === "top") {
+        h.style.top = `${keepoutTop}px`;
+        h.style.left = `${keepoutLeft}px`;
+        h.style.width = `${keepoutPxW}px`;
+        h.style.height = `12px`;
+      } else if (s2 === "bottom") {
+        h.style.top = `${keepoutTop + keepoutPxH}px`;
+        h.style.left = `${keepoutLeft}px`;
+        h.style.width = `${keepoutPxW}px`;
+        h.style.height = `12px`;
+      } else if (s2 === "left") {
+        h.style.left = `${keepoutLeft}px`;
+        h.style.top = `${keepoutTop}px`;
+        h.style.height = `${keepoutPxH}px`;
+        h.style.width = `12px`;
+      } else if (s2 === "right") {
+        h.style.left = `${keepoutLeft + keepoutPxW}px`;
+        h.style.top = `${keepoutTop}px`;
+        h.style.height = `${keepoutPxH}px`;
+        h.style.width = `12px`;
+      }
+      const label = h.querySelector(".margin-label") as HTMLElement | null;
+      if (label) label.textContent = fmt(mm);
+    };
+    place("top", s.margin.top_mm);
+    place("right", s.margin.right_mm);
+    place("bottom", s.margin.bottom_mm);
+    place("left", s.margin.left_mm);
+
+    // Stash the current pxPerMm so the drag handler can convert
+    // pointer delta -> mm using the same scale (re-read after each
+    // move because the layout zooms while dragging).
+    (frame as unknown as { __pxPerMm?: number }).__pxPerMm = pxPerMm;
+  }
+
+  function currentPxPerMm(): number {
+    return (frame as unknown as { __pxPerMm?: number }).__pxPerMm ?? 0;
+  }
+
+  // Initial layout: now, after a frame (so the cell has real
+  // dimensions), and on every resize.
+  layout();
+  window.requestAnimationFrame(layout);
+  const ro = new ResizeObserver(() => layout());
+  ro.observe(frame);
+
+  for (const sideStr of ["top", "right", "bottom", "left"] as const) {
+    const handle = handles[sideStr];
+    if (!handle) continue;
+    const side: Side = sideStr;
+    handle.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      const s = localState.get(key);
+      if (!s) return;
+      const startPxPerMm = currentPxPerMm();
+      if (startPxPerMm <= 0) return;
+      const startMm = s.margin[sideKey(side)];
+      const startCoord = side === "top" || side === "bottom" ? ev.clientY : ev.clientX;
+      // Dragging outward (away from the body) grows the margin.
+      const sign =
+        side === "top" ? -1 : side === "bottom" ? 1 : side === "left" ? -1 : 1;
+      handle.setPointerCapture(ev.pointerId);
+      handle.classList.add("dragging");
+      let currentMm = startMm;
+      const onMove = (mv: PointerEvent) => {
+        // Use the *current* pxPerMm — the layout rescales as the
+        // user drags, so the pointer-to-mm ratio changes too.
+        const pxPerMm = currentPxPerMm() || startPxPerMm;
+        const coord = side === "top" || side === "bottom" ? mv.clientY : mv.clientX;
+        const deltaPx = (coord - startCoord) * sign;
+        let mm = startMm + deltaPx / pxPerMm;
+        mm = Math.max(0, Math.min(MAX_MARGIN_MM, mm));
+        const snapped = snap(mm);
+        currentMm = snapped;
+        s.margin[sideKey(side)] = snapped;
+        // Re-layout the whole composition so the zoom-out is live.
+        layout();
+      };
+      const onUp = async () => {
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", onUp);
+        handle.removeEventListener("pointercancel", onUp);
+        handle.classList.remove("dragging");
+        if (handle.hasPointerCapture(ev.pointerId)) {
+          handle.releasePointerCapture(ev.pointerId);
+        }
+        if (currentMm === startMm) return;
+        s.margin[sideKey(side)] = currentMm;
+        reviewMutationInFlight++;
+        try {
+          await invoke("library_set_placement_margin", {
+            key,
+            topMm: s.margin.top_mm,
+            rightMm: s.margin.right_mm,
+            bottomMm: s.margin.bottom_mm,
+            leftMm: s.margin.left_mm,
+          });
+        } catch (err) {
+          appendActivity("error", `margin save ${key}: ${err}`);
+        } finally {
+          window.setTimeout(() => { reviewMutationInFlight--; }, 0);
+        }
+      };
+      handle.addEventListener("pointermove", onMove);
+      handle.addEventListener("pointerup", onUp);
+      handle.addEventListener("pointercancel", onUp);
+    });
+  }
+}
+
+/// `paintReview()` wrapper that captures and restores the scroll
+/// position of the inner `.review-list` so external events (e.g. a
+/// new entry confirmed via the popup) don't yank the user back to the
+/// top of the pane.
+async function paintReviewPreserveScroll() {
+  const prevList = els.canvas.querySelector(".review-list") as HTMLElement | null;
+  const prevTop = prevList?.scrollTop ?? 0;
+  const prevLeft = prevList?.scrollLeft ?? 0;
+  await paintReview();
+  const nextList = els.canvas.querySelector(".review-list") as HTMLElement | null;
+  if (nextList) {
+    nextList.scrollTop = prevTop;
+    nextList.scrollLeft = prevLeft;
+  }
+}
+
 /// Render the library review pane: one card per stored library
 /// entry, with the photo and the rendered footprint side by side.
 /// GND pads on the footprint are highlighted in magenta by the
 /// renderer so a mirrored / mis-numbered pinout is obvious next to
-/// the real component photo.
+/// the real component photo. The per-cell transform buttons and the
+/// margin inputs auto-save to the global library on every change.
 async function paintReview() {
   els.canvas.innerHTML = `<div class="review-loading">loading library…</div>`;
   let data: { entries: ReviewEntry[] };
@@ -547,6 +861,17 @@ async function paintReview() {
     }
     return p;
   }
+  // Local mutable copy of each entry's transforms / margin so the DOM
+  // can update optimistically without re-fetching the whole pane.
+  const localState = new Map<string, ReviewLocalState>();
+  for (const e of data.entries) {
+    const photo = e.attachments.find((a) => a.mime.startsWith("image/"));
+    localState.set(e.key, {
+      photoT: photo?.view_transform ?? { rotation_deg: 0, flip_h: false, flip_v: false },
+      fpT: e.footprint_view_transform,
+      margin: e.placement_margin,
+    });
+  }
   const list = document.createElement("div");
   list.className = "review-list";
   for (const entry of data.entries) {
@@ -556,6 +881,7 @@ async function paintReview() {
     const gndBadge = entry.ground_pad_count > 0
       ? `<span class="gnd-badge">${entry.ground_pad_count} GND</span>`
       : `<span class="gnd-badge none">no GND</span>`;
+    card.dataset.key = entry.key;
     card.innerHTML = `
       <header class="review-head">
         <h3 class="review-key">${esc(entry.key)}</h3>
@@ -565,13 +891,38 @@ async function paintReview() {
           ${entry.edge_mounted ? `<span class="edge-badge">edge</span>` : ""}
           ${entry.lcsc_id ? `<span class="lcsc-badge">${esc(entry.lcsc_id)}</span>` : ""}
           ${entry.mpn ? `<span class="mpn-badge">${esc(entry.mpn)}</span>` : ""}
+          <button type="button" class="btn-delete-entry" data-key="${esc(entry.key)}" title="delete this library entry">trash</button>
         </div>
       </header>
       <div class="review-body">
-        <div class="review-photo" data-key="${esc(entry.key)}" data-att="${esc(photo?.id ?? "")}">
-          ${photo ? `<div class="photo-loading">loading photo…</div>` : `<div class="photo-empty">no photo attached</div>`}
+        <div class="review-cell">
+          <div class="review-photo" data-key="${esc(entry.key)}" data-att="${esc(photo?.id ?? "")}">
+            ${photo ? `<div class="photo-loading">loading photo…</div>` : `<div class="photo-empty">no photo attached</div>`}
+          </div>
+          <div class="cell-controls" data-target="photo" ${photo ? "" : "hidden"}>
+            <button type="button" data-act="rotate" title="rotate 90° clockwise">rot 90</button>
+            <button type="button" data-act="flip-h" title="flip horizontally">flip H</button>
+            <button type="button" data-act="flip-v" title="flip vertically">flip V</button>
+          </div>
         </div>
-        <div class="review-footprint">${entry.review_svg}</div>
+        <div class="review-cell">
+          <div class="review-footprint" title="drag the edge handles to set per-side placement margin (mm)">
+            <div class="footprint-frame">
+              <div class="footprint-svg-host">${entry.review_svg}</div>
+              <div class="body-outline"></div>
+              <div class="keepout-outline"></div>
+              <div class="margin-handle top" data-side="top"><span class="margin-label"></span></div>
+              <div class="margin-handle right" data-side="right"><span class="margin-label"></span></div>
+              <div class="margin-handle bottom" data-side="bottom"><span class="margin-label"></span></div>
+              <div class="margin-handle left" data-side="left"><span class="margin-label"></span></div>
+            </div>
+          </div>
+          <div class="cell-controls" data-target="footprint">
+            <button type="button" data-act="rotate" title="rotate 90° clockwise">rot 90</button>
+            <button type="button" data-act="flip-h" title="flip horizontally">flip H</button>
+            <button type="button" data-act="flip-v" title="flip vertically">flip V</button>
+          </div>
+        </div>
       </div>
       ${entry.description ? `<p class="review-desc">${esc(entry.description)}</p>` : ""}
       <footer class="review-foot">
@@ -582,6 +933,125 @@ async function paintReview() {
   }
   els.canvas.innerHTML = "";
   els.canvas.appendChild(list);
+
+  function applyTransformsForKey(key: string) {
+    const s = localState.get(key);
+    if (!s) return;
+    const card = els.canvas.querySelector(
+      `.review-card[data-key="${CSS.escape(key)}"]`,
+    ) as HTMLElement | null;
+    if (!card) return;
+    const photoImg = card.querySelector(".review-photo img") as HTMLElement | null;
+    if (photoImg) {
+      const css = viewTransformCss(s.photoT);
+      photoImg.style.transform = css;
+      photoImg.style.transformOrigin = "center";
+    }
+    const fpSvg = card.querySelector(".review-footprint svg") as HTMLElement | null;
+    if (fpSvg) {
+      const css = viewTransformCss(s.fpT);
+      fpSvg.style.transform = css;
+      fpSvg.style.transformOrigin = "center";
+    }
+  }
+
+  // Wire up control bars (photo + footprint).
+  for (const ctrl of Array.from(
+    els.canvas.querySelectorAll(".cell-controls"),
+  ) as HTMLElement[]) {
+    const card = ctrl.closest(".review-card") as HTMLElement | null;
+    if (!card) continue;
+    const key = card.dataset.key ?? "";
+    if (!key) continue;
+    const target = ctrl.dataset.target as "photo" | "footprint";
+    const photoAtt = (card.querySelector(".review-photo") as HTMLElement | null)
+      ?.dataset.att ?? "";
+    for (const btn of Array.from(ctrl.querySelectorAll("button")) as HTMLButtonElement[]) {
+      btn.addEventListener("click", async () => {
+        const s = localState.get(key);
+        if (!s) return;
+        const t = target === "photo" ? s.photoT : s.fpT;
+        const act = btn.dataset.act;
+        if (act === "rotate") t.rotation_deg = (t.rotation_deg + 90) % 360;
+        else if (act === "flip-h") t.flip_h = !t.flip_h;
+        else if (act === "flip-v") t.flip_v = !t.flip_v;
+        applyTransformsForKey(key);
+        reviewMutationInFlight++;
+        try {
+          if (target === "photo") {
+            await invoke("library_set_attachment_view_transform", {
+              key,
+              attachmentId: photoAtt,
+              rotationDeg: t.rotation_deg,
+              flipH: t.flip_h,
+              flipV: t.flip_v,
+            });
+          } else {
+            await invoke("library_set_footprint_view_transform", {
+              key,
+              rotationDeg: t.rotation_deg,
+              flipH: t.flip_h,
+              flipV: t.flip_v,
+            });
+          }
+        } catch (err) {
+          appendActivity("error", `view-transform save ${key}: ${err}`);
+        } finally {
+          window.setTimeout(() => { reviewMutationInFlight--; }, 0);
+        }
+      });
+    }
+  }
+
+  // Wire up margin drag handles (one per side, overlaid on the
+  // footprint preview). The handle's offset from its edge encodes the
+  // margin in mm; the user drags inward to shrink, outward to grow.
+  for (const card of Array.from(
+    els.canvas.querySelectorAll(".review-card"),
+  ) as HTMLElement[]) {
+    const key = card.dataset.key ?? "";
+    if (!key) continue;
+    wireMarginHandles(card, key, localState);
+  }
+
+  // Wire up the trash buttons (two-step inline confirm). Remove the
+  // card node directly on success — no full pane repaint.
+  for (const btn of Array.from(
+    els.canvas.querySelectorAll(".btn-delete-entry"),
+  ) as HTMLButtonElement[]) {
+    const key = btn.dataset.key ?? "";
+    if (!key) continue;
+    armTwoStepConfirm(btn, 3000, async () => {
+      reviewMutationInFlight++;
+      try {
+        await invoke<boolean>("library_delete_entry", { key });
+        const card = els.canvas.querySelector(
+          `.review-card[data-key="${CSS.escape(key)}"]`,
+        );
+        card?.remove();
+        const remaining = els.canvas.querySelectorAll(".review-card").length;
+        els.reviewCount.textContent = String(remaining);
+        if (remaining === 0) {
+          els.canvas.innerHTML = `<div class="review-empty">
+            <h2>no library entries yet</h2>
+            <p>your agent will save parts here as you design.<br>
+            every entry created via the script API queues for human review first —
+            a confirmation popup will appear automatically.</p>
+          </div>`;
+        }
+      } catch (err) {
+        appendActivity("error", `delete ${key}: ${err}`);
+      } finally {
+        // Release suppression on the next tick so the in-flight event
+        // (already queued) is still ignored.
+        window.setTimeout(() => { reviewMutationInFlight--; }, 0);
+      }
+    });
+  }
+
+  // Apply the initial transforms on the footprint SVGs (already in DOM).
+  for (const key of localState.keys()) applyTransformsForKey(key);
+
   // Lazy-load photos.
   for (const slot of Array.from(els.canvas.querySelectorAll(".review-photo")) as HTMLElement[]) {
     const key = slot.dataset.key ?? "";
@@ -590,6 +1060,7 @@ async function paintReview() {
     photoUri(key, att)
       .then((uri) => {
         slot.innerHTML = `<img src="${uri}" alt="${esc(key)} photo" />`;
+        applyTransformsForKey(key);
       })
       .catch((err) => {
         slot.innerHTML = `<div class="photo-error">${esc(String(err))}</div>`;
@@ -859,7 +1330,12 @@ async function playEvent(data: AnyEvent) {
   }
   if (data.kind === "LibraryChanged") {
     await refreshLibrary();
-    if (view === "review") void paintReview();
+    // Suppress the full review repaint when the change came from one
+    // of our own optimistic mutations — the DOM is already up to date
+    // and a repaint here would reset the user's scroll position.
+    if (view === "review" && reviewMutationInFlight === 0) {
+      void paintReviewPreserveScroll();
+    }
     return;
   }
   if (data.kind === "PendingLibraryChanged") {

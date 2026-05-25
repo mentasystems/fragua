@@ -1,7 +1,7 @@
 //! Smoke tests: SA placer must reduce HPWL on a contrived bad layout.
 
 use pcb_core::{Board, CopperLayer, Footprint, Id, Length, Pad, Point, Rect};
-use pcb_placer::{place, PlaceOptions};
+use pcb_placer::{place, MarginMap, PlaceOptions};
 
 fn pad(num: &str, off_x: f64, off_y: f64, net: Option<&str>) -> Pad {
     Pad {
@@ -62,7 +62,7 @@ fn placer_reduces_hpwl_on_two_far_apart_resistors() {
         seed: 42,
         ..PlaceOptions::default()
     };
-    let report = place(&mut board, &["R1".to_string(), "R2".to_string()], &opts)
+    let report = place(&mut board, &["R1".to_string(), "R2".to_string()], &opts, &MarginMap::new())
         .expect("placer should succeed");
     assert!(
         report.final_hpwl_mm < report.initial_hpwl_mm,
@@ -118,7 +118,7 @@ fn pinned_footprints_do_not_move() {
         max_iterations: 2000,
         ..PlaceOptions::default()
     };
-    let _report = place(&mut board, &["R2".to_string()], &opts).unwrap();
+    let _report = place(&mut board, &["R2".to_string()], &opts, &MarginMap::new()).unwrap();
 
     let r1_after = board
         .footprints_in_order()
