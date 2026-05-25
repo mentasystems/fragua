@@ -402,6 +402,105 @@ impl Board {
         self.footprints.remove(&id)
     }
 
+    /// Remove a footprint AND every trace / via whose endpoint lands on
+    /// one of its pads. Used by `placement.delete` so the human (or the
+    /// agent) doesn't have to manually clear the routing stubs that
+    /// would otherwise dangle into empty space and confuse the router.
+    ///
+    /// Returns `(footprint, traces_removed, vias_removed, orphaned_nets)`.
+    /// `orphaned_nets` is the set of net names whose pad count on the
+    /// surviving board drops to zero after the removal — the caller can
+    /// surface these as a warning so the agent knows a net just lost
+    /// its only consumer and a re-route / netlist edit is in order.
+    pub fn remove_footprint_and_routing(
+        &mut self,
+        id: Id,
+    ) -> Option<(Footprint, usize, usize, Vec<String>)> {
+        // Snapshot the pads (world coords + net) BEFORE removal so we
+        // can match trace/via endpoints against them.
+        let fp = self.footprints.get(&id)?.clone();
+        let pad_hits: Vec<(CopperLayer, String, Point, Length, Length)> = fp
+            .pads
+            .iter()
+            .filter_map(|pad| {
+                pad.net.as_ref().map(|net| {
+                    let center = fp.pad_world_center(pad);
+                    let (w, h) = fp.pad_world_size(pad);
+                    (pad.layer, net.clone(), center, w, h)
+                })
+            })
+            .collect();
+
+        // Helper: does an (x, y) point on `layer` for net `net` land on
+        // any of the doomed footprint's pads? Same tolerance shape used
+        // by `orphan_trace_ids` so a router-grid snap counts as a hit.
+        let touches_pad = |layer: CopperLayer, net: &str, x: f64, y: f64, tol: f64| -> bool {
+            for (pad_layer, pad_net, center, pw, ph) in &pad_hits {
+                if *pad_layer != layer {
+                    continue;
+                }
+                if pad_net.as_str() != net {
+                    continue;
+                }
+                let dx = (x - center.x.to_mm()).abs() - pw.to_mm() / 2.0;
+                let dy = (y - center.y.to_mm()).abs() - ph.to_mm() / 2.0;
+                if dx <= tol && dy <= tol {
+                    return true;
+                }
+            }
+            false
+        };
+
+        let traces_before = self.traces.len();
+        self.traces.retain(|t| {
+            let tol = t.width.to_mm() / 2.0 + 1e-3;
+            let a_hit = touches_pad(
+                t.layer,
+                &t.net,
+                t.start.x.to_mm(),
+                t.start.y.to_mm(),
+                tol,
+            );
+            let b_hit = touches_pad(t.layer, &t.net, t.end.x.to_mm(), t.end.y.to_mm(), tol);
+            !(a_hit || b_hit)
+        });
+        let traces_removed = traces_before - self.traces.len();
+
+        // Vias join both layers, so a via "touches" the footprint if it
+        // sits on a same-net pad on EITHER layer.
+        let vias_before = self.vias.len();
+        self.vias.retain(|v| {
+            let tol = v.diameter.to_mm() / 2.0 + 1e-3;
+            let x = v.position.x.to_mm();
+            let y = v.position.y.to_mm();
+            !(touches_pad(CopperLayer::Top, &v.net, x, y, tol)
+                || touches_pad(CopperLayer::Bottom, &v.net, x, y, tol))
+        });
+        let vias_removed = vias_before - self.vias.len();
+
+        // Finally drop the footprint itself.
+        let removed = self.remove_footprint(id)?;
+
+        // Compute the nets whose ONLY remaining pads belonged to the
+        // dropped footprint. The caller surfaces these as warnings —
+        // without a pad the router can't terminate the net, and the
+        // schematic side likely needs an edit.
+        let surviving_nets: HashSet<String> = self
+            .footprints_in_order()
+            .flat_map(|fp| fp.pads.iter().filter_map(|p| p.net.clone()))
+            .collect();
+        let mut orphaned: Vec<String> = removed
+            .pads
+            .iter()
+            .filter_map(|p| p.net.clone())
+            .filter(|n| !surviving_nets.contains(n))
+            .collect();
+        orphaned.sort();
+        orphaned.dedup();
+
+        Some((removed, traces_removed, vias_removed, orphaned))
+    }
+
     pub fn footprints_in_order(&self) -> impl Iterator<Item = &Footprint> {
         self.footprint_order
             .iter()
@@ -692,6 +791,116 @@ mod tests {
         assert_eq!(back.silk_texts[0].text, "PCB v1");
         assert_eq!(back.silk_lines[0].layer, SilkLayer::Top);
         assert_eq!(back.silk_texts[0].layer, SilkLayer::Bottom);
+    }
+
+    #[test]
+    fn remove_footprint_and_routing_drops_connected_traces_and_vias() {
+        let mut b = Board::new();
+        // Two pads, both on net "SIG", on the top layer, at (0,0) and (5,0).
+        let fp_id = Id::new();
+        b.add_footprint(Footprint {
+            id: fp_id,
+            reference: "U1".into(),
+            value: "test".into(),
+            library: "lib".into(),
+            position: Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            rotation: 0.0,
+            layer: CopperLayer::Top,
+            pads: vec![
+                Pad {
+                    number: "1".into(),
+                    name: String::new(),
+                    offset: Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+                    size: (Length::from_mm(1.0), Length::from_mm(1.0)),
+                    layer: CopperLayer::Top,
+                    net: Some("SIG".into()),
+                    drill: None,
+                },
+                Pad {
+                    number: "2".into(),
+                    name: String::new(),
+                    offset: Point::new(Length::from_mm(5.0), Length::from_mm(0.0)),
+                    size: (Length::from_mm(1.0), Length::from_mm(1.0)),
+                    layer: CopperLayer::Top,
+                    net: Some("SIG".into()),
+                    drill: None,
+                },
+            ],
+            key: String::new(),
+            description: String::new(),
+            edge_mounted: false,
+            silk: vec![],
+        });
+
+        // Another footprint not connected to U1, owns net "OTHER".
+        let other_id = Id::new();
+        b.add_footprint(Footprint {
+            id: other_id,
+            reference: "R1".into(),
+            value: "10k".into(),
+            library: "lib".into(),
+            position: Point::new(Length::from_mm(20.0), Length::from_mm(20.0)),
+            rotation: 0.0,
+            layer: CopperLayer::Top,
+            pads: vec![Pad {
+                number: "1".into(),
+                name: String::new(),
+                offset: Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+                size: (Length::from_mm(1.0), Length::from_mm(1.0)),
+                layer: CopperLayer::Top,
+                net: Some("OTHER".into()),
+                drill: None,
+            }],
+            key: String::new(),
+            description: String::new(),
+            edge_mounted: false,
+            silk: vec![],
+        });
+
+        // Trace landing on U1.pad1 (gets removed) and another on R1
+        // (survives).
+        let connected = Trace {
+            id: Id::new(),
+            layer: CopperLayer::Top,
+            start: Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            end: Point::new(Length::from_mm(2.5), Length::from_mm(0.0)),
+            width: Length::from_mm(0.25),
+            net: "SIG".into(),
+        };
+        let unrelated = Trace {
+            id: Id::new(),
+            layer: CopperLayer::Top,
+            start: Point::new(Length::from_mm(20.0), Length::from_mm(20.0)),
+            end: Point::new(Length::from_mm(25.0), Length::from_mm(20.0)),
+            width: Length::from_mm(0.25),
+            net: "OTHER".into(),
+        };
+        let connected_id = connected.id;
+        let unrelated_id = unrelated.id;
+        b.add_trace(connected);
+        b.add_trace(unrelated);
+
+        // Via on U1.pad2 (gets removed).
+        let via = Via {
+            id: Id::new(),
+            position: Point::new(Length::from_mm(5.0), Length::from_mm(0.0)),
+            drill: Length::from_mm(0.3),
+            diameter: Length::from_mm(0.6),
+            net: "SIG".into(),
+        };
+        b.add_via(via);
+
+        let (removed, traces_removed, vias_removed, orphaned) =
+            b.remove_footprint_and_routing(fp_id).expect("removed");
+        assert_eq!(removed.reference, "U1");
+        assert_eq!(traces_removed, 1);
+        assert_eq!(vias_removed, 1);
+        assert_eq!(orphaned, vec!["SIG".to_string()]);
+        assert!(!b.footprints.contains_key(&fp_id));
+        assert!(b.footprints.contains_key(&other_id));
+        assert!(b.traces.iter().any(|t| t.id == unrelated_id));
+        assert!(!b.traces.iter().any(|t| t.id == connected_id));
+        assert!(b.vias.is_empty());
     }
 
     #[test]

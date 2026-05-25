@@ -66,6 +66,27 @@ pub struct PendingAttachment {
     pub data: Vec<u8>,
 }
 
+/// Summary returned by `Project::delete_footprint_by_ref`. The script
+/// layer formats this into the human-facing reply; UI consumers can
+/// pipe it straight into a toast.
+#[derive(Debug, Clone)]
+pub struct DeletedFootprint {
+    pub id: Id,
+    pub reference: String,
+    pub library: String,
+    pub key: String,
+    pub pad_count: usize,
+    pub traces_removed: usize,
+    pub vias_removed: usize,
+    /// Total trace count remaining on the board after the delete.
+    pub trace_count: usize,
+    /// Total via count remaining on the board after the delete.
+    pub via_count: usize,
+    /// Nets whose only pads were on the removed footprint — surfaced as
+    /// a warning so the caller knows the netlist is now incomplete.
+    pub orphaned_nets: Vec<String>,
+}
+
 #[derive(Debug, Default)]
 struct ProjectInner {
     name: String,
@@ -309,6 +330,84 @@ impl Project {
             self.bus.publish(Event::FootprintRemoved { id });
         }
         removed
+    }
+
+    /// Outcome of `delete_footprint_by_ref`. Carries enough detail for the
+    /// script handler to produce a useful reply (number of pads, traces
+    /// and vias cleared) without re-walking the board.
+    ///
+    /// Lives on `Project` rather than `tools.rs` so other consumers (UI,
+    /// future scripting layers) can reuse the same structure.
+    #[allow(dead_code)]
+    pub fn delete_footprint_by_ref(
+        &self,
+        reference: &str,
+    ) -> Result<DeletedFootprint, String> {
+        let outcome = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            let id = inner
+                .board
+                .footprints
+                .iter()
+                .find(|(_, f)| f.reference == reference)
+                .map(|(id, _)| *id)
+                .ok_or_else(|| format!("no footprint with ref '{reference}'"))?;
+            inner
+                .board
+                .remove_footprint_and_routing(id)
+                .map(|(fp, traces, vias, orphans)| DeletedFootprint {
+                    id,
+                    reference: fp.reference.clone(),
+                    library: fp.library.clone(),
+                    key: fp.key.clone(),
+                    pad_count: fp.pads.len(),
+                    traces_removed: traces,
+                    vias_removed: vias,
+                    trace_count: inner.board.traces.len(),
+                    via_count: inner.board.vias.len(),
+                    orphaned_nets: orphans,
+                })
+                .ok_or_else(|| format!("footprint with ref '{reference}' vanished mid-delete"))?
+        };
+        self.bus.publish(Event::FootprintRemoved { id: outcome.id });
+        if outcome.traces_removed > 0 || outcome.vias_removed > 0 {
+            self.bus.publish(Event::RoutingChanged {
+                trace_count: outcome.trace_count,
+                via_count: outcome.via_count,
+            });
+        }
+        Ok(outcome)
+    }
+
+    /// Drop every placed footprint AND all routing. Outline / silk /
+    /// schematic / library are preserved. Returns the references of the
+    /// footprints that were removed (in board insertion order) so the
+    /// caller can echo them back.
+    pub fn clear_board_placements(&self) -> Vec<String> {
+        let (removed_refs, removed_ids) = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            let ordered: Vec<Id> = inner.board.footprint_order.clone();
+            let mut refs = Vec::with_capacity(ordered.len());
+            let mut ids = Vec::with_capacity(ordered.len());
+            for id in &ordered {
+                if let Some(fp) = inner.board.remove_footprint(*id) {
+                    refs.push(fp.reference);
+                    ids.push(*id);
+                }
+            }
+            inner.board.clear_routing();
+            (refs, ids)
+        };
+        for id in removed_ids {
+            self.bus.publish(Event::FootprintRemoved { id });
+        }
+        if !removed_refs.is_empty() {
+            self.bus.publish(Event::RoutingChanged {
+                trace_count: 0,
+                via_count: 0,
+            });
+        }
+        removed_refs
     }
 
     pub fn set_outline(&self, outline: Rect) {

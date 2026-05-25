@@ -169,6 +169,15 @@ PALETTE / PLACEMENT:\n\
                                                  edge_mounted constraint\n\
   move REF X Y\n\
   rotate REF DEG                               — absolute rotation, multiples of 90 recommended\n\
+  delete REF [REF ...]                         — remove placed footprint(s) by ref; also drops every\n\
+                                                 trace / via whose endpoint landed on one of their\n\
+                                                 pads. Errors if any REF is not on the board; warns\n\
+                                                 (in the reply) for nets that lose their last pad.\n\
+  clear-board                                  — drop every placed footprint AND all routing;\n\
+                                                 outline / silk / schematic / library are kept.\n\
+                                                 Useful after editing a library entry: clear-board\n\
+                                                 then re-spawn from the palette to pick up the\n\
+                                                 updated geometry.\n\
   auto-place REF [REF...] [iters=N] [seed=N] [max_step=N] [min_step=N] [min_gap=N] [gap_penalty=N] [congestion=N] [congestion_res=N]\n\
                                                — simulated-annealing placer over the listed refs.\n\
                                                  Pinned refs (everything not listed) stay put.\n\
@@ -333,6 +342,8 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "placement.batch" => tool_placement_batch(project, args),
         "placement.move" => tool_placement_move(project, args),
         "placement.rotate" => tool_placement_rotate(project, args),
+        "placement.delete" => tool_placement_delete(project, args),
+        "placement.clear_board" => tool_placement_clear_board(project),
         "route.clear_net" => tool_route_clear_net(project, args),
         "route.delete_trace" => tool_route_delete_trace(project, args),
         "route.delete_via" => tool_route_delete_via(project, args),
@@ -2195,6 +2206,119 @@ fn tool_placement_rotate(project: &Project, args: &Value) -> Result<Value, ToolE
         format!("placement.rotate: {} → {normalised:.0}°", input.reference),
     );
     Ok(text_result(format!("Rotated {} to {normalised:.0}°", input.reference)).into())
+}
+
+#[derive(Debug, Deserialize)]
+struct PlacementDeleteInput {
+    refs: Vec<String>,
+}
+
+fn tool_placement_delete(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: PlacementDeleteInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("placement.delete: {e}")))?;
+    if input.refs.is_empty() {
+        return Err(ToolError::invalid_params(
+            "placement.delete: at least one reference required".to_string(),
+        ));
+    }
+    // Stop at the first ref that doesn't exist so the human sees the
+    // typo immediately rather than getting a half-applied delete.
+    let mut summaries: Vec<pcb_core::DeletedFootprint> = Vec::with_capacity(input.refs.len());
+    for r in &input.refs {
+        match project.delete_footprint_by_ref(r) {
+            Ok(s) => summaries.push(s),
+            Err(e) => {
+                return Err(ToolError::invalid_params(e));
+            }
+        }
+    }
+    let mut total_traces = 0_usize;
+    let mut total_vias = 0_usize;
+    let mut total_pads = 0_usize;
+    let mut orphaned: Vec<String> = Vec::new();
+    let mut per_ref = Vec::with_capacity(summaries.len());
+    for s in &summaries {
+        total_traces += s.traces_removed;
+        total_vias += s.vias_removed;
+        total_pads += s.pad_count;
+        for n in &s.orphaned_nets {
+            if !orphaned.contains(n) {
+                orphaned.push(n.clone());
+            }
+        }
+        let key_display = if s.key.is_empty() {
+            s.library.clone()
+        } else {
+            s.key.clone()
+        };
+        per_ref.push(json!({
+            "reference": s.reference,
+            "id": s.id.0.to_string(),
+            "key": key_display,
+            "pads": s.pad_count,
+            "traces_removed": s.traces_removed,
+            "vias_removed": s.vias_removed,
+            "orphaned_nets": s.orphaned_nets,
+        }));
+    }
+    let refs_csv = summaries
+        .iter()
+        .map(|s| s.reference.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Use the first summary's key/lib for the single-ref reply shape
+    // requested in the spec; for multi-ref we degrade to a roll-up.
+    let mut msg = if summaries.len() == 1 {
+        let s = &summaries[0];
+        let key_display = if s.key.is_empty() {
+            s.library.clone()
+        } else {
+            s.key.clone()
+        };
+        format!(
+            "removed {} ({}, {} pads) + {} traces + {} vias",
+            s.reference, key_display, s.pad_count, s.traces_removed, s.vias_removed,
+        )
+    } else {
+        format!(
+            "removed {} footprint(s) [{}] + {} traces + {} vias ({} pads total)",
+            summaries.len(),
+            refs_csv,
+            total_traces,
+            total_vias,
+            total_pads,
+        )
+    };
+    if !orphaned.is_empty() {
+        msg.push_str(&format!(
+            " — WARNING: net(s) {} now have no pads on the board",
+            orphaned.join(", ")
+        ));
+    }
+    project.log(
+        ActivityLevel::Info,
+        format!("placement.delete: {refs_csv} ({total_traces} traces, {total_vias} vias cleared)"),
+    );
+    Ok(text_result(msg).with_data(json!({
+        "removed": per_ref,
+        "total_traces_removed": total_traces,
+        "total_vias_removed": total_vias,
+        "orphaned_nets": orphaned,
+    })))
+}
+
+fn tool_placement_clear_board(project: &Project) -> Result<Value, ToolError> {
+    let refs = project.clear_board_placements();
+    let msg = if refs.is_empty() {
+        "board already empty".to_string()
+    } else {
+        format!("cleared {} footprint(s) and all routing", refs.len())
+    };
+    project.log(
+        ActivityLevel::Info,
+        format!("placement.clear_board: {} removed", refs.len()),
+    );
+    Ok(text_result(msg).with_data(json!({"removed": refs})))
 }
 
 #[derive(Debug, Deserialize)]

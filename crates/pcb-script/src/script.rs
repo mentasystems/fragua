@@ -781,6 +781,32 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 }),
             })
         }
+        "delete" => {
+            need_args(line, tokens, 1, "delete REF [REF ...]")?;
+            // Strict ref-only verb — every token after `delete` is a
+            // reference designator. Anything carrying `=` would be a
+            // typo (no kv flags supported yet) so reject early to give
+            // a clear error rather than treating it as a ref.
+            let refs: Vec<String> = tokens[1..].to_vec();
+            for r in &refs {
+                if r.contains('=') {
+                    return Err(ParseError::at(
+                        line,
+                        format!("delete: unexpected `=` in ref `{r}` (no kv flags supported)"),
+                    ));
+                }
+            }
+            Ok(Cmd {
+                line,
+                tool: "placement.delete".into(),
+                args: json!({ "refs": refs }),
+            })
+        }
+        "clear-board" => Ok(Cmd {
+            line,
+            tool: "placement.clear_board".into(),
+            args: json!({}),
+        }),
 
         "route" => {
             // optional kv: trace_width, clearance, via_drill, via_diameter, via_cost, cell
