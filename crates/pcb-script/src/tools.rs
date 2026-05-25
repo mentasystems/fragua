@@ -38,6 +38,39 @@ impl ToolError {
     }
 }
 
+/// Snapshot the library-key → placement-margin lookup the renderer and
+/// DRC consume. Cheap: one pass over the library entries; library
+/// reads are RwLock-shared so concurrent tools don't block each other.
+/// Keys with all-zero margins are omitted so the renderer can skip the
+/// outline draw cheaply via `HashMap::get`.
+fn build_placement_margin_map(project: &Project) -> pcb_render::PlacementMarginMap {
+    let mut out = pcb_render::PlacementMarginMap::default();
+    for entry in project.library().list() {
+        if entry.placement_margin.is_zero() {
+            continue;
+        }
+        out.insert(entry.key, entry.placement_margin);
+    }
+    out
+}
+
+/// `HashMap<String, PlacementMargin>` flavour suitable for DRC, which
+/// keeps its own copy in `DrcOptions`. Mirrors
+/// `build_placement_margin_map` so both consumers see the same set of
+/// margins.
+fn build_drc_margin_map(
+    project: &Project,
+) -> std::collections::HashMap<String, pcb_core::PlacementMargin> {
+    let mut out = std::collections::HashMap::new();
+    for entry in project.library().list() {
+        if entry.placement_margin.is_zero() {
+            continue;
+        }
+        out.insert(entry.key, entry.placement_margin);
+    }
+    out
+}
+
 /// Reference for the `script` action language — every verb the agent
 /// can put on a line. Served verbatim at `GET /` of the local API.
 pub const SCRIPT_REFERENCE: &str = "Run a multi-line PCB design script — the ONLY surface you need. \
@@ -439,8 +472,9 @@ fn tool_screenshot(project: &Project, args: &Value) -> Result<Value, ToolError> 
     });
 
     let snap = project.read();
+    let margins = build_placement_margin_map(project);
     let png_result = match view {
-        "board" => pcb_render::render_board_png(snap.board(), width),
+        "board" => pcb_render::render_board_png_with_margins(snap.board(), &margins, width),
         "schematic" | "sch" => pcb_render::render_schematic_png(snap.schematic(), width),
         other => {
             return Err(ToolError::invalid_params(format!(
@@ -806,9 +840,10 @@ fn tool_placement_add(project: &Project, args: &Value) -> Result<Value, ToolErro
 }
 
 fn tool_view_snapshot(project: &Project) -> Result<Value, ToolError> {
+    let margins = build_placement_margin_map(project);
     let snap = project.read();
     let board = snap.board();
-    let svg = pcb_render::render_svg(board);
+    let svg = pcb_render::render_svg_with_margins(board, &margins);
 
     // Structured introspection so the agent can act on the board
     // without parsing SVG: every footprint, trace, via with id, world
@@ -948,7 +983,11 @@ fn tool_view_summary(project: &Project) -> Result<Value, ToolError> {
     let nets = collect_net_status(board, sch);
 
     // DRC summary only — no per-violation list. Use drc.run for details.
-    let drc = pcb_drc::run(board, &pcb_drc::DrcOptions::default());
+    let drc_opts = pcb_drc::DrcOptions {
+        placement_margins: build_drc_margin_map(project),
+        ..pcb_drc::DrcOptions::default()
+    };
+    let drc = pcb_drc::run(board, &drc_opts);
 
     let total_nets = nets.len();
     let unconnected_nets: usize = nets
@@ -2935,8 +2974,13 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
     // Run DRC right after the route so the agent gets the verdict
     // in a single round-trip and can iterate without a second call.
     let drc_report = {
+        let margins = build_drc_margin_map(project);
         let snap = project.read();
-        pcb_drc::run(snap.board(), &pcb_drc::DrcOptions::default())
+        let opts = pcb_drc::DrcOptions {
+            placement_margins: margins,
+            ..pcb_drc::DrcOptions::default()
+        };
+        pcb_drc::run(snap.board(), &opts)
     };
     project.log(
         ActivityLevel::Info,
@@ -3016,7 +3060,10 @@ fn tool_drc_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: DrcInput = serde_json::from_value(args.clone())
         .map_err(|e| ToolError::invalid_params(format!("drc.run: {e}")))?;
 
-    let mut opts = pcb_drc::DrcOptions::default();
+    let mut opts = pcb_drc::DrcOptions {
+        placement_margins: build_drc_margin_map(project),
+        ..pcb_drc::DrcOptions::default()
+    };
     if let Some(v) = input.min_clearance_mm {
         opts.min_clearance = Length::from_mm(v);
     }

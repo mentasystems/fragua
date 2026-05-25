@@ -98,6 +98,7 @@ struct OutlinePayload {
 
 #[tauri::command]
 fn project_state(state: State<'_, AppState>) -> ProjectStatePayload {
+    let margins = collect_placement_margins(&state.project);
     let snap = state.project.read();
     let palette: Vec<PalettePayload> = snap
         .palette()
@@ -123,10 +124,25 @@ fn project_state(state: State<'_, AppState>) -> ProjectStatePayload {
         palette_count: palette.len(),
         palette,
         api_addr: state.api_addr.clone(),
-        board_svg: pcb_render::render_svg(snap.board()),
+        board_svg: pcb_render::render_svg_with_margins(snap.board(), &margins),
         schematic_svg: pcb_render::render_schematic_svg(snap.schematic()),
         outline,
     }
+}
+
+/// Snapshot the library-key → placement-margin lookup the renderer
+/// consumes for body outlines. Mirrors the script-API helper of the
+/// same name — keeping a tiny copy here avoids pulling `pcb_script` as
+/// a runtime dep on the Tauri side.
+fn collect_placement_margins(project: &pcb_core::Project) -> pcb_render::PlacementMarginMap {
+    let mut out = pcb_render::PlacementMarginMap::default();
+    for entry in project.library().list() {
+        if entry.placement_margin.is_zero() {
+            continue;
+        }
+        out.insert(entry.key, entry.placement_margin);
+    }
+    out
 }
 
 /// Wipe schematic + palette + board.
@@ -634,8 +650,16 @@ fn move_footprint(
 /// `violations` to paint markers on the board.
 #[tauri::command]
 fn run_drc(state: State<'_, AppState>) -> Result<DrcReportPayload, String> {
+    let mut opts = pcb_drc::DrcOptions::default();
+    for entry in state.project.library().list() {
+        if entry.placement_margin.is_zero() {
+            continue;
+        }
+        opts.placement_margins
+            .insert(entry.key, entry.placement_margin);
+    }
     let snap = state.project.read();
-    let report = pcb_drc::run(snap.board(), &pcb_drc::DrcOptions::default());
+    let report = pcb_drc::run(snap.board(), &opts);
     drop(snap);
     state.project.log(
         pcb_core::ActivityLevel::Info,
@@ -1005,7 +1029,7 @@ mod http {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
-    use crate::USAGE;
+    use crate::{collect_placement_margins, USAGE};
 
     /// Intermediate result from `handle_screenshot`'s synchronous
     /// render block. Kept outside the function so clippy doesn't
@@ -1106,9 +1130,14 @@ mod http {
         // `.await` — the guard is `!Send`, which would otherwise make
         // this future un-spawnable on the multi-threaded runtime.
         let rendered = {
+            let margins = collect_placement_margins(project);
             let snap = project.read();
             match view {
-                "board" => Rendered::Bytes(pcb_render::render_board_png(snap.board(), width)),
+                "board" => Rendered::Bytes(pcb_render::render_board_png_with_margins(
+                    snap.board(),
+                    &margins,
+                    width,
+                )),
                 "schematic" | "sch" => {
                     Rendered::Bytes(pcb_render::render_schematic_png(snap.schematic(), width))
                 }

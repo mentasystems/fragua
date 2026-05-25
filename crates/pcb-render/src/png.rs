@@ -67,6 +67,16 @@ pub fn render_board_png(board: &Board, width_px: u32) -> Result<Vec<u8>, RenderE
     svg_to_png(&crate::render_svg(board), width_px)
 }
 
+/// Same as `render_board_png` but consults `margins` for library-keyed
+/// placement-margin body outlines (see `render_svg_with_margins`).
+pub fn render_board_png_with_margins(
+    board: &Board,
+    margins: &crate::PlacementMarginMap,
+    width_px: u32,
+) -> Result<Vec<u8>, RenderError> {
+    svg_to_png(&crate::render_svg_with_margins(board, margins), width_px)
+}
+
 /// Convenience: render a schematic to a PNG at the requested width.
 pub fn render_schematic_png(
     schematic: &Schematic,

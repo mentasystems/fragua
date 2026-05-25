@@ -274,6 +274,64 @@ impl Footprint {
         raw.replace("{REF}", &self.reference)
             .replace("{VAL}", &self.value)
     }
+
+    /// World-frame bounding box of the footprint's pads inflated by
+    /// `margin` (per-side in footprint-local mm). Margins are rotated
+    /// into the world AABB to match the footprint's `rotation`. Returns
+    /// `None` if the footprint has no pads (no base bbox to inflate).
+    ///
+    /// This is the canonical "what physical area does this component
+    /// actually occupy" rectangle — pads + the library-authored body
+    /// keep-out — and is shared by the placer, the script tools'
+    /// edge/overlap checks, the renderer's body-outline overlay, and
+    /// the DRC body-overlap / body-off-board rules so all four agree.
+    #[must_use]
+    pub fn inflated_bbox(&self, margin: crate::library::PlacementMargin) -> Option<Rect> {
+        let base = self.bounds()?;
+        if margin.is_zero() {
+            return Some(base);
+        }
+        let world = rotate_margin_trbl(margin.as_trbl_mm(), self.rotation);
+        let [t, r, b, l] = world;
+        Some(Rect {
+            min: Point::new(
+                base.min.x - crate::units::Length::from_mm(l),
+                base.min.y - crate::units::Length::from_mm(b),
+            ),
+            max: Point::new(
+                base.max.x + crate::units::Length::from_mm(r),
+                base.max.y + crate::units::Length::from_mm(t),
+            ),
+        })
+    }
+}
+
+/// Rotate a `[top, right, bottom, left]` local-frame per-side margin
+/// into the world-aligned `[top, right, bottom, left]` AABB inflation,
+/// given a footprint rotation in degrees CCW. Only 90° increments are
+/// modelled (matching `pad_world_size`); off-axis rotations snap to the
+/// nearest quadrant — for placement keep-out this rounding error is
+/// irrelevant compared to the user-set margins (usually ≥ 0.5 mm).
+///
+/// This is the same maths the SA placer uses for its gap penalty, kept
+/// in `pcb-core` so the script tools, renderer, and DRC can share one
+/// definition instead of forking it per crate.
+#[must_use]
+pub fn rotate_margin_trbl(local: [f64; 4], rotation_deg: f32) -> [f64; 4] {
+    let r = f64::from(rotation_deg).rem_euclid(360.0);
+    let [t, r2, b, l] = local;
+    if (45.0..135.0).contains(&r) {
+        // +90° CCW: local +Y (top) → world -X (left); local +X (right) → world +Y (top).
+        [r2, b, l, t]
+    } else if (135.0..225.0).contains(&r) {
+        // 180°.
+        [b, l, t, r2]
+    } else if (225.0..315.0).contains(&r) {
+        // +270° CCW.
+        [l, t, r2, b]
+    } else {
+        local
+    }
 }
 
 /// A copper trace segment. Traces are stored as straight 2-point
@@ -537,6 +595,83 @@ impl Board {
             }
         }
         None
+    }
+
+    /// Reference of the first board footprint whose **inflated body
+    /// bbox** (pads + the library-authored placement margin) intersects
+    /// `probe`'s inflated body bbox, or `None` if clear. `ignore_id`
+    /// skips a single footprint (same use as `first_overlapper`).
+    /// `margin_for` resolves a footprint's library margin — typically
+    /// `|fp| library.find(&fp.key).map(|e| e.placement_margin).unwrap_or_default()`.
+    ///
+    /// Unlike `first_overlapper`, this does NOT add the
+    /// `MIN_FOOTPRINT_GAP_MM` half-gap: the margin itself is the user's
+    /// declared keep-out, and stacking the two would double-reject
+    /// borderline-but-intended placements. The hard pad-overlap check
+    /// from `first_overlapper` is still applied separately by the
+    /// placement APIs, so pad-on-pad shorts remain rejected.
+    #[must_use]
+    pub fn first_body_overlapper<F>(
+        &self,
+        probe: &Footprint,
+        ignore_id: Option<Id>,
+        margin_for: &F,
+    ) -> Option<String>
+    where
+        F: Fn(&Footprint) -> crate::library::PlacementMargin,
+    {
+        let probe_bounds = probe.inflated_bbox(margin_for(probe))?;
+        for fp in self.footprints_in_order() {
+            if Some(fp.id) == ignore_id {
+                continue;
+            }
+            if let Some(b) = fp.inflated_bbox(margin_for(fp)) {
+                if probe_bounds.intersects(&b) {
+                    return Some(fp.reference.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// If `probe`'s inflated body bbox extends past the board outline
+    /// on any side, return a human-readable description. Edge-mounted
+    /// parts are allowed to sit flush against the outline so the same
+    /// `EDGE_TOUCH_TOLERANCE_MM` tolerance from `edge_mount_violation`
+    /// applies (a 0.5 mm overhang is treated as "touching the edge",
+    /// not "off the board"). Returns `None` when:
+    ///   - the board has no outline yet, or
+    ///   - the inflated bbox fits within the outline (within tolerance).
+    #[must_use]
+    pub fn body_outline_violation(
+        &self,
+        probe: &Footprint,
+        margin: crate::library::PlacementMargin,
+    ) -> Option<String> {
+        let outline = self.outline?;
+        let bbox = probe.inflated_bbox(margin)?;
+        let tol_nm = (EDGE_TOUCH_TOLERANCE_MM * 1_000_000.0) as i64;
+        let over_left = outline.min.x.0 - bbox.min.x.0;
+        let over_right = bbox.max.x.0 - outline.max.x.0;
+        let over_bottom = outline.min.y.0 - bbox.min.y.0;
+        let over_top = bbox.max.y.0 - outline.max.y.0;
+        let worst = over_left.max(over_right).max(over_bottom).max(over_top);
+        if worst <= tol_nm {
+            return None;
+        }
+        let side = if worst == over_left {
+            "left"
+        } else if worst == over_right {
+            "right"
+        } else if worst == over_bottom {
+            "bottom"
+        } else {
+            "top"
+        };
+        let mm = worst as f64 / 1_000_000.0;
+        Some(format!(
+            "inflated body extends {mm:.2} mm past the {side} board outline"
+        ))
     }
 
     /// If `probe.edge_mounted` is true, return a human-readable reason
@@ -928,5 +1063,97 @@ mod tests {
         let s = serde_json::to_string(&fp).unwrap();
         let back: Footprint = serde_json::from_str(&s).unwrap();
         assert_eq!(back.silk.len(), 1);
+    }
+
+    /// Build a 2-pad footprint centred at `pos` with `rotation`, pads
+    /// at local ±1.0 mm on x, 0.5 mm × 0.5 mm — small helper for the
+    /// inflated-bbox tests below.
+    fn make_two_pad_fp(pos: Point, rotation: f32) -> Footprint {
+        Footprint {
+            id: Id::new(),
+            reference: "J1".into(),
+            value: String::new(),
+            library: "test".into(),
+            position: pos,
+            rotation,
+            layer: CopperLayer::Top,
+            pads: vec![
+                Pad {
+                    number: "1".into(),
+                    name: String::new(),
+                    offset: Point::new(Length::from_mm(-1.0), Length::from_mm(0.0)),
+                    size: (Length::from_mm(0.5), Length::from_mm(0.5)),
+                    layer: CopperLayer::Top,
+                    net: None,
+                    drill: None,
+                },
+                Pad {
+                    number: "2".into(),
+                    name: String::new(),
+                    offset: Point::new(Length::from_mm(1.0), Length::from_mm(0.0)),
+                    size: (Length::from_mm(0.5), Length::from_mm(0.5)),
+                    layer: CopperLayer::Top,
+                    net: None,
+                    drill: None,
+                },
+            ],
+            key: "test_part".into(),
+            description: String::new(),
+            edge_mounted: false,
+            silk: vec![],
+        }
+    }
+
+    #[test]
+    fn inflated_bbox_asymmetric_margin_at_zero_rotation() {
+        // Pad bbox: x ∈ [-1.25, 1.25], y ∈ [-0.25, 0.25].
+        let fp = make_two_pad_fp(Point::ORIGIN, 0.0);
+        let margin = crate::library::PlacementMargin {
+            top_mm: 1.0,
+            right_mm: 2.0,
+            bottom_mm: 0.5,
+            left_mm: 3.0,
+        };
+        let bb = fp.inflated_bbox(margin).expect("bbox");
+        assert!((bb.min.x.to_mm() - (-1.25 - 3.0)).abs() < 1e-6, "left");
+        assert!((bb.max.x.to_mm() - (1.25 + 2.0)).abs() < 1e-6, "right");
+        assert!((bb.min.y.to_mm() - (-0.25 - 0.5)).abs() < 1e-6, "bottom");
+        assert!((bb.max.y.to_mm() - (0.25 + 1.0)).abs() < 1e-6, "top");
+    }
+
+    #[test]
+    fn inflated_bbox_rotates_margins_with_footprint() {
+        // 90° CCW: local +Y (top, 1mm margin) becomes world -X (left).
+        // Pad bbox after rotation: x ∈ [-0.25, 0.25], y ∈ [-1.25, 1.25].
+        let fp = make_two_pad_fp(Point::ORIGIN, 90.0);
+        let margin = crate::library::PlacementMargin {
+            top_mm: 1.0,
+            right_mm: 2.0,
+            bottom_mm: 0.5,
+            left_mm: 3.0,
+        };
+        let bb = fp.inflated_bbox(margin).expect("bbox");
+        // After 90° CCW: world [t, r, b, l] = [right, bottom, left, top]
+        //              = [2.0, 0.5, 3.0, 1.0].
+        assert!((bb.min.x.to_mm() - (-0.25 - 1.0)).abs() < 1e-6, "left");
+        assert!((bb.max.x.to_mm() - (0.25 + 0.5)).abs() < 1e-6, "right");
+        assert!((bb.min.y.to_mm() - (-1.25 - 3.0)).abs() < 1e-6, "bottom");
+        assert!((bb.max.y.to_mm() - (1.25 + 2.0)).abs() < 1e-6, "top");
+    }
+
+    #[test]
+    fn inflated_bbox_zero_margin_matches_bounds() {
+        let fp = make_two_pad_fp(
+            Point::new(Length::from_mm(5.0), Length::from_mm(-2.0)),
+            0.0,
+        );
+        let bb = fp
+            .inflated_bbox(crate::library::PlacementMargin::default())
+            .expect("bbox");
+        let raw = fp.bounds().expect("bounds");
+        assert_eq!(bb.min.x.0, raw.min.x.0);
+        assert_eq!(bb.max.x.0, raw.max.x.0);
+        assert_eq!(bb.min.y.0, raw.min.y.0);
+        assert_eq!(bb.max.y.0, raw.max.y.0);
     }
 }

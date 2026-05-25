@@ -625,6 +625,17 @@ impl Project {
     /// error if no palette item with that reference exists or if the
     /// proposed bbox would intersect an existing footprint's bbox.
     pub fn place_from_palette(&self, reference: &str, position: Point) -> Result<Id, String> {
+        let library = Arc::clone(&self.library);
+        let margin_for = |fp: &Footprint| {
+            if fp.key.is_empty() {
+                crate::library::PlacementMargin::default()
+            } else {
+                library
+                    .find(&fp.key)
+                    .map(|e| e.placement_margin)
+                    .unwrap_or_default()
+            }
+        };
         let mut inner = self.inner.write().expect("project lock poisoned");
         let idx = inner
             .palette
@@ -640,6 +651,19 @@ impl Project {
                 position.y.to_mm(),
                 other,
             ));
+        }
+        if let Some(other) = inner.board.first_body_overlapper(&fp, None, &margin_for) {
+            return Err(format!(
+                "{reference} body at ({:.2}, {:.2}) mm would overlap {} body — pick another position",
+                position.x.to_mm(),
+                position.y.to_mm(),
+                other,
+            ));
+        }
+        if !fp.edge_mounted {
+            if let Some(reason) = inner.board.body_outline_violation(&fp, margin_for(&fp)) {
+                return Err(format!("{reference} {reason}"));
+            }
         }
         if let Some(reason) = inner.board.edge_mount_violation(&fp) {
             return Err(format!(
@@ -667,6 +691,17 @@ impl Project {
     /// the board, identified by reference. Rejected if the rotated
     /// bbox would intersect another footprint's bbox.
     pub fn rotate_footprint(&self, reference: &str, rotation_deg: f32) -> Result<Id, String> {
+        let library = Arc::clone(&self.library);
+        let margin_for = |fp: &Footprint| {
+            if fp.key.is_empty() {
+                crate::library::PlacementMargin::default()
+            } else {
+                library
+                    .find(&fp.key)
+                    .map(|e| e.placement_margin)
+                    .unwrap_or_default()
+            }
+        };
         let mut inner = self.inner.write().expect("project lock poisoned");
         let id = inner
             .board
@@ -681,6 +716,21 @@ impl Project {
             return Err(format!(
                 "{reference} rotated to {rotation_deg:.0}° would overlap {other}"
             ));
+        }
+        if let Some(other) = inner
+            .board
+            .first_body_overlapper(&probe, Some(id), &margin_for)
+        {
+            return Err(format!(
+                "{reference} body rotated to {rotation_deg:.0}° would overlap {other} body"
+            ));
+        }
+        if !probe.edge_mounted {
+            if let Some(reason) = inner.board.body_outline_violation(&probe, margin_for(&probe)) {
+                return Err(format!(
+                    "{reference} rotated to {rotation_deg:.0}°: {reason}"
+                ));
+            }
         }
         if let Some(reason) = inner.board.edge_mount_violation(&probe) {
             return Err(format!(
@@ -701,6 +751,17 @@ impl Project {
     /// Move a footprint already on the board to a new position.
     /// Rejected if the new bbox would intersect another footprint's bbox.
     pub fn move_footprint_to(&self, reference: &str, position: Point) -> Result<Id, String> {
+        let library = Arc::clone(&self.library);
+        let margin_for = |fp: &Footprint| {
+            if fp.key.is_empty() {
+                crate::library::PlacementMargin::default()
+            } else {
+                library
+                    .find(&fp.key)
+                    .map(|e| e.placement_margin)
+                    .unwrap_or_default()
+            }
+        };
         let mut inner = self.inner.write().expect("project lock poisoned");
         let id = inner
             .board
@@ -717,6 +778,25 @@ impl Project {
                 position.x.to_mm(),
                 position.y.to_mm(),
             ));
+        }
+        if let Some(other) = inner
+            .board
+            .first_body_overlapper(&probe, Some(id), &margin_for)
+        {
+            return Err(format!(
+                "moving {reference} to ({:.2}, {:.2}) mm: body would overlap {other} body",
+                position.x.to_mm(),
+                position.y.to_mm(),
+            ));
+        }
+        if !probe.edge_mounted {
+            if let Some(reason) = inner.board.body_outline_violation(&probe, margin_for(&probe)) {
+                return Err(format!(
+                    "moving {reference} to ({:.2}, {:.2}) mm: {reason}",
+                    position.x.to_mm(),
+                    position.y.to_mm(),
+                ));
+            }
         }
         if let Some(reason) = inner.board.edge_mount_violation(&probe) {
             return Err(format!(

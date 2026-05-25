@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
-use pcb_core::{Board, CopperLayer, Footprint, Length, Pad, Pour, Rect, Trace};
+use pcb_core::{Board, CopperLayer, Footprint, Length, Pad, PlacementMargin, Pour, Rect, Trace};
 
 #[derive(Debug, Clone)]
 pub struct DrcOptions {
@@ -47,6 +47,16 @@ pub struct DrcOptions {
     /// override — so a 0.3 mm power-class clearance is honoured even
     /// when paired with a 0.2 mm signal.
     pub net_overrides: HashMap<String, NetOverride>,
+    /// Library-key → per-side placement margin (mm). When set, DRC
+    /// emits `BodyOverlap` warnings for any pair of footprints whose
+    /// library-authored body bbox (pads + margin, rotated into the
+    /// world frame) overlap, and `BodyOffBoard` warnings for any
+    /// footprint whose body bbox sticks past the board outline. Both
+    /// are warnings (not errors) so the user can still ship a design
+    /// where they intentionally accepted the overlap — e.g. a
+    /// component whose body legitimately overhangs the outline because
+    /// the fab leaves that part on the panel rails.
+    pub placement_margins: HashMap<String, PlacementMargin>,
 }
 
 /// Per-net rule overrides — fields default to "use the call-site
@@ -68,6 +78,7 @@ impl Default for DrcOptions {
             min_drill: Length::from_mm(0.2),
             routing_inefficient_ratio: 1.5,
             net_overrides: HashMap::new(),
+            placement_margins: HashMap::new(),
         }
     }
 }
@@ -110,6 +121,18 @@ pub enum ViolationKind {
     /// router had to take a long detour because some other net was
     /// blocking the obvious corridor (i.e. a placement issue).
     RoutingInefficient,
+    /// Two footprints' library-authored body bboxes (pads inflated by
+    /// `LibraryEntry::placement_margin`) overlap. Emitted as a warning
+    /// — pad-on-pad overlap is still rejected hard by the placement
+    /// APIs, but a body keep-out overlap is something the user may
+    /// have accepted intentionally (e.g. tucking a 0805 cap under the
+    /// shadow of a screw terminal's plastic shroud).
+    BodyOverlap,
+    /// A footprint's library-authored body bbox extends past the board
+    /// outline. Warning, not error, for the same reason as `BodyOverlap`.
+    /// Edge-mounted parts are exempt — they are placed flush to the
+    /// outline by design.
+    BodyOffBoard,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,7 +180,134 @@ pub fn run(board: &Board, opts: &DrcOptions) -> DrcReport {
     check_narrow_traces(board, opts, &mut report);
     check_small_drills(board, opts, &mut report);
     check_routing_inefficient(board, opts, &mut report);
+    check_body_overlap(board, opts, &mut report);
+    if let Some(outline) = board.outline {
+        check_body_off_board(board, outline, opts, &mut report);
+    }
     report
+}
+
+/// Resolve a footprint's placement margin from the rules table. Empty
+/// key or unknown key → zero margin (the rule is then a no-op for that
+/// footprint).
+fn margin_for(opts: &DrcOptions, fp: &Footprint) -> PlacementMargin {
+    if fp.key.is_empty() {
+        return PlacementMargin::default();
+    }
+    opts.placement_margins
+        .get(&fp.key)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn check_body_overlap(board: &Board, opts: &DrcOptions, report: &mut DrcReport) {
+    if opts.placement_margins.is_empty() {
+        return;
+    }
+    let fps: Vec<&Footprint> = board.footprints_in_order().collect();
+    for i in 0..fps.len() {
+        let a = fps[i];
+        let Some(ab) = a.inflated_bbox(margin_for(opts, a)) else {
+            continue;
+        };
+        for &b in fps.iter().skip(i + 1) {
+            let Some(bb) = b.inflated_bbox(margin_for(opts, b)) else {
+                continue;
+            };
+            if !ab.intersects(&bb) {
+                continue;
+            }
+            // Don't double-report when neither footprint actually
+            // declared a margin — that case is already covered by the
+            // existing `MIN_FOOTPRINT_GAP_MM` pad-bbox check the
+            // placement APIs enforce, and surfacing it as a body-overlap
+            // warning here is noise.
+            let am = margin_for(opts, a);
+            let bm = margin_for(opts, b);
+            if am.is_zero() && bm.is_zero() {
+                continue;
+            }
+            let mx = f64::midpoint(
+                f64::midpoint(ab.min.x.to_mm(), ab.max.x.to_mm()),
+                f64::midpoint(bb.min.x.to_mm(), bb.max.x.to_mm()),
+            );
+            let my = f64::midpoint(
+                f64::midpoint(ab.min.y.to_mm(), ab.max.y.to_mm()),
+                f64::midpoint(bb.min.y.to_mm(), bb.max.y.to_mm()),
+            );
+            report.push(Violation {
+                kind: ViolationKind::BodyOverlap,
+                severity: Severity::Warning,
+                message: format!(
+                    "{} body overlaps {} body (placement_margin inflation)",
+                    a.reference, b.reference
+                ),
+                x_mm: mx,
+                y_mm: my,
+                involved: vec![a.reference.clone(), b.reference.clone()],
+            });
+        }
+    }
+}
+
+fn check_body_off_board(
+    board: &Board,
+    outline: Rect,
+    opts: &DrcOptions,
+    report: &mut DrcReport,
+) {
+    if opts.placement_margins.is_empty() {
+        return;
+    }
+    for fp in board.footprints_in_order() {
+        // Edge-mounted parts are placed flush to the outline by design.
+        if fp.edge_mounted {
+            continue;
+        }
+        let margin = margin_for(opts, fp);
+        // No margin → fall back to the existing edge-clearance check on
+        // raw pads; no point re-flagging an unannotated footprint as
+        // off-board for a margin that's zero.
+        if margin.is_zero() {
+            continue;
+        }
+        let Some(bbox) = fp.inflated_bbox(margin) else {
+            continue;
+        };
+        let over_left = outline.min.x.0 - bbox.min.x.0;
+        let over_right = bbox.max.x.0 - outline.max.x.0;
+        let over_bottom = outline.min.y.0 - bbox.min.y.0;
+        let over_top = bbox.max.y.0 - outline.max.y.0;
+        let worst = over_left.max(over_right).max(over_bottom).max(over_top);
+        // Allow up to 0.5 mm of overhang — same tolerance the placement
+        // APIs use so a body that just kisses the outline isn't flagged.
+        if worst <= 500_000 {
+            continue;
+        }
+        let side = if worst == over_left {
+            "left"
+        } else if worst == over_right {
+            "right"
+        } else if worst == over_bottom {
+            "bottom"
+        } else {
+            "top"
+        };
+        let mm = worst as f64 / 1_000_000.0;
+        let cx = f64::midpoint(bbox.min.x.to_mm(), bbox.max.x.to_mm());
+        let cy = f64::midpoint(bbox.min.y.to_mm(), bbox.max.y.to_mm());
+        report.push(Violation {
+            kind: ViolationKind::BodyOffBoard,
+            severity: Severity::Warning,
+            message: format!(
+                "{} body extends {mm:.2} mm past the {side} board outline",
+                fp.reference
+            ),
+            x_mm: cx,
+            y_mm: cy,
+            involved: vec![fp.reference.clone()],
+        });
+    }
 }
 
 /// World-space pad geometry — flattened so the checks don't have to

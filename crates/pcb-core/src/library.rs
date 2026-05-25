@@ -212,6 +212,26 @@ pub struct PlacementMargin {
     pub left_mm: f64,
 }
 
+impl PlacementMargin {
+    /// True when every side is zero (or negative — treated as no
+    /// inflation). Callers can skip the rotated-inflate maths in the
+    /// common case.
+    #[must_use]
+    pub fn is_zero(self) -> bool {
+        self.top_mm <= 0.0
+            && self.right_mm <= 0.0
+            && self.bottom_mm <= 0.0
+            && self.left_mm <= 0.0
+    }
+
+    /// Pack the margin as the placer's `[top, right, bottom, left]`
+    /// array so callers can share the same rotation helper.
+    #[must_use]
+    pub fn as_trbl_mm(self) -> [f64; 4] {
+        [self.top_mm, self.right_mm, self.bottom_mm, self.left_mm]
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Attachment {
     /// `UUIDv4`. Also the on-disk basename (extension follows the mime).

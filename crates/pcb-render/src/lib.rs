@@ -7,17 +7,27 @@
 pub mod png;
 pub mod schematic;
 pub use png::{
-    render_board_png, render_library_entry_png, render_schematic_png, svg_to_png,
-    DEFAULT_PNG_WIDTH, MAX_PNG_DIMENSION,
+    render_board_png, render_board_png_with_margins, render_library_entry_png,
+    render_schematic_png, svg_to_png, DEFAULT_PNG_WIDTH, MAX_PNG_DIMENSION,
 };
 pub use schematic::render_schematic_svg;
 
 use std::fmt::Write;
 
+use std::collections::HashMap;
+
 use pcb_core::{
-    hershey, silk_clip, Board, CopperLayer, Footprint, FootprintSilk, Length, Pad, Point, Rect,
-    SilkAnchor, SilkLayer, SilkText, Trace, Via,
+    hershey, silk_clip, Board, CopperLayer, Footprint, FootprintSilk, Length, Pad, PlacementMargin,
+    Point, Rect, SilkAnchor, SilkLayer, SilkText, Trace, Via,
 };
+
+/// Library-key → per-side placement margin. The renderer takes this
+/// instead of a full `Library` so callers without library access (tests,
+/// the schematic preview pipeline) can pass an empty map and still get a
+/// pad-only render, while the Tauri host and the script API pass a real
+/// lookup so the user's review-pane margins appear as a body outline on
+/// the board.
+pub type PlacementMarginMap = HashMap<String, PlacementMargin>;
 
 /// Margin (in board nm) added around the content bounding box when no
 /// explicit outline is set, so footprints aren't flush against the edge.
@@ -30,6 +40,19 @@ const FALLBACK_MARGIN_NM: i64 = 5_000_000; // 5 mm
 /// boards rather than how SVG defaults work.
 #[must_use]
 pub fn render_svg(board: &Board) -> String {
+    render_svg_with_margins(board, &PlacementMarginMap::default())
+}
+
+/// Same as `render_svg` but consults `margins` (library-key → per-side
+/// placement margin in mm) for every footprint and draws a thin grey
+/// body-outline rectangle around the inflated pad bbox. The outline
+/// reflects the user-configured physical body extent recorded in the
+/// component library — a screw terminal whose plastic shroud overhangs
+/// the pads by 2 mm shows that overhang on the board even though the
+/// pads themselves are smaller. Margin-less or unknown-key footprints
+/// render identically to `render_svg`.
+#[must_use]
+pub fn render_svg_with_margins(board: &Board, margins: &PlacementMarginMap) -> String {
     let view = view_rect(board);
     let view_w_mm = view.width().to_mm();
     let view_h_mm = view.height().to_mm();
@@ -94,7 +117,8 @@ pub fn render_svg(board: &Board) -> String {
     // Ratsnest BELOW footprints so the labels stay readable.
     write_ratsnest(&mut svg, board);
     for fp in board.footprints_in_order() {
-        write_footprint(&mut svg, fp, &board.pours);
+        let margin = footprint_margin(fp, margins);
+        write_footprint(&mut svg, fp, &board.pours, margin);
     }
     for trace in board
         .traces
@@ -531,7 +555,23 @@ fn view_rect(board: &Board) -> Rect {
     )
 }
 
-fn write_footprint(svg: &mut String, fp: &Footprint, pours: &[pcb_core::Pour]) {
+/// Look up the placement margin for `fp` in `margins`, keyed by the
+/// footprint's library key. Returns `PlacementMargin::default()` for
+/// keyless footprints or unknown keys so callers can always pass a
+/// margin into render helpers without branching.
+fn footprint_margin(fp: &Footprint, margins: &PlacementMarginMap) -> PlacementMargin {
+    if fp.key.is_empty() {
+        return PlacementMargin::default();
+    }
+    margins.get(&fp.key).copied().unwrap_or_default()
+}
+
+fn write_footprint(
+    svg: &mut String,
+    fp: &Footprint,
+    pours: &[pcb_core::Pour],
+    margin: PlacementMargin,
+) {
     // Wrap the whole footprint in a transform group so pads, body,
     // and label rotate together with the footprint. Read-only render:
     // no drag handle, no per-component cursor, no hit-tracking attribute.
@@ -564,6 +604,32 @@ fn write_footprint(svg: &mut String, fp: &Footprint, pours: &[pcb_core::Pour]) {
             svg,
             r##"<rect x="{bx:.3}" y="{by:.3}" width="{bw:.3}" height="{bh:.3}" fill="rgba(255,255,255,0.01)" stroke="#8b949e" stroke-width="0.1" style="cursor:pointer"/>"##,
         );
+    }
+    // Library-authored body outline: pad bbox inflated by the per-side
+    // placement margin in footprint-LOCAL coords (we're already inside
+    // the translate+rotate group, so the local margin maps directly to
+    // the visual top/right/bottom/left edges the user dialled in via
+    // the review pane). Drawn even when only one side is non-zero so
+    // an asymmetric overhang (e.g. a screw terminal whose plastic
+    // sticks out 2 mm to the right of the pads) is visible. Skipped
+    // for zero/negative margins so an unannotated footprint looks
+    // identical to the legacy render.
+    if !margin.is_zero() {
+        if let Some(pad_bbox) = local_pad_bbox(fp) {
+            let bx = pad_bbox.min.x.to_mm() - margin.left_mm;
+            let by = pad_bbox.min.y.to_mm() - margin.bottom_mm;
+            let bw = (pad_bbox.max.x - pad_bbox.min.x).to_mm()
+                + margin.left_mm
+                + margin.right_mm;
+            let bh = (pad_bbox.max.y - pad_bbox.min.y).to_mm()
+                + margin.top_mm
+                + margin.bottom_mm;
+            let _ = write!(
+                svg,
+                r##"<rect data-body-outline="{r}" x="{bx:.3}" y="{by:.3}" width="{bw:.3}" height="{bh:.3}" fill="none" stroke="#6e7681" stroke-width="0.08" stroke-dasharray="0.4 0.3" pointer-events="none"/>"##,
+                r = escape(&fp.reference),
+            );
+        }
     }
     for pad in &fp.pads {
         write_pad(svg, pad, pours);
@@ -615,6 +681,21 @@ fn write_footprint(svg: &mut String, fp: &Footprint, pours: &[pcb_core::Pour]) {
         );
     }
     svg.push_str("</g></g>");
+}
+
+/// Local (pre-rotation, pre-translate) pad bounding box — the raw
+/// envelope the placement margin inflates. Returns `None` for a padless
+/// footprint.
+fn local_pad_bbox(fp: &Footprint) -> Option<Rect> {
+    let mut iter = fp.pads.iter().map(|pad| {
+        Rect::from_center(
+            Point::new(pad.offset.x, pad.offset.y),
+            pad.size.0,
+            pad.size.1,
+        )
+    });
+    let first = iter.next()?;
+    Some(iter.fold(first, Rect::union))
 }
 
 fn body_rect(fp: &Footprint) -> Option<Rect> {
