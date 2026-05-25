@@ -162,7 +162,14 @@ SCHEMATIC:\n\
 PALETTE / PLACEMENT:\n\
   palette REF KEY [rot=N] [value=V] [layer=top|bottom]\n\
                                                — spawn a palette item from a library entry; the\n\
-                                                 schematic must already have a symbol with REF\n\
+                                                 schematic must already have a symbol with REF.\n\
+                                                 The entry's `footprint_view_transform` (set via the\n\
+                                                 review pane's flip/rotate buttons) is baked into the\n\
+                                                 spawned pad geometry and silk: the native library\n\
+                                                 data stays untouched in index.json, but the placed\n\
+                                                 footprint matches what the user saw in the review.\n\
+                                                 The optional `rot=` is then layered on top of that\n\
+                                                 view transform, same as `place X Y ROT`.\n\
   clear-palette\n\
   place REF X Y [ROT_DEG]                      — drop palette item at (x, y) mm; rejects if it\n\
                                                  overlaps another footprint or violates the\n\
@@ -1579,7 +1586,17 @@ fn anchor_to_str(a: SilkAnchor) -> &'static str {
 /// Convert a library-frame silk item into the runtime
 /// footprint-local `FootprintSilk` representation. Library coords are
 /// already footprint-local mm; we just rebox into nanometre `Length`.
-fn library_silk_to_footprint(s: &LibrarySilk) -> FootprintSilk {
+/// Convert a `LibrarySilk` (footprint-local mm) into the runtime
+/// `FootprintSilk` representation, applying the library entry's
+/// `footprint_view_transform` so the body outline / pin-1 markers
+/// track the visual orientation the user picked in the review pane.
+/// Pass `ViewTransform::default()` for callers that have no view
+/// transform context (currently none — the only call site is the
+/// palette spawn).
+fn library_silk_to_footprint_with_view(
+    s: &LibrarySilk,
+    vt: pcb_core::ViewTransform,
+) -> FootprintSilk {
     match s {
         LibrarySilk::Line {
             layer,
@@ -1588,12 +1605,16 @@ fn library_silk_to_footprint(s: &LibrarySilk) -> FootprintSilk {
             x2_mm,
             y2_mm,
             width_mm,
-        } => FootprintSilk::Line {
-            layer: *layer,
-            start: Point::new(Length::from_mm(*x1_mm), Length::from_mm(*y1_mm)),
-            end: Point::new(Length::from_mm(*x2_mm), Length::from_mm(*y2_mm)),
-            width: Length::from_mm(*width_mm),
-        },
+        } => {
+            let (x1, y1) = vt.apply_point_mm(*x1_mm, *y1_mm);
+            let (x2, y2) = vt.apply_point_mm(*x2_mm, *y2_mm);
+            FootprintSilk::Line {
+                layer: *layer,
+                start: Point::new(Length::from_mm(x1), Length::from_mm(y1)),
+                end: Point::new(Length::from_mm(x2), Length::from_mm(y2)),
+                width: Length::from_mm(*width_mm),
+            }
+        }
         LibrarySilk::Text {
             layer,
             x_mm,
@@ -1603,15 +1624,18 @@ fn library_silk_to_footprint(s: &LibrarySilk) -> FootprintSilk {
             rotation_deg,
             anchor,
             width_mm,
-        } => FootprintSilk::Text {
-            layer: *layer,
-            position: Point::new(Length::from_mm(*x_mm), Length::from_mm(*y_mm)),
-            text: text.clone(),
-            size: Length::from_mm(*size_mm),
-            rotation: *rotation_deg,
-            anchor: *anchor,
-            width: Length::from_mm(*width_mm),
-        },
+        } => {
+            let (x, y) = vt.apply_point_mm(*x_mm, *y_mm);
+            FootprintSilk::Text {
+                layer: *layer,
+                position: Point::new(Length::from_mm(x), Length::from_mm(y)),
+                text: text.clone(),
+                size: Length::from_mm(*size_mm),
+                rotation: vt.apply_angle_deg(*rotation_deg),
+                anchor: *anchor,
+                width: Length::from_mm(*width_mm),
+            }
+        }
     }
 }
 
@@ -2002,6 +2026,7 @@ fn tool_palette_add_from_library(project: &Project, args: &Value) -> Result<Valu
         } else {
             symbol.description.clone()
         };
+        let vt = entry.footprint_view_transform;
         let pads: Vec<Pad> = entry
             .pads
             .iter()
@@ -2021,11 +2046,19 @@ fn tool_palette_add_from_library(project: &Project, args: &Value) -> Result<Valu
                         }
                     })
                     .map(str::to_string);
+                // Apply the library entry's footprint_view_transform to
+                // the native pad geometry. This is the orientation the
+                // user dialled in via the review pane; the placer then
+                // layers `place X Y ROT` on top of this. The original
+                // `LibraryPad` (and `index.json`) stay untouched so the
+                // review pane still drives off the native data.
+                let (x_mm, y_mm) = vt.apply_point_mm(p.x_mm, p.y_mm);
+                let (w_mm, h_mm) = vt.apply_size_mm(p.w_mm, p.h_mm);
                 Pad {
                     number: p.number.clone(),
                     name: p.name.clone(),
-                    offset: Point::new(Length::from_mm(p.x_mm), Length::from_mm(p.y_mm)),
-                    size: (Length::from_mm(p.w_mm), Length::from_mm(p.h_mm)),
+                    offset: Point::new(Length::from_mm(x_mm), Length::from_mm(y_mm)),
+                    size: (Length::from_mm(w_mm), Length::from_mm(h_mm)),
                     layer: input.layer.into(),
                     net,
                     drill: p.drill_mm.map(Length::from_mm),
@@ -2043,7 +2076,15 @@ fn tool_palette_add_from_library(project: &Project, args: &Value) -> Result<Valu
         )
     };
 
-    let silk: Vec<FootprintSilk> = entry.silk.iter().map(library_silk_to_footprint).collect();
+    // Library silk lives in footprint-local mm just like the pads, so it
+    // gets the same view transform — body outlines and pin-1 dots stay
+    // visually attached to the pads after a flip / rotate.
+    let vt = entry.footprint_view_transform;
+    let silk: Vec<FootprintSilk> = entry
+        .silk
+        .iter()
+        .map(|s| library_silk_to_footprint_with_view(s, vt))
+        .collect();
     let footprint = Footprint {
         id: pcb_core::Id::new(),
         reference: input.reference.clone(),
