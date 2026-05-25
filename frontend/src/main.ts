@@ -1128,7 +1128,9 @@ async function openConfirmModal() {
     </div>
     <footer class="confirm-foot">
       <button class="btn-discard" data-key="${esc(entry.key)}">Discard</button>
-      <button class="btn-confirm" data-key="${esc(entry.key)}" ${photo ? "" : "disabled title='attach a photo first'"}>Save to library</button>
+      ${photo
+        ? `<button class="btn-confirm" data-key="${esc(entry.key)}">Save to library</button>`
+        : `<span class="btn-confirm-wrap" title="attach a photo with library.attach before saving"><button class="btn-confirm" data-key="${esc(entry.key)}" disabled aria-disabled="true">Save to library</button><span class="btn-confirm-hint">attach a photo first</span></span>`}
     </footer>
   `;
   els.confirmModal.removeAttribute("hidden");

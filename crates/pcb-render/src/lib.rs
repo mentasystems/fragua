@@ -844,35 +844,76 @@ pub fn render_library_entry_svg(entry: &pcb_core::LibraryEntry) -> String {
                 r = d / 2.0,
             );
         }
-        // Pad number label — keep it readable on the copper. Y-flip the
-        // text group because the outer `scale(1,-1)` would otherwise
-        // mirror the glyphs.
-        let label = if pad.name.is_empty() {
-            pad.number.as_str()
-        } else {
-            pad.name.as_str()
-        };
-        let sz = (pad.w_mm.min(pad.h_mm) * 0.45).clamp(0.3, 1.2);
+        // Pad labels — show the PIN NUMBER (always) plus the net name
+        // when present. Jairo needs to cross-reference the datasheet by
+        // pin index, so the number must be visible even when a net is
+        // assigned. Two stacked text lines: number on top, net below.
+        // Y-flip the text group because the outer `scale(1,-1)` would
+        // otherwise mirror the glyphs.
+        let pin_number = pad.number.as_str();
+        let net_label = if pad.name.is_empty() { None } else { Some(pad.name.as_str()) };
+        let base_sz = (pad.w_mm.min(pad.h_mm) * 0.45).clamp(0.3, 1.2);
         let label_color = if is_gnd { "#ff2bd6" } else { "#0e1116" };
+        // When there are two lines, shrink slightly and offset.
+        let (num_sz, net_sz) = if net_label.is_some() {
+            (base_sz * 0.85, base_sz * 0.7)
+        } else {
+            (base_sz, base_sz)
+        };
+        // Offsets in mm relative to the pad center, in PRE-flip coords
+        // (we wrap each text in its own scale(1,-1) so positive dy is
+        // visually downward).
+        let (num_dy, net_dy) = if net_label.is_some() {
+            (-num_sz * 0.55, net_sz * 0.85)
+        } else {
+            (0.0, 0.0)
+        };
         let _ = write!(
             svg,
-            r#"<g transform="translate({cx:.3},{cy:.3}) scale(1,-1)"><text x="0" y="0" text-anchor="middle" dominant-baseline="middle" font-family="ui-monospace, monospace" font-size="{sz:.2}" fill="{label_color}" font-weight="bold">{lab}</text></g>"#,
+            r#"<g transform="translate({cx:.3},{cy:.3}) scale(1,-1)"><text x="0" y="{dy:.3}" text-anchor="middle" dominant-baseline="middle" font-family="ui-monospace, monospace" font-size="{sz:.2}" fill="{label_color}" font-weight="bold">{lab}</text></g>"#,
             cx = pad.x_mm,
             cy = -pad.y_mm,
-            sz = sz,
+            dy = num_dy,
+            sz = num_sz,
             label_color = label_color,
-            lab = escape(label),
+            lab = escape(pin_number),
         );
+        if let Some(net) = net_label {
+            let _ = write!(
+                svg,
+                r#"<g transform="translate({cx:.3},{cy:.3}) scale(1,-1)"><text x="0" y="{dy:.3}" text-anchor="middle" dominant-baseline="middle" font-family="ui-monospace, monospace" font-size="{sz:.2}" fill="{label_color}" font-weight="normal">{lab}</text></g>"#,
+                cx = pad.x_mm,
+                cy = -pad.y_mm,
+                dy = net_dy,
+                sz = net_sz,
+                label_color = label_color,
+                lab = escape(net),
+            );
+        }
     }
 
-    // Pin-1 marker — a small magenta dot top-left of pad "1" if it
-    // exists. Helps the user verify the canonical orientation.
+    // Pin-1 marker — a small yellow dot off the top-left corner of pad
+    // "1" if it exists, plus an explicit "pin 1" label so the reviewer
+    // never has to guess what the dot means. Helps verify canonical
+    // orientation against the datasheet.
     if let Some(p1) = entry.pads.iter().find(|p| p.number == "1") {
-        let x = p1.x_mm - p1.w_mm / 2.0 - 0.4;
-        let y = p1.y_mm + p1.h_mm / 2.0 + 0.4;
+        let cx = p1.x_mm - p1.w_mm / 2.0 - 0.4;
+        let cy = p1.y_mm + p1.h_mm / 2.0 + 0.4;
         let _ = write!(
             svg,
-            r##"<circle cx="{x:.3}" cy="{y:.3}" r="0.3" fill="#ffd166"/>"##,
+            r##"<circle cx="{cx:.3}" cy="{cy:.3}" r="0.3" fill="#ffd166"/>"##,
+        );
+        // Label sits just above the dot. The outer scale(1,-1) flips
+        // glyphs, so wrap in its own unflip.
+        let label_sz = 0.7_f64;
+        let label_cx = cx;
+        let label_cy = cy + 0.55;
+        let _ = write!(
+            svg,
+            r##"<g transform="translate({cx:.3},{cy:.3}) scale(1,-1)"><text x="0" y="0" text-anchor="middle" dominant-baseline="middle" font-family="ui-monospace, monospace" font-size="{sz:.2}" fill="#ffd166" font-weight="bold">pin 1</text></g>"##,
+            cx = label_cx,
+            cy = -label_cy,
+            sz = label_sz,
         );
     }
 

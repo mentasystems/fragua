@@ -956,6 +956,20 @@ html, body, #app {
   color: var(--muted);
   cursor: not-allowed;
 }
+/* Wrap a disabled Save button so the explanatory hint can sit next to
+   it. The wrap also forwards `title=` to the cursor (disabled buttons
+   swallow tooltips in some browsers). */
+.btn-confirm-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: not-allowed;
+}
+.btn-confirm-hint {
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+}
 
 /* Hide the palette strip and library/activity panes when review tab is active —
    the review pane is full-width canvas. The grid stays the same; we just paint
