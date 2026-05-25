@@ -244,6 +244,62 @@ fn move_into_body_overlap_fails() {
 }
 
 #[test]
+fn edge_mounted_does_not_exempt_body_off_board() {
+    // An `edge_mounted=true` part still has a plastic body that has
+    // to physically fit on the board. Touching the cut line is only
+    // legal for the pads; if the inflated body bbox sticks past the
+    // outline, placement must FAIL (no warning fallback).
+    let _g = test_lock();
+    let project = fresh_project("margin-edge-mounted-body");
+    run_script(&project, "outline 20 20");
+    // `edge=true` library entry with a 3 mm right-side body halo.
+    run_script(
+        &project,
+        "lib usb_c edge=true\n  pad 1 -1 0 0.5 0.5\n  pad 2  1 0 0.5 0.5\n",
+    );
+    project
+        .confirm_pending_library_entry("usb_c")
+        .expect("confirm library entry");
+    project
+        .library()
+        .set_placement_margin(
+            "usb_c",
+            PlacementMargin {
+                top_mm: 0.0,
+                right_mm: 3.0,
+                bottom_mm: 0.0,
+                left_mm: 0.0,
+            },
+        )
+        .expect("set margin");
+    run_script(
+        &project,
+        "sym J9 ic key=usb_c\n  pin 1 L\n  pin 2 R\npalette J9 usb_c\n",
+    );
+
+    // Place at x=18.75 so pad bbox right edge sits at the outline
+    // (18.75 + 1.25 = 20.0). Pads themselves are fine and the part is
+    // "touching the edge" — but the 3 mm body margin pushes the
+    // inflated bbox to x=23.0, 3 mm past the right outline.
+    let reply = run_script(&project, "place J9 18.75 10\n");
+    let results = extract_results(&reply);
+    assert_eq!(results.len(), 1, "one place attempt: {reply:#?}");
+    assert_eq!(
+        results[0]["ok"], false,
+        "edge-mounted part with body overhang must still be rejected; reply={reply:#?}"
+    );
+    let err = results[0]["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("body") && err.contains("right"),
+        "error should mention body overhanging the right edge, got: {err}"
+    );
+    assert!(
+        project.read().board().footprints.is_empty(),
+        "no footprint should have been placed"
+    );
+}
+
+#[test]
 fn view_snapshot_emits_body_outline_rect_for_margined_parts() {
     let _g = test_lock();
     let project = fresh_project("margin-render");

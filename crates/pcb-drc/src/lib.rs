@@ -50,12 +50,12 @@ pub struct DrcOptions {
     /// Library-key → per-side placement margin (mm). When set, DRC
     /// emits `BodyOverlap` warnings for any pair of footprints whose
     /// library-authored body bbox (pads + margin, rotated into the
-    /// world frame) overlap, and `BodyOffBoard` warnings for any
-    /// footprint whose body bbox sticks past the board outline. Both
-    /// are warnings (not errors) so the user can still ship a design
-    /// where they intentionally accepted the overlap — e.g. a
-    /// component whose body legitimately overhangs the outline because
-    /// the fab leaves that part on the panel rails.
+    /// world frame) overlap, and `BodyOffBoard` ERRORS for any
+    /// footprint whose body bbox sticks past the board outline. The
+    /// off-board case is a hard error because the physical plastic of
+    /// the part cannot occupy space that the board does not have —
+    /// no `edge_mounted` flag changes that, since "the pads reach the
+    /// edge" does not move the body inward.
     pub placement_margins: HashMap<String, PlacementMargin>,
 }
 
@@ -129,9 +129,9 @@ pub enum ViolationKind {
     /// shadow of a screw terminal's plastic shroud).
     BodyOverlap,
     /// A footprint's library-authored body bbox extends past the board
-    /// outline. Warning, not error, for the same reason as `BodyOverlap`.
-    /// Edge-mounted parts are exempt — they are placed flush to the
-    /// outline by design.
+    /// outline. Hard ERROR — the part's plastic physically cannot occupy
+    /// space the board does not have. `edge_mounted` does NOT exempt
+    /// this; it only relaxes the pad-vs-outline clearance.
     BodyOffBoard,
 }
 
@@ -260,10 +260,11 @@ fn check_body_off_board(
         return;
     }
     for fp in board.footprints_in_order() {
-        // Edge-mounted parts are placed flush to the outline by design.
-        if fp.edge_mounted {
-            continue;
-        }
+        // NOTE: `edge_mounted` is NOT an exception here. A connector
+        // whose pads touch the outline is fine, but the part's plastic
+        // body still has to fit inside the board — there is no scenario
+        // where a physical component can hang in mid-air past the cut
+        // line.
         let margin = margin_for(opts, fp);
         // No margin → fall back to the existing edge-clearance check on
         // raw pads; no point re-flagging an unannotated footprint as
@@ -298,7 +299,7 @@ fn check_body_off_board(
         let cy = f64::midpoint(bbox.min.y.to_mm(), bbox.max.y.to_mm());
         report.push(Violation {
             kind: ViolationKind::BodyOffBoard,
-            severity: Severity::Warning,
+            severity: Severity::Error,
             message: format!(
                 "{} body extends {mm:.2} mm past the {side} board outline",
                 fp.reference

@@ -660,10 +660,12 @@ impl Project {
                 other,
             ));
         }
-        if !fp.edge_mounted {
-            if let Some(reason) = inner.board.body_outline_violation(&fp, margin_for(&fp)) {
-                return Err(format!("{reference} {reason}"));
-            }
+        // Body-off-board is ALWAYS a hard rejection — even for
+        // edge-mounted parts. The pads of an edge-mounted connector
+        // legitimately touch the outline, but the plastic body of the
+        // part can never extend past it.
+        if let Some(reason) = inner.board.body_outline_violation(&fp, margin_for(&fp)) {
+            return Err(format!("{reference} {reason}"));
         }
         if let Some(reason) = inner.board.edge_mount_violation(&fp) {
             return Err(format!(
@@ -725,12 +727,12 @@ impl Project {
                 "{reference} body rotated to {rotation_deg:.0}° would overlap {other} body"
             ));
         }
-        if !probe.edge_mounted {
-            if let Some(reason) = inner.board.body_outline_violation(&probe, margin_for(&probe)) {
-                return Err(format!(
-                    "{reference} rotated to {rotation_deg:.0}°: {reason}"
-                ));
-            }
+        // See comment in `place_from_palette`: body-off-board is a
+        // hard reject regardless of `edge_mounted`.
+        if let Some(reason) = inner.board.body_outline_violation(&probe, margin_for(&probe)) {
+            return Err(format!(
+                "{reference} rotated to {rotation_deg:.0}°: {reason}"
+            ));
         }
         if let Some(reason) = inner.board.edge_mount_violation(&probe) {
             return Err(format!(
@@ -789,14 +791,14 @@ impl Project {
                 position.y.to_mm(),
             ));
         }
-        if !probe.edge_mounted {
-            if let Some(reason) = inner.board.body_outline_violation(&probe, margin_for(&probe)) {
-                return Err(format!(
-                    "moving {reference} to ({:.2}, {:.2}) mm: {reason}",
-                    position.x.to_mm(),
-                    position.y.to_mm(),
-                ));
-            }
+        // See comment in `place_from_palette`: body-off-board is a
+        // hard reject regardless of `edge_mounted`.
+        if let Some(reason) = inner.board.body_outline_violation(&probe, margin_for(&probe)) {
+            return Err(format!(
+                "moving {reference} to ({:.2}, {:.2}) mm: {reason}",
+                position.x.to_mm(),
+                position.y.to_mm(),
+            ));
         }
         if let Some(reason) = inner.board.edge_mount_violation(&probe) {
             return Err(format!(

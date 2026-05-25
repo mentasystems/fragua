@@ -1,7 +1,9 @@
 //! Smoke tests for the DRC checks.
 
-use pcb_core::{Board, CopperLayer, Footprint, Id, Length, Pad, Point, Rect, Trace};
-use pcb_drc::{run, DrcOptions, ViolationKind};
+use std::collections::HashMap;
+
+use pcb_core::{Board, CopperLayer, Footprint, Id, Length, Pad, PlacementMargin, Point, Rect, Trace};
+use pcb_drc::{run, DrcOptions, Severity, ViolationKind};
 
 fn pad(num: &str, off_x: f64, off_y: f64, net: Option<&str>) -> Pad {
     Pad {
@@ -140,6 +142,54 @@ fn routing_inefficient_silent_when_close_to_hpwl() {
         .violations
         .iter()
         .any(|v| v.kind == ViolationKind::RoutingInefficient));
+}
+
+#[test]
+fn body_off_board_is_error_even_for_edge_mounted() {
+    let mut board = Board::new();
+    board.outline = Some(Rect::from_corners(
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+        Point::new(Length::from_mm(20.0), Length::from_mm(20.0)),
+    ));
+    // Edge-mounted connector flush against the right edge; the pads
+    // fit on the board, but the placement margin pushes the body 3 mm
+    // past the right outline.
+    let mut connector = fp("J1", 18.75, 10.0, vec![pad("1", 0.0, 0.0, Some("D+"))]);
+    connector.key = "usb_c".into();
+    connector.edge_mounted = true;
+    board.add_footprint(connector);
+
+    let mut margins = HashMap::new();
+    margins.insert(
+        "usb_c".to_string(),
+        PlacementMargin {
+            top_mm: 0.0,
+            right_mm: 3.0,
+            bottom_mm: 0.0,
+            left_mm: 0.0,
+        },
+    );
+    let opts = DrcOptions {
+        placement_margins: margins,
+        ..DrcOptions::default()
+    };
+    let report = run(&board, &opts);
+    let off_board: Vec<_> = report
+        .violations
+        .iter()
+        .filter(|v| v.kind == ViolationKind::BodyOffBoard)
+        .collect();
+    assert_eq!(
+        off_board.len(),
+        1,
+        "expected exactly one BodyOffBoard violation, got: {:#?}",
+        report.violations
+    );
+    assert_eq!(
+        off_board[0].severity,
+        Severity::Error,
+        "BodyOffBoard must be a hard error, not a warning"
+    );
 }
 
 #[test]

@@ -635,11 +635,14 @@ impl Board {
     }
 
     /// If `probe`'s inflated body bbox extends past the board outline
-    /// on any side, return a human-readable description. Edge-mounted
-    /// parts are allowed to sit flush against the outline so the same
-    /// `EDGE_TOUCH_TOLERANCE_MM` tolerance from `edge_mount_violation`
-    /// applies (a 0.5 mm overhang is treated as "touching the edge",
-    /// not "off the board"). Returns `None` when:
+    /// on any side, return a human-readable description. This is the
+    /// universal physical-feasibility check: the part's plastic must
+    /// fit on the board. The `edge_mounted` flag does NOT exempt a
+    /// footprint here — an edge-mounted connector may have its pads
+    /// flush with the outline, but the body still has to land on
+    /// copper. The `EDGE_TOUCH_TOLERANCE_MM` tolerance (0.5 mm) is
+    /// kept so a body that just kisses the outline is not flagged.
+    /// Returns `None` when:
     ///   - the board has no outline yet, or
     ///   - the inflated bbox fits within the outline (within tolerance).
     #[must_use]
