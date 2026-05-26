@@ -406,3 +406,96 @@ fn theta_star_emits_diagonal_when_obstacle_forces_detour() {
             .collect::<Vec<_>>(),
     );
 }
+
+#[test]
+fn route_pass_applies_class_width() {
+    // Two pads on net "POWER" 10 mm apart. Assign POWER to a class
+    // with trace_width=0.5 and verify the router honours it via the
+    // schematic-aware path (no `net_overrides`).
+    use std::sync::Arc;
+    let mut board = Board::new();
+    board.outline = Some(Rect::from_corners(
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+        Point::new(Length::from_mm(40.0), Length::from_mm(20.0)),
+    ));
+    board.add_footprint(footprint(
+        "R1",
+        10.0,
+        10.0,
+        vec![pad("1", 0.0, 0.0, Some("POWER"))],
+    ));
+    board.add_footprint(footprint(
+        "R2",
+        20.0,
+        10.0,
+        vec![pad("1", 0.0, 0.0, Some("POWER"))],
+    ));
+
+    let mut sch = pcb_core::Schematic::new();
+    sch.set_net_class(pcb_core::NetClass {
+        name: "power".into(),
+        trace_width_mm: Some(0.5),
+        ..pcb_core::NetClass::default()
+    });
+    sch.assign_net_to_class("POWER", "power");
+
+    let mut opts = RouteOptions::default();
+    opts.schematic = Some(Arc::new(sch));
+    let _ = route(&mut board, &opts);
+    assert!(!board.traces.is_empty(), "expected a trace for POWER");
+    for t in &board.traces {
+        assert!(
+            (t.width.to_mm() - 0.50).abs() < 1e-6,
+            "expected 0.5 mm trace via net class, got {} mm on net {}",
+            t.width.to_mm(),
+            t.net,
+        );
+    }
+}
+
+#[test]
+fn keepout_blocks_foreign_net_routing() {
+    // Two pads on net "SIG", 30 mm apart, with a keepout polygon
+    // covering the entire corridor between them. The router cannot
+    // find a path → exactly one failed net.
+    let mut board = Board::new();
+    board.outline = Some(Rect::from_corners(
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+        Point::new(Length::from_mm(40.0), Length::from_mm(20.0)),
+    ));
+    board.add_footprint(footprint(
+        "R1",
+        5.0,
+        10.0,
+        vec![pad("1", 0.0, 0.0, Some("SIG"))],
+    ));
+    board.add_footprint(footprint(
+        "R2",
+        35.0,
+        10.0,
+        vec![pad("1", 0.0, 0.0, Some("SIG"))],
+    ));
+    // A keepout covering the whole board centre — both pads sit
+    // just outside, but every corridor is blocked.
+    let keepout = pcb_core::Keepout {
+        id: pcb_core::Id::new(),
+        polygon: vec![
+            Point::new(Length::from_mm(10.0), Length::from_mm(0.0)),
+            Point::new(Length::from_mm(30.0), Length::from_mm(0.0)),
+            Point::new(Length::from_mm(30.0), Length::from_mm(20.0)),
+            Point::new(Length::from_mm(10.0), Length::from_mm(20.0)),
+        ],
+        layers: vec![],
+        nets_allowed: vec![],
+        label: "test_block".into(),
+    };
+    board.add_keepout(keepout);
+
+    let report = route(&mut board, &RouteOptions::default());
+    let failed: Vec<_> = report
+        .per_net
+        .iter()
+        .filter(|(_, o)| matches!(o, Outcome::Failed { .. }))
+        .collect();
+    assert_eq!(failed.len(), 1, "expected 1 failed net, got {:?}", report.per_net);
+}

@@ -394,12 +394,17 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "route.run" => tool_route_run(project, args),
         "pour.add" => tool_pour_add(project, args),
         "pour.remove" => tool_pour_remove(project, args),
+        "pour.relief" => tool_pour_relief(project, args),
+        "keepout.add" => tool_keepout_add(project, args),
+        "keepout.list" => tool_keepout_list(project),
+        "keepout.remove" => tool_keepout_remove(project, args),
         "silk.add_line" => tool_silk_add_line(project, args),
         "silk.add_text" => tool_silk_add_text(project, args),
         "drc.run" => tool_drc_run(project, args),
         "erc.run" => tool_erc_run(project, args),
         "fab.pack" => tool_fab_pack(project, args),
         "schematic.set_class" => tool_schematic_set_class(project, args),
+        "schematic.assign_net_class" => tool_schematic_assign_net_class(project, args),
         "pour.auto" => tool_auto_pour(project, args),
         "output.fab_pack" => tool_output_fab_pack(project, args),
         _ => Err(ToolError {
@@ -2543,6 +2548,7 @@ fn tool_pour_add(project: &Project, args: &Value) -> Result<Value, ToolError> {
     project.add_pour(Pour {
         net: input.net.clone(),
         layer,
+        thermal_relief: pcb_core::ThermalRelief::default(),
     });
     project.log(
         ActivityLevel::Info,
@@ -2552,6 +2558,132 @@ fn tool_pour_add(project: &Project, args: &Value) -> Result<Value, ToolError> {
         text_result(format!("Pour added: net={} layer={:?}", input.net, layer))
             .with_data(json!({"net": input.net, "layer": layer_to_str(layer)})),
     )
+}
+
+#[derive(Debug, Deserialize)]
+struct KeepoutAddInput {
+    /// Vertices as `[[x_mm, y_mm], ...]`. Three or more.
+    points: Vec<[f64; 2]>,
+    #[serde(default)]
+    layer: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+fn tool_keepout_add(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: KeepoutAddInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("keepout.add: {e}")))?;
+    if input.points.len() < 3 {
+        return Err(ToolError::invalid_params(
+            "keepout.add: need at least 3 points",
+        ));
+    }
+    let polygon: Vec<Point> = input
+        .points
+        .iter()
+        .map(|[x, y]| Point::new(Length::from_mm(*x), Length::from_mm(*y)))
+        .collect();
+    let layers: Vec<CopperLayer> = match input.layer.as_deref().unwrap_or("both") {
+        "top" => vec![CopperLayer::Top],
+        "bottom" => vec![CopperLayer::Bottom],
+        "both" | "" => vec![],
+        other => {
+            return Err(ToolError::invalid_params(format!(
+                "keepout.add: layer must be top|bottom|both, got `{other}`"
+            )));
+        }
+    };
+    let kp = pcb_core::Keepout {
+        id: pcb_core::Id::new(),
+        polygon,
+        layers,
+        nets_allowed: Vec::new(),
+        label: input.label.unwrap_or_default(),
+    };
+    let id = project.add_keepout(kp);
+    project.log(ActivityLevel::Info, format!("keepout.add: {}", id.0));
+    Ok(text_result(format!("Keepout added: {}", id.0))
+        .with_data(json!({ "id": id.0.to_string() })))
+}
+
+fn tool_keepout_list(project: &Project) -> Result<Value, ToolError> {
+    let snap = project.read();
+    let board = snap.board();
+    let items: Vec<Value> = board
+        .keepouts
+        .iter()
+        .map(|kp| {
+            json!({
+                "id": kp.id.0.to_string(),
+                "label": kp.label,
+                "points": kp.polygon.iter()
+                    .map(|p| json!([p.x.to_mm(), p.y.to_mm()]))
+                    .collect::<Vec<_>>(),
+                "layers": kp.layers.iter().map(|l| layer_to_str(*l)).collect::<Vec<_>>(),
+                "nets_allowed": kp.nets_allowed.clone(),
+            })
+        })
+        .collect();
+    Ok(text_result(format!("{} keepout(s)", items.len())).with_data(json!({ "keepouts": items })))
+}
+
+#[derive(Debug, Deserialize)]
+struct KeepoutRemoveInput {
+    id: String,
+}
+
+fn tool_keepout_remove(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: KeepoutRemoveInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("keepout.remove: {e}")))?;
+    let id = pcb_core::Id::parse(&input.id).map_err(ToolError::invalid_params)?;
+    let removed = project.remove_keepout(id);
+    Ok(text_result(if removed {
+        format!("Keepout {} removed", input.id)
+    } else {
+        format!("No keepout with id {}", input.id)
+    })
+    .with_data(json!({ "removed": removed })))
+}
+
+#[derive(Debug, Deserialize)]
+struct PourReliefInput {
+    net: String,
+    style: String,
+    #[serde(default)]
+    spoke_width_mm: Option<f64>,
+    #[serde(default)]
+    gap_mm: Option<f64>,
+}
+
+fn tool_pour_relief(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: PourReliefInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("pour.relief: {e}")))?;
+    let relief = match input.style.as_str() {
+        "solid" => pcb_core::ThermalRelief::Solid,
+        "spokes" => pcb_core::ThermalRelief::Spokes4 {
+            spoke_width_mm: input.spoke_width_mm.unwrap_or(0.4),
+            gap_mm: input.gap_mm.unwrap_or(0.4),
+        },
+        other => {
+            return Err(ToolError::invalid_params(format!(
+                "pour.relief: style must be solid|spokes, got `{other}`"
+            )));
+        }
+    };
+    let changed = project.set_pour_relief(&input.net, relief);
+    project.log(
+        ActivityLevel::Info,
+        format!("pour.relief: net={} style={}", input.net, input.style),
+    );
+    Ok(text_result(if changed > 0 {
+        format!(
+            "Updated {} pour(s) on net `{}` to {}",
+            changed, input.net, input.style
+        )
+    } else {
+        format!("No pour found on net `{}`", input.net)
+    })
+    .with_data(json!({"changed": changed, "net": input.net, "style": input.style})))
 }
 
 fn tool_pour_remove(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -2912,32 +3044,19 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
     // should have been a pour-only net. Idempotent.
     let _ = materialize_class_pours(project);
 
-    // Build per-net router overrides from the schematic's net classes:
-    // for every net that names a class, surface its trace_width and
-    // clearance so the router uses them when laying that net's copper
-    // and stamping the grid. The router itself stays schematic-agnostic.
-    let net_overrides: std::collections::HashMap<String, pcb_router::NetOverride> = {
+    // Snapshot the schematic so the router can resolve per-net classes
+    // itself. This replaces the previous "rebuild a net_overrides map
+    // from class fields" path — the router now consults the schematic
+    // directly via `RouteOptions::schematic`.
+    let schematic_arc = {
         let snap = project.read();
-        let sch = snap.schematic();
-        let mut out = std::collections::HashMap::new();
-        for (net_name, net) in &sch.nets {
-            let Some(class) = sch.class_for_net(net_name) else {
-                continue;
-            };
-            let mut over = pcb_router::NetOverride::default();
-            if let Some(w) = class.trace_width_mm {
-                over.trace_width = Some(Length::from_mm(w));
-            }
-            if let Some(c) = class.clearance_mm {
-                over.clearance = Some(Length::from_mm(c));
-            }
-            // Skip noisy entries where the class declares no overrides.
-            if over.trace_width.is_some() || over.clearance.is_some() {
-                out.insert(net.name.clone(), over);
-            }
-        }
-        out
+        std::sync::Arc::new(snap.schematic().clone())
     };
+    // Legacy: also build the overrides map for any caller code that
+    // still expects to see it populated (keeps router-tune working in
+    // mixed setups). Empty when no overrides are needed.
+    let net_overrides: std::collections::HashMap<String, pcb_router::NetOverride> =
+        std::collections::HashMap::new();
 
     let initial_net_order = input.order.as_ref().map(|s| {
         s.split(',')
@@ -2954,6 +3073,7 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         via_drill: Length::from_mm(input.via_drill_mm),
         via_diameter: Length::from_mm(input.via_diameter_mm),
         net_overrides,
+        schematic: Some(schematic_arc),
         initial_net_order,
     };
 
@@ -3121,22 +3241,9 @@ fn tool_drc_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
     }
 
     let snap = project.read();
-    // Surface schematic net classes as DRC overrides so a class with
-    // tighter clearance than the global default actually gets enforced.
-    let sch = snap.schematic();
-    for net_name in sch.nets.keys() {
-        let Some(class) = sch.class_for_net(net_name) else {
-            continue;
-        };
-        if let Some(c) = class.clearance_mm {
-            opts.net_overrides.insert(
-                net_name.clone(),
-                pcb_drc::NetOverride {
-                    clearance: Some(Length::from_mm(c)),
-                },
-            );
-        }
-    }
+    // Hand the schematic to DRC so per-net class clearances are
+    // enforced (no per-net override map needed).
+    opts.schematic = Some(std::sync::Arc::new(snap.schematic().clone()));
     let report = pcb_drc::run(snap.board(), &opts);
     drop(snap);
 
@@ -3161,6 +3268,21 @@ struct SetClassInput {
     trace_width_mm: Option<f64>,
     #[serde(default)]
     clearance_mm: Option<f64>,
+    /// Via copper-pad diameter (mm). `None` → use route defaults.
+    #[serde(default)]
+    via_diameter_mm: Option<f64>,
+    /// Via drill diameter (mm). `None` → use route defaults.
+    #[serde(default)]
+    via_drill_mm: Option<f64>,
+    /// Z0 single-ended impedance target. Schema-only for now.
+    #[serde(default)]
+    target_impedance_ohms: Option<f64>,
+    /// Partner net for differential pair routing. Schema-only for now.
+    #[serde(default)]
+    diff_pair_with: Option<String>,
+    /// Diff-pair edge-to-edge gap (mm). Schema-only for now.
+    #[serde(default)]
+    diff_gap_mm: Option<f64>,
     /// Layer(s) for the auto-pour: "top", "bottom", or "both". When
     /// set, every net assigned to this class gets a `Pour`
     /// materialised on the listed layer(s) by `auto-pour` (and
@@ -3187,6 +3309,23 @@ impl PourLayersInput {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct AssignNetClassInput {
+    net: String,
+    class: String,
+}
+
+fn tool_schematic_assign_net_class(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: AssignNetClassInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("net-class: {e}")))?;
+    project
+        .assign_net_to_class(input.net.clone(), input.class.clone())
+        .map_err(ToolError::invalid_params)?;
+    Ok(text_result(format!("net `{}` → class `{}`", input.net, input.class)).with_data(
+        json!({ "net": input.net, "class": input.class }),
+    ))
+}
+
 fn tool_schematic_set_class(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: SetClassInput = serde_json::from_value(args.clone())
         .map_err(|e| ToolError::invalid_params(format!("class: {e}")))?;
@@ -3197,6 +3336,11 @@ fn tool_schematic_set_class(project: &Project, args: &Value) -> Result<Value, To
         name: input.name.clone(),
         trace_width_mm: input.trace_width_mm,
         clearance_mm: input.clearance_mm,
+        via_diameter_mm: input.via_diameter_mm,
+        via_drill_mm: input.via_drill_mm,
+        target_impedance_ohms: input.target_impedance_ohms,
+        diff_pair_with: input.diff_pair_with.clone(),
+        diff_gap_mm: input.diff_gap_mm,
         pour_layers: input
             .pour
             .map(PourLayersInput::to_layers)
@@ -3261,6 +3405,7 @@ fn materialize_class_pours(project: &Project) -> ClassPourSummary {
         project.add_pour(Pour {
             net: net.clone(),
             layer,
+            thermal_relief: pcb_core::ThermalRelief::default(),
         });
         summary.added.push(format!("{net}/{}", layer_to_str(layer)));
     }

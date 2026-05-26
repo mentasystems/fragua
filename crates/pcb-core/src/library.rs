@@ -121,7 +121,7 @@ impl ViewTransform {
     /// is true to keep the common case allocation-free.
     #[must_use]
     pub fn is_identity(self) -> bool {
-        !self.flip_h && !self.flip_v && self.rotation_deg % 360 == 0
+        !self.flip_h && !self.flip_v && self.rotation_deg.is_multiple_of(360)
     }
 
     /// Apply the transform to a footprint-local point in mm, in the

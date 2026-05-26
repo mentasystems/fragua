@@ -1,0 +1,13 @@
+[package]
+name = "pcb-odb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ODB++ exporter for the pcb tool — fab interchange format alternative to Gerber."
+
+[dependencies]
+pcb-core = { path = "../pcb-core" }
+flate2 = "1"
+
+[lints]
+workspace = true

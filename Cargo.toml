@@ -9,6 +9,7 @@ members = [
     "crates/pcb-erc",
     "crates/pcb-fab",
     "crates/pcb-gerber",
+    "crates/pcb-odb",
     "crates/pcb-render",
     "crates/pcb-script",
     "src-tauri",

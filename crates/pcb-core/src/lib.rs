@@ -18,8 +18,8 @@ pub mod silk_clip;
 pub mod units;
 
 pub use board::{
-    rotate_margin_trbl, Board, CopperLayer, Footprint, FootprintSilk, Id, Pad, Pour, SilkAnchor,
-    SilkLayer, SilkLine, SilkText, Trace, Via,
+    rotate_margin_trbl, Board, CopperLayer, Footprint, FootprintSilk, Id, Keepout, Pad, Pour,
+    SilkAnchor, SilkLayer, SilkLine, SilkText, ThermalRelief, Trace, Via,
 };
 pub use event::{ActivityLevel, Event, EventBus};
 pub use geometry::{Point, Rect};
@@ -30,6 +30,7 @@ pub use project::{
     DeletedFootprint, PendingAttachment, PendingLibraryEntry, Project, ProjectSnapshot,
 };
 pub use schematic::{
-    Net, NetClass, NetConnection, PinRole, PinSide, SchPin, Schematic, Symbol, SymbolKind,
+    Net, NetClass, NetConnection, PinRole, PinSide, ResolvedNetRules, SchPin, Schematic, Symbol,
+    SymbolKind,
 };
 pub use units::{Length, MIL, MM, NM, UM};

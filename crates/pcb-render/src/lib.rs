@@ -138,6 +138,11 @@ pub fn render_svg_with_margins(board: &Board, margins: &PlacementMarginMap) -> S
     write_silk_layer(&mut svg, board, SilkLayer::Top);
     write_silk_layer(&mut svg, board, SilkLayer::Bottom);
 
+    // Keep-outs sit on top so they're always visible — magenta
+    // hatched fill with a solid outline. The frontend may toggle
+    // visibility, but the default render shows them.
+    write_keepouts(&mut svg, board);
+
     svg.push_str("</g></svg>");
     svg
 }
@@ -435,6 +440,37 @@ fn write_silk_text(svg: &mut String, txt: &SilkText, suppress_in: &[Rect]) {
         for (s, e) in silk_clip::clip_segment(a, b, suppress_in) {
             write_silk_segment(svg, s, e, w);
         }
+    }
+}
+
+/// Hatched magenta polygons for every keepout, drawn on top of
+/// copper but under DRC overlays. Each keepout uses a single SVG
+/// `<pattern>` for its hatching; the polygon outline is solid.
+fn write_keepouts(svg: &mut String, board: &Board) {
+    if board.keepouts.is_empty() {
+        return;
+    }
+    // One shared hatching pattern — same stroke for every keepout
+    // (the polygon itself communicates the boundary; the hatch is
+    // visual texture).
+    svg.push_str(
+        r##"<defs><pattern id="keepout-hatch" patternUnits="userSpaceOnUse" width="1.2" height="1.2" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="1.2" stroke="#ff2bd6" stroke-width="0.25"/></pattern></defs>"##,
+    );
+    for kp in &board.keepouts {
+        if kp.polygon.len() < 3 {
+            continue;
+        }
+        let pts: Vec<String> = kp
+            .polygon
+            .iter()
+            .map(|p| format!("{:.3},{:.3}", p.x.to_mm(), p.y.to_mm()))
+            .collect();
+        let _ = write!(
+            svg,
+            r##"<polygon data-keepout="{label}" points="{pts}" fill="url(#keepout-hatch)" fill-opacity="0.5" stroke="#ff2bd6" stroke-width="0.18" pointer-events="none"/>"##,
+            label = escape(&kp.label),
+            pts = pts.join(" "),
+        );
     }
 }
 
@@ -1192,6 +1228,33 @@ fn write_substrate_fill(svg: &mut String, outline: Rect, corner_radius_mm: f64) 
 /// pixels hide it. So the mask starts as a fully-white rect (pour
 /// visible everywhere) and we paint BLACK shapes for every
 /// clearance region.
+/// Inverse of `mark_rect` — clear cells in the rectangle (turn void
+/// back into pour copper). Used by the thermal-relief implementation
+/// to draw the four spoke bridges through the annular gap ring.
+#[allow(clippy::too_many_arguments)]
+fn punch_rect(
+    grid: &mut [bool],
+    rx: f64,
+    ry: f64,
+    rw: f64,
+    rh: f64,
+    cell: f64,
+    cols: usize,
+    rows: usize,
+    x0: f64,
+    y0: f64,
+) {
+    let i0 = (((rx - x0) / cell).floor() as i64).max(0) as usize;
+    let i1 = (((rx + rw - x0) / cell).ceil() as i64).max(0) as usize;
+    let j0 = (((ry - y0) / cell).floor() as i64).max(0) as usize;
+    let j1 = (((ry + rh - y0) / cell).ceil() as i64).max(0) as usize;
+    for j in j0..j1.min(rows) {
+        for i in i0..i1.min(cols) {
+            grid[j * cols + i] = false;
+        }
+    }
+}
+
 fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, outline: Rect) {
     let inset = POUR_EDGE_CLEARANCE_MM;
     let x0 = outline.min.x.to_mm() + inset;
@@ -1287,16 +1350,105 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
         }
     };
 
+    // Resolve the thermal relief from the pour. `Solid` keeps the
+    // legacy flood — same-net pads merge into the pour without any
+    // cutout. `Spokes4` punches a thermal ring around each same-net
+    // pad, leaving 4 narrow copper bridges N/S/E/W.
+    let (spoke_w_mm, gap_mm) = match pour.thermal_relief {
+        pcb_core::ThermalRelief::Solid => (0.0_f64, 0.0_f64),
+        pcb_core::ThermalRelief::Spokes4 {
+            spoke_width_mm,
+            gap_mm,
+        } => (spoke_width_mm, gap_mm),
+    };
+    let use_spokes = spoke_w_mm > 0.0 && gap_mm > 0.0;
+
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
             if pad.layer != pour.layer {
                 continue;
             }
-            if pad.net.as_deref() == Some(pour.net.as_str()) {
-                continue;
-            }
             let c = fp.pad_world_center(pad);
             let (pw, ph) = fp.pad_world_size(pad);
+            if pad.net.as_deref() == Some(pour.net.as_str()) {
+                if !use_spokes {
+                    // Solid relief — nothing to do, the pour floods.
+                    continue;
+                }
+                // Spokes4: mark an annular keepout around the pad,
+                // then re-clear the 4 spoke arms so copper bridges
+                // the pad to the pour through them.
+                let cx = c.x.to_mm();
+                let cy = c.y.to_mm();
+                let half_w = pw.to_mm() / 2.0;
+                let half_h = ph.to_mm() / 2.0;
+                // Annular gap ring: rect inflated by `gap_mm` voided.
+                mark_rect(
+                    &mut void,
+                    cx - half_w - gap_mm,
+                    cy - half_h - gap_mm,
+                    pw.to_mm() + gap_mm * 2.0,
+                    ph.to_mm() + gap_mm * 2.0,
+                );
+                // Punch back copper for the 4 spokes — narrow
+                // rectangles that bridge the pad to the surrounding
+                // pour. The bridge has to clear the pad edge and reach
+                // beyond `gap_mm` so the spoke actually touches the
+                // pour copper.
+                let half_spoke = spoke_w_mm / 2.0;
+                let bridge_len = gap_mm + 0.1; // overshoot for safety
+                // Horizontal (east + west) bridges, centred on cy.
+                punch_rect(
+                    &mut void,
+                    cx - half_w - bridge_len,
+                    cy - half_spoke,
+                    bridge_len,
+                    spoke_w_mm,
+                    cell,
+                    cols,
+                    rows,
+                    x0,
+                    y0,
+                );
+                punch_rect(
+                    &mut void,
+                    cx + half_w,
+                    cy - half_spoke,
+                    bridge_len,
+                    spoke_w_mm,
+                    cell,
+                    cols,
+                    rows,
+                    x0,
+                    y0,
+                );
+                // Vertical (north + south) bridges.
+                punch_rect(
+                    &mut void,
+                    cx - half_spoke,
+                    cy - half_h - bridge_len,
+                    spoke_w_mm,
+                    bridge_len,
+                    cell,
+                    cols,
+                    rows,
+                    x0,
+                    y0,
+                );
+                punch_rect(
+                    &mut void,
+                    cx - half_spoke,
+                    cy + half_h,
+                    spoke_w_mm,
+                    bridge_len,
+                    cell,
+                    cols,
+                    rows,
+                    x0,
+                    y0,
+                );
+                continue;
+            }
             mark_rect(
                 &mut void,
                 c.x.to_mm() - pw.to_mm() / 2.0 - cl,

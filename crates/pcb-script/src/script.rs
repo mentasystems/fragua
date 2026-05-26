@@ -524,14 +524,122 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 args,
             })
         }
+        "keepout" => {
+            // keepout add x1,y1 x2,y2 ... [layer=top|bottom|both] [label=NAME]
+            // keepout list
+            // keepout remove ID
+            need_args(line, tokens, 1, "keepout add|list|remove ...")?;
+            let sub = tokens[1].as_str();
+            match sub {
+                "add" => {
+                    // Collect coordinate pairs ("x,y") until first kv token.
+                    let mut points: Vec<(f64, f64)> = Vec::new();
+                    let mut kv_start = tokens.len();
+                    for (i, t) in tokens.iter().enumerate().skip(2) {
+                        if t.contains('=') {
+                            kv_start = i;
+                            break;
+                        }
+                        let (xs, ys) = t.split_once(',').ok_or_else(|| {
+                            ParseError::at(
+                                line,
+                                format!("keepout add: expected `x,y`, got `{t}`"),
+                            )
+                        })?;
+                        let x = parse_num(xs, line, "x")?;
+                        let y = parse_num(ys, line, "y")?;
+                        points.push((x, y));
+                    }
+                    if points.len() < 3 {
+                        return Err(ParseError::at(
+                            line,
+                            "keepout add: need at least 3 points (x,y triples)",
+                        ));
+                    }
+                    let pts_json: Vec<Value> =
+                        points.into_iter().map(|(x, y)| json!([x, y])).collect();
+                    let mut args = json!({"points": pts_json});
+                    apply_kv(
+                        &mut args,
+                        &tokens[kv_start..],
+                        line,
+                        &[("layer", AttrType::Str), ("label", AttrType::Str)],
+                    )?;
+                    Ok(Cmd {
+                        line,
+                        tool: "keepout.add".into(),
+                        args,
+                    })
+                }
+                "list" => Ok(Cmd {
+                    line,
+                    tool: "keepout.list".into(),
+                    args: json!({}),
+                }),
+                "remove" => {
+                    need_args(line, tokens, 2, "keepout remove ID")?;
+                    Ok(Cmd {
+                        line,
+                        tool: "keepout.remove".into(),
+                        args: json!({"id": tokens[2]}),
+                    })
+                }
+                other => Err(ParseError::at(
+                    line,
+                    format!("keepout: unknown subcommand `{other}` (add|list|remove)"),
+                )),
+            }
+        }
         "pour" => {
-            // pour NET LAYER  (LAYER = top|bottom)
-            need_args(line, tokens, 2, "pour NET LAYER")?;
-            Ok(Cmd {
-                line,
-                tool: "pour.add".into(),
-                args: json!({"net": tokens[1], "layer": tokens[2]}),
-            })
+            // Two syntaxes:
+            //   pour NET LAYER                 — add pour
+            //   pour relief NET solid          — set thermal relief style
+            //   pour relief NET spokes [width=N] [gap=N]
+            need_args(line, tokens, 2, "pour NET LAYER | pour relief NET ...")?;
+            if tokens[1] == "relief" {
+                need_args(
+                    line,
+                    tokens,
+                    3,
+                    "pour relief NET (solid|spokes [width=N] [gap=N])",
+                )?;
+                let net = tokens[2].clone();
+                let style = tokens[3].as_str();
+                match style {
+                    "solid" => Ok(Cmd {
+                        line,
+                        tool: "pour.relief".into(),
+                        args: json!({"net": net, "style": "solid"}),
+                    }),
+                    "spokes" => {
+                        let mut args = json!({"net": net, "style": "spokes"});
+                        apply_kv(
+                            &mut args,
+                            &tokens[4..],
+                            line,
+                            &[
+                                ("width", AttrType::NumInto("spoke_width_mm")),
+                                ("gap", AttrType::NumInto("gap_mm")),
+                            ],
+                        )?;
+                        Ok(Cmd {
+                            line,
+                            tool: "pour.relief".into(),
+                            args,
+                        })
+                    }
+                    other => Err(ParseError::at(
+                        line,
+                        format!("pour relief: expected solid|spokes, got `{other}`"),
+                    )),
+                }
+            } else {
+                Ok(Cmd {
+                    line,
+                    tool: "pour.add".into(),
+                    args: json!({"net": tokens[1], "layer": tokens[2]}),
+                })
+            }
         }
         "clear-pour" => {
             // clear-pour NET LAYER
@@ -610,12 +718,13 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
             })
         }
         "class" => {
-            // class NAME [width=N] [clearance=N] [pour=top|bottom]
+            // class NAME [width=N] [clearance=N] [via=N] [drill=N] [z0=N]
+            //            [pair=NET] [gap=N] [pour=top|bottom|both]
             need_args(
                 line,
                 tokens,
                 1,
-                "class NAME [width=N] [clearance=N] [pour=top|bottom]",
+                "class NAME [width=N] [clearance=N] [via=N] [drill=N] [z0=N] [pair=NET] [gap=N] [pour=top|bottom|both]",
             )?;
             let mut args = json!({"name": tokens[1]});
             apply_kv(
@@ -625,6 +734,11 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 &[
                     ("width", AttrType::NumInto("trace_width_mm")),
                     ("clearance", AttrType::NumInto("clearance_mm")),
+                    ("via", AttrType::NumInto("via_diameter_mm")),
+                    ("drill", AttrType::NumInto("via_drill_mm")),
+                    ("z0", AttrType::NumInto("target_impedance_ohms")),
+                    ("pair", AttrType::StrInto("diff_pair_with")),
+                    ("gap", AttrType::NumInto("diff_gap_mm")),
                     ("pour", AttrType::Str),
                 ],
             )?;
@@ -632,6 +746,16 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 line,
                 tool: "schematic.set_class".into(),
                 args,
+            })
+        }
+        "net-class" => {
+            // net-class NET CLASS — bind NET to a previously-declared
+            // class. Idempotent: re-binding to a different class wins.
+            need_args(line, tokens, 2, "net-class NET CLASS")?;
+            Ok(Cmd {
+                line,
+                tool: "schematic.assign_net_class".into(),
+                args: json!({"net": tokens[1], "class": tokens[2]}),
             })
         }
         "auto-pour" => {

@@ -15,7 +15,7 @@
 //! consistently across visibility, cost accumulation, and obstacle
 //! stamping.
 
-use pcb_core::{Board, CopperLayer, Length, Point, Rect};
+use pcb_core::{Board, CopperLayer, Keepout, Length, Point, Rect};
 
 /// Per-cell extra cost layered on top of the grid for negotiated
 /// congestion. A* adds `at(p)` to the step cost when entering `p`, so
@@ -257,6 +257,65 @@ impl Grid {
         }
     }
 
+    /// Rasterise every keepout polygon into `Obstacle` cells on the
+    /// applicable layers. Only the "blocks all nets" case is honoured
+    /// in this iteration (every `keepout.nets_allowed` is treated as
+    /// empty) — the grid's `Cell` enum doesn't yet carry a per-cell
+    /// allow-net bitmap. Per-net allow lists stay in the model so a
+    /// future grid extension can pick them up without a schema change.
+    pub fn stamp_keepouts(&mut self, board: &Board) {
+        for kp in &board.keepouts {
+            if kp.polygon.len() < 3 {
+                continue;
+            }
+            let layers: Vec<u8> = if kp.layers.is_empty() {
+                vec![0, 1]
+            } else {
+                kp.layers
+                    .iter()
+                    .map(|l| match l {
+                        CopperLayer::Top => 0,
+                        CopperLayer::Bottom => 1,
+                    })
+                    .collect()
+            };
+            // Bounding box of the polygon in grid cells.
+            let mut min_c = i32::MAX;
+            let mut min_r = i32::MAX;
+            let mut max_c = i32::MIN;
+            let mut max_r = i32::MIN;
+            for p in &kp.polygon {
+                let gp = self.snap(*p, CopperLayer::Top);
+                min_c = min_c.min(gp.col);
+                min_r = min_r.min(gp.row);
+                max_c = max_c.max(gp.col);
+                max_r = max_r.max(gp.row);
+            }
+            min_c = min_c.max(0);
+            min_r = min_r.max(0);
+            max_c = max_c.min(self.cols - 1);
+            max_r = max_r.min(self.rows - 1);
+            // Standard point-in-polygon scanline test on each cell.
+            for r in min_r..=max_r {
+                for c in min_c..=max_c {
+                    // Use cell-centre coords in mm for the test.
+                    let p = self.unsnap(GridPoint { layer: 0, col: c, row: r });
+                    let px = p.x.to_mm();
+                    let py = p.y.to_mm();
+                    if !point_in_polygon(&kp.polygon, px, py) {
+                        continue;
+                    }
+                    for &layer in &layers {
+                        let gp = GridPoint { layer, col: c, row: r };
+                        if matches!(self.get(gp), Cell::Free) {
+                            self.set(gp, Cell::Obstacle);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Mark the path of an existing trace as `Trace(net)`, plus a
     /// `halo` of cells around it on the same layer so foreign nets
     /// can't run flush against this one. Works for arbitrary
@@ -369,6 +428,43 @@ impl Grid {
         }
     }
 }
+
+/// Ray-cast point-in-polygon test. The polygon is treated as a
+/// closed loop (last → first edge implicit). Stable in degenerate
+/// cases (point exactly on an edge): the boundary may resolve either
+/// way, which is fine for keepout rasterisation — a one-cell error
+/// at the boundary is well within router resolution.
+fn point_in_polygon(poly: &[pcb_core::Point], x: f64, y: f64) -> bool {
+    let mut inside = false;
+    let n = poly.len();
+    if n < 3 {
+        return false;
+    }
+    let mut j = n - 1;
+    for i in 0..n {
+        let pix = poly[i].x.to_mm();
+        let piy = poly[i].y.to_mm();
+        let pjx = poly[j].x.to_mm();
+        let pjy = poly[j].y.to_mm();
+        if (piy > y) != (pjy > y) {
+            let t = (pjy - piy).abs();
+            if t > 1e-12 {
+                let x_intersect = pix + (y - piy) * (pjx - pix) / (pjy - piy);
+                if x < x_intersect {
+                    inside = !inside;
+                }
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Use `Keepout` parameter so the symbol is alive when callers only
+/// reach the impl via `Grid::stamp_keepouts`. Pure type-system hint —
+/// never invoked.
+#[allow(dead_code)]
+fn _keepout_type_anchor(_k: &Keepout) {}
 
 /// Integer Bresenham line from (c0,r0) to (c1,r1) inclusive on both
 /// endpoints. Used by `line_of_sight`, `cost_along`, and `stamp_trace`

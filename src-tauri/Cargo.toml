@@ -23,6 +23,7 @@ pcb-script = { path = "../crates/pcb-script" }
 pcb-router = { path = "../crates/pcb-router" }
 pcb-router-tune = { path = "../crates/pcb-router-tune" }
 pcb-gerber = { path = "../crates/pcb-gerber" }
+pcb-odb = { path = "../crates/pcb-odb" }
 pcb-drc = { path = "../crates/pcb-drc" }
 pcb-fab = { path = "../crates/pcb-fab" }
 tauri = { version = "2", features = ["devtools"] }

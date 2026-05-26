@@ -23,10 +23,14 @@
 //! AABB-vs-segment distance checks instead of full polygon clipping.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::Serialize;
 
-use pcb_core::{Board, CopperLayer, Footprint, Length, Pad, PlacementMargin, Pour, Rect, Trace};
+use pcb_core::{
+    Board, CopperLayer, Footprint, Length, Pad, PlacementMargin, Point, Pour, Rect, Schematic,
+    Trace,
+};
 
 #[derive(Debug, Clone)]
 pub struct DrcOptions {
@@ -47,6 +51,10 @@ pub struct DrcOptions {
     /// override — so a 0.3 mm power-class clearance is honoured even
     /// when paired with a 0.2 mm signal.
     pub net_overrides: HashMap<String, NetOverride>,
+    /// Optional schematic so DRC can consult net-class clearances
+    /// without the caller having to mirror them into `net_overrides`.
+    /// When both are set, the schematic class wins.
+    pub schematic: Option<Arc<Schematic>>,
     /// Library-key → per-side placement margin (mm). When set, DRC
     /// emits `BodyOverlap` warnings for any pair of footprints whose
     /// library-authored body bbox (pads + margin, rotated into the
@@ -78,6 +86,7 @@ impl Default for DrcOptions {
             min_drill: Length::from_mm(0.2),
             routing_inefficient_ratio: 1.5,
             net_overrides: HashMap::new(),
+            schematic: None,
             placement_margins: HashMap::new(),
         }
     }
@@ -92,6 +101,12 @@ fn effective_clearance_mm(opts: &DrcOptions, net_a: Option<&str>, net_b: Option<
         if let Some(o) = opts.net_overrides.get(n) {
             if let Some(over) = o.clearance {
                 c = c.max(over.to_mm());
+            }
+        }
+        if let Some(sch) = opts.schematic.as_ref() {
+            let class = sch.class_for(n);
+            if let Some(mm) = class.clearance_mm {
+                c = c.max(mm);
             }
         }
     }
@@ -133,6 +148,11 @@ pub enum ViolationKind {
     /// space the board does not have. `edge_mounted` does NOT exempt
     /// this; it only relaxes the pad-vs-outline clearance.
     BodyOffBoard,
+    /// A trace segment crosses a keepout polygon, or a via lands
+    /// inside one, on an applicable copper layer. The keepout's
+    /// `nets_allowed` list is not honoured in this iteration (see
+    /// `Keepout` docs).
+    KeepoutViolation,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -184,7 +204,122 @@ pub fn run(board: &Board, opts: &DrcOptions) -> DrcReport {
     if let Some(outline) = board.outline {
         check_body_off_board(board, outline, opts, &mut report);
     }
+    check_keepouts(board, &mut report);
     report
+}
+
+/// Every trace and via vs every keepout. A trace violates when any
+/// part of its centreline crosses the keepout polygon on an
+/// applicable layer; a via violates when its centre sits inside one
+/// (vias punch every layer, so layer filtering is skipped for them).
+fn check_keepouts(board: &Board, report: &mut DrcReport) {
+    for kp in &board.keepouts {
+        if kp.polygon.len() < 3 {
+            continue;
+        }
+        for trace in &board.traces {
+            if !keepout_applies_to_layer(kp, trace.layer) {
+                continue;
+            }
+            if segment_in_polygon(
+                (trace.start.x.to_mm(), trace.start.y.to_mm()),
+                (trace.end.x.to_mm(), trace.end.y.to_mm()),
+                &kp.polygon,
+            ) {
+                let mx = f64::midpoint(trace.start.x.to_mm(), trace.end.x.to_mm());
+                let my = f64::midpoint(trace.start.y.to_mm(), trace.end.y.to_mm());
+                report.push(Violation {
+                    kind: ViolationKind::KeepoutViolation,
+                    severity: Severity::Error,
+                    message: format!(
+                        "trace {} crosses keepout `{}`",
+                        trace.net,
+                        if kp.label.is_empty() {
+                            kp.id.0.to_string()
+                        } else {
+                            kp.label.clone()
+                        },
+                    ),
+                    x_mm: mx,
+                    y_mm: my,
+                    involved: vec![trace.net.clone(), kp.label.clone()],
+                });
+            }
+        }
+        for via in &board.vias {
+            let x = via.position.x.to_mm();
+            let y = via.position.y.to_mm();
+            if point_in_polygon(&kp.polygon, x, y) {
+                report.push(Violation {
+                    kind: ViolationKind::KeepoutViolation,
+                    severity: Severity::Error,
+                    message: format!(
+                        "via {} sits inside keepout `{}`",
+                        via.net,
+                        if kp.label.is_empty() {
+                            kp.id.0.to_string()
+                        } else {
+                            kp.label.clone()
+                        },
+                    ),
+                    x_mm: x,
+                    y_mm: y,
+                    involved: vec![via.net.clone(), kp.label.clone()],
+                });
+            }
+        }
+    }
+}
+
+fn keepout_applies_to_layer(kp: &pcb_core::Keepout, layer: CopperLayer) -> bool {
+    kp.layers.is_empty() || kp.layers.contains(&layer)
+}
+
+fn point_in_polygon(poly: &[Point], x: f64, y: f64) -> bool {
+    let n = poly.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let pix = poly[i].x.to_mm();
+        let piy = poly[i].y.to_mm();
+        let pjx = poly[j].x.to_mm();
+        let pjy = poly[j].y.to_mm();
+        if (piy > y) != (pjy > y) {
+            let t = pjy - piy;
+            if t.abs() > 1e-12 {
+                let xi = pix + (y - piy) * (pjx - pix) / t;
+                if x < xi {
+                    inside = !inside;
+                }
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Cheap test: a segment "crosses" a polygon if either endpoint is
+/// inside, or it intersects any polygon edge. Sufficient for the
+/// keepout-vs-trace check (a trace endpoint may legitimately sit on
+/// the boundary of a same-net pad just outside the keepout, but the
+/// keepout doesn't care about pad geometry — only the trace itself).
+fn segment_in_polygon(a: (f64, f64), b: (f64, f64), poly: &[Point]) -> bool {
+    if point_in_polygon(poly, a.0, a.1) || point_in_polygon(poly, b.0, b.1) {
+        return true;
+    }
+    let n = poly.len();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let p = (poly[i].x.to_mm(), poly[i].y.to_mm());
+        let q = (poly[j].x.to_mm(), poly[j].y.to_mm());
+        if segments_intersect(a, b, p, q) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Resolve a footprint's placement margin from the rules table. Empty

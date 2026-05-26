@@ -369,10 +369,78 @@ pub struct Via {
 /// yet do polygon clipping around foreign-net items, and Gerber
 /// export skips the pour. Both arrive when we replace this with a
 /// real polygon model.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pour {
     pub net: String,
     pub layer: CopperLayer,
+    /// Thermal connection between same-net pads and the surrounding
+    /// pour. Defaults to `Spokes4` (the KiCad-friendly default) so
+    /// existing projects gain hand-solder-friendly thermals on the
+    /// next render; set to `Solid` to recover the old flood behaviour.
+    #[serde(default)]
+    pub thermal_relief: ThermalRelief,
+}
+
+/// How a copper pour connects to same-net pads sitting inside it.
+///
+/// The default `Solid` would flood-fill copper around the pad, which
+/// is electrically excellent but bakes the pad into a heat sink — hand
+/// soldering or rework becomes painful because the iron tip can't lift
+/// the pad temperature past the solder melt point. KiCad and other
+/// professional tools default to four-spoke thermal reliefs for this
+/// reason; we mirror that.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ThermalRelief {
+    /// Solid copper around the pad — historical behaviour. Hard to
+    /// hand-solder; use only on automated-assembly designs where
+    /// thermal mass at the joint is not a concern.
+    Solid,
+    /// Four spokes (N/S/E/W) connecting the pad copper to the pour
+    /// copper through a narrow bridge each, with an air gap
+    /// everywhere else. The KiCad default.
+    Spokes4 {
+        /// Width of each spoke, mm.
+        spoke_width_mm: f64,
+        /// Air-gap thickness between the pad copper and the pour
+        /// copper outside the spokes, mm.
+        gap_mm: f64,
+    },
+}
+
+impl Default for ThermalRelief {
+    fn default() -> Self {
+        Self::Spokes4 {
+            spoke_width_mm: 0.4,
+            gap_mm: 0.4,
+        }
+    }
+}
+
+/// A polygonal keepout — region of the board where the router (and
+/// DRC) refuse to lay copper. The polygon is a simple closed loop in
+/// board coordinates; layers default to "all copper layers".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Keepout {
+    pub id: Id,
+    /// Closed polygon in board coords. Three or more points; the
+    /// loop closes implicitly between the last and first points.
+    pub polygon: Vec<Point>,
+    /// Copper layers the keepout applies to. Empty = all layers.
+    #[serde(default)]
+    pub layers: Vec<CopperLayer>,
+    /// Net names that ARE allowed to traverse this region. Empty =
+    /// allow nothing (the keepout blocks every net).
+    ///
+    /// NOTE: the first cut of router/DRC support only honours the
+    /// empty case ("block everything"). Per-net allow lists are
+    /// recorded in the model for future work but treated as "block
+    /// all" until the grid grows a per-net allow mask.
+    #[serde(default)]
+    pub nets_allowed: Vec<String>,
+    /// Optional human-readable label for UI / docs.
+    #[serde(default)]
+    pub label: String,
 }
 
 /// The board itself.
@@ -399,6 +467,11 @@ pub struct Board {
     /// rendering precedence — last one drawn wins.
     #[serde(default)]
     pub pours: Vec<Pour>,
+    /// Polygonal routing keep-outs (antenna zones, mounting-screw
+    /// rings, mechanical clearances). Empty by default — see
+    /// `Keepout` for the per-keepout semantics.
+    #[serde(default)]
+    pub keepouts: Vec<Keepout>,
     /// Board-level silk strokes (frame lines, fiducial labels,
     /// company logo outlines, ...). Footprint-attached silk lives on
     /// each `Footprint::silk` so it follows the footprint when
@@ -738,8 +811,25 @@ impl Board {
 
     /// Add a pour, replacing any existing pour with the same (net, layer).
     pub fn add_pour(&mut self, pour: Pour) {
-        self.pours.retain(|p| p != &pour);
+        self.pours
+            .retain(|p| !(p.net == pour.net && p.layer == pour.layer));
         self.pours.push(pour);
+    }
+
+    /// Add a keepout. Returns its id so the caller can later remove
+    /// it without scanning by polygon contents.
+    pub fn add_keepout(&mut self, keepout: Keepout) -> Id {
+        let id = keepout.id;
+        self.keepouts.push(keepout);
+        id
+    }
+
+    /// Remove the keepout with the given id. Returns whether anything
+    /// was removed.
+    pub fn remove_keepout(&mut self, id: Id) -> bool {
+        let before = self.keepouts.len();
+        self.keepouts.retain(|k| k.id != id);
+        self.keepouts.len() != before
     }
 
     /// Remove a pour matching this (net, layer). Returns true if one was removed.

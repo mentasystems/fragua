@@ -11,7 +11,9 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use serde::{Deserialize, Serialize};
 
-use crate::board::{Board, CopperLayer, Footprint, Id, Pour, SilkLine, SilkText, Trace, Via};
+use crate::board::{
+    Board, CopperLayer, Footprint, Id, Keepout, Pour, SilkLine, SilkText, Trace, Via,
+};
 use crate::event::{ActivityLevel, Event, EventBus};
 use crate::geometry::{Point, Rect};
 use crate::schematic::{Net, Schematic, Symbol};
@@ -494,6 +496,52 @@ impl Project {
         });
     }
 
+    /// Update the thermal relief style of every existing pour on
+    /// `net`. Returns the number of pours updated. No-op if the net
+    /// has no pours.
+    pub fn set_pour_relief(&self, net: &str, relief: crate::board::ThermalRelief) -> usize {
+        let (changed, count) = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            let mut changed = 0_usize;
+            for p in &mut inner.board.pours {
+                if p.net == net {
+                    p.thermal_relief = relief;
+                    changed += 1;
+                }
+            }
+            (changed, inner.board.pours.len())
+        };
+        if changed > 0 {
+            self.bus.publish(Event::PoursChanged { count });
+        }
+        changed
+    }
+
+    /// Add a polygonal keepout. Returns its id and publishes
+    /// `KeepoutsChanged`.
+    pub fn add_keepout(&self, keepout: Keepout) -> Id {
+        let (id, count) = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            let id = inner.board.add_keepout(keepout);
+            (id, inner.board.keepouts.len())
+        };
+        self.bus.publish(Event::KeepoutsChanged { count });
+        id
+    }
+
+    /// Remove a keepout by id. Returns whether anything was removed.
+    pub fn remove_keepout(&self, id: Id) -> bool {
+        let (removed, count) = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            let removed = inner.board.remove_keepout(id);
+            (removed, inner.board.keepouts.len())
+        };
+        if removed {
+            self.bus.publish(Event::KeepoutsChanged { count });
+        }
+        removed
+    }
+
     /// Remove a pour by `(net, layer)`. Returns true if one was removed.
     pub fn remove_pour(&self, net: &str, layer: CopperLayer) -> bool {
         let (removed, count) = {
@@ -955,6 +1003,34 @@ impl Project {
             crate::ActivityLevel::Info,
             format!("schematic.set_class: {name}"),
         );
+    }
+
+    /// Bind `net_name` to a previously-declared `NetClass`. Returns
+    /// `Err` if the class does not exist (so the agent gets fast
+    /// feedback rather than silently routing with default rules).
+    pub fn assign_net_to_class(
+        &self,
+        net_name: impl Into<String>,
+        class_name: impl Into<String>,
+    ) -> Result<(), String> {
+        let net_name = net_name.into();
+        let class_name = class_name.into();
+        {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            if !inner.schematic.net_classes.contains_key(&class_name) {
+                return Err(format!(
+                    "net class `{class_name}` not declared — define it with `class {class_name} ...` first"
+                ));
+            }
+            inner
+                .schematic
+                .assign_net_to_class(net_name.clone(), class_name.clone());
+        }
+        self.log(
+            crate::ActivityLevel::Info,
+            format!("schematic.assign_net_class: {net_name} -> {class_name}"),
+        );
+        Ok(())
     }
 
     /// consistent so downstream tools (router, BOM) never see dangling

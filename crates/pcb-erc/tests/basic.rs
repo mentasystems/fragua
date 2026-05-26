@@ -271,6 +271,7 @@ fn unpowered_power_net_silent_when_pour_supplies_it() {
     board.add_pour(Pour {
         net: "GND".into(),
         layer: CopperLayer::Bottom,
+        thermal_relief: pcb_core::ThermalRelief::default(),
     });
     let report = run(&board, &sch, &ErcOptions::default());
     assert!(!report

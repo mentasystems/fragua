@@ -974,6 +974,47 @@ struct JlcpcbPackResult {
     blocking_reasons: Vec<String>,
 }
 
+#[derive(Serialize)]
+struct OdbPackResult {
+    tgz_path: String,
+    file_count: usize,
+}
+
+/// ODB++ export: builds the standard ODB++ tree and writes it as a
+/// `<project>.tgz` in `~/Downloads`. Mirrors `export_jlcpcb_pack`'s
+/// shape so the frontend can show a similar "ready" / path UI.
+#[tauri::command]
+fn export_odb_pack(state: State<'_, AppState>) -> Result<OdbPackResult, String> {
+    let snap = state.project.read();
+    let name = snap.name().to_string();
+    let board = snap.board().clone();
+    drop(snap);
+
+    let stem = pcb_odb::sanitize_name(&name);
+    let tgz_bytes = pcb_odb::write_odb_tgz(&board, &stem).map_err(|e| format!("odb: {e}"))?;
+    let out_dir = std::env::var_os("HOME").map_or_else(
+        || std::path::PathBuf::from("/tmp"),
+        |h| std::path::PathBuf::from(h).join("Downloads"),
+    );
+    std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    let path = out_dir.join(format!("{stem}.tgz"));
+    std::fs::write(&path, &tgz_bytes).map_err(|e| e.to_string())?;
+
+    let file_count = pcb_odb::build_tree(&board, &stem).len();
+    state.project.log(
+        pcb_core::ActivityLevel::Info,
+        format!(
+            "odb.export: wrote {} ({} files)",
+            path.display(),
+            file_count,
+        ),
+    );
+    Ok(OdbPackResult {
+        tgz_path: path.to_string_lossy().into_owned(),
+        file_count,
+    })
+}
+
 /// Ask the running autoroute search to finish on the next trial
 /// boundary and commit the best genome found so far. No-op if no
 /// search is running.
@@ -1116,6 +1157,7 @@ pub fn run() {
             start_autoroute,
             stop_autoroute,
             export_jlcpcb_pack,
+            export_odb_pack,
             run_drc,
             export_fab_pack,
             library_state,

@@ -1,8 +1,9 @@
 //! Driver that ties the grid and A* together.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
-use pcb_core::{Board, CopperLayer, Length, Point, Rect, Trace, Via};
+use pcb_core::{Board, CopperLayer, Length, Point, Rect, Schematic, Trace, Via};
 
 use crate::astar::search;
 use crate::grid::{CostMap, Grid, GridPoint};
@@ -33,7 +34,17 @@ pub struct RouteOptions {
     /// Per-net rule overrides keyed by net name. Built by the caller
     /// from the schematic's `NetClass` definitions; the router stays
     /// schematic-agnostic and just consults this map.
+    ///
+    /// **Deprecated** in favour of `schematic` — kept for one release
+    /// so existing callers (router-tune, tests) compile unchanged.
+    #[doc(hidden)]
     pub net_overrides: HashMap<String, NetOverride>,
+    /// Optional schematic reference. When set, the router consults
+    /// `schematic.resolved_for_net(net)` for per-net trace width and
+    /// clearance — superseding `net_overrides`. The arc is cheap to
+    /// clone and keeps the router lock-free with respect to the
+    /// schematic.
+    pub schematic: Option<Arc<Schematic>>,
     /// If `Some`, use this exact net order as the first-pass ordering instead
     /// of the built-in "fewest pads first" heuristic. Net names not present
     /// in the board are silently dropped; nets in the board but missing from
@@ -64,9 +75,42 @@ impl Default for RouteOptions {
             via_drill: Length::from_mm(0.3),
             via_diameter: Length::from_mm(0.6),
             net_overrides: HashMap::new(),
+            schematic: None,
             initial_net_order: None,
         }
     }
+}
+
+/// Helper: resolve `(trace_width, clearance)` for `net` honouring
+/// `opts.schematic` first, then `opts.net_overrides`, then the global
+/// defaults on `opts`. Centralises the precedence so the grid stamp,
+/// per-net layout, and `compute_region` stay in sync.
+fn effective_net_rules(opts: &RouteOptions, net: &str) -> (Length, Length) {
+    if let Some(sch) = opts.schematic.as_ref() {
+        // Only consult the schematic when the net actually has a class —
+        // otherwise we'd shadow the override map below for every net.
+        if sch.class_for_net(net).is_some() {
+            let res = sch.resolved_for_net(
+                net,
+                opts.trace_width,
+                opts.clearance,
+                opts.via_diameter,
+                opts.via_drill,
+            );
+            return (res.trace_width, res.clearance);
+        }
+    }
+    let w = opts
+        .net_overrides
+        .get(net)
+        .and_then(|o| o.trace_width)
+        .unwrap_or(opts.trace_width);
+    let c = opts
+        .net_overrides
+        .get(net)
+        .and_then(|o| o.clearance)
+        .unwrap_or(opts.clearance);
+    (w, c)
 }
 
 #[derive(Debug, Clone)]
@@ -397,6 +441,13 @@ fn compute_region(board: &Board, opts: &RouteOptions) -> Rect {
             widest = widest.max(w.0);
         }
     }
+    if let Some(sch) = opts.schematic.as_ref() {
+        for class in sch.net_classes.values() {
+            if let Some(w_mm) = class.trace_width_mm {
+                widest = widest.max(Length::from_mm(w_mm).0);
+            }
+        }
+    }
     let half_widest = Length(widest / 2);
     let mut outline_inset = edge_clearance + half_widest;
     // Rounded outline cuts inward at each corner by `r × (1 − 1/√2)`
@@ -457,13 +508,24 @@ fn route_pass(
                 }
             }
         }
+        if let Some(sch) = opts.schematic.as_ref() {
+            for class in sch.net_classes.values() {
+                if let Some(mm) = class.clearance_mm {
+                    let cand = Length::from_mm(mm);
+                    if cand.0 > c.0 {
+                        c = cand;
+                    }
+                }
+            }
+        }
         c
     };
     let net_id_lookup = |n: &str| net_id_of.get(n).copied();
-    // Bodies first, then pads: pad cells overwrite the obstacle body
-    // stamp inside the same bbox, leaving the pad reachable while the
-    // rest of the body blocks foreign nets from cutting underneath.
+    // Layered stamping, broad-to-narrow: bodies block the area each
+    // footprint occupies, keepouts block any user-marked region, pads
+    // overwrite the cells they actually own so they stay reachable.
     grid.stamp_bodies(board);
+    grid.stamp_keepouts(board);
     grid.stamp_pads(board, &net_id_lookup, max_clearance);
     // Halo around freshly-laid traces, in cells: max_clearance / cell.
     // Round up so 0.20 mm clearance on a 0.25 mm grid still gives one
@@ -551,13 +613,9 @@ fn route_pass(
         let seed = pad_points[seed_idx].clone();
         let seed_grid = grid.snap(seed.center, seed.layer);
 
-        // Resolve this net's trace width: per-net override wins,
-        // otherwise the global default.
-        let net_trace_width = opts
-            .net_overrides
-            .get(net_name)
-            .and_then(|o| o.trace_width)
-            .unwrap_or(opts.trace_width);
+        // Resolve this net's trace width: schematic class first, then
+        // per-net override, then the global default.
+        let (net_trace_width, _) = effective_net_rules(opts, net_name);
 
         let mut net_segments = 0usize;
         let mut net_vias = 0usize;

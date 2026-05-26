@@ -156,6 +156,7 @@ root.innerHTML = `
   <div class="palette-strip" id="palette-strip">
     <button id="autoroute-btn" class="autoroute-btn">Auto Routing</button>
     <button id="jlcpcb-btn" class="jlcpcb-btn">JLCPCB</button>
+    <button id="odb-btn" class="odb-btn">ODB++</button>
     <span id="autoroute-status" class="autoroute-status"></span>
     <div class="palette-chips" id="palette-chips"></div>
   </div>
@@ -197,6 +198,7 @@ const els = {
   autorouteBtn: document.getElementById("autoroute-btn") as HTMLButtonElement,
   autorouteStatus: document.getElementById("autoroute-status")!,
   jlcpcbBtn: document.getElementById("jlcpcb-btn") as HTMLButtonElement,
+  odbBtn: document.getElementById("odb-btn") as HTMLButtonElement,
   boardW: document.getElementById("board-w")!,
   boardH: document.getElementById("board-h")!,
   infoModal: document.getElementById("info-modal")!,
@@ -1329,6 +1331,28 @@ type JlcpcbPackResult = {
   file_count: number;
   blocking_reasons: string[];
 };
+
+type OdbPackResult = {
+  tgz_path: string;
+  file_count: number;
+};
+
+els.odbBtn.addEventListener("click", async () => {
+  els.odbBtn.disabled = true;
+  els.autorouteStatus.className = "autoroute-status";
+  els.autorouteStatus.textContent = "exporting ODB++…";
+  try {
+    const res = await invoke<OdbPackResult>("export_odb_pack");
+    els.autorouteStatus.classList.add("done");
+    els.autorouteStatus.textContent =
+      `ODB++ written: ${res.file_count} files → ${res.tgz_path}`;
+  } catch (e) {
+    els.autorouteStatus.classList.add("error");
+    els.autorouteStatus.textContent = `ODB++ error: ${e}`;
+  } finally {
+    els.odbBtn.disabled = false;
+  }
+});
 
 els.jlcpcbBtn.addEventListener("click", async () => {
   els.jlcpcbBtn.disabled = true;

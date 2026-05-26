@@ -136,6 +136,18 @@ html, body, #app {
 }
 .jlcpcb-btn:hover { background: #38a04c; }
 .jlcpcb-btn:disabled { background: #2a4a30; cursor: progress; }
+.odb-btn {
+  background: #2557c0;
+  color: #fff;
+  border: none;
+  padding: 0.25rem 0.9rem;
+  font: inherit;
+  font-weight: 600;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.odb-btn:hover { background: #3a73e0; }
+.odb-btn:disabled { background: #1a3878; cursor: progress; }
 .palette-chip {
   display: inline-flex;
   align-items: baseline;

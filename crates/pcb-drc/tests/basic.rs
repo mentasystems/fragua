@@ -207,3 +207,46 @@ fn edge_clearance_violation() {
         .iter()
         .any(|v| v.kind == ViolationKind::EdgeClearance));
 }
+
+#[test]
+fn keepout_visible_in_drc_report() {
+    use pcb_core::Trace;
+    let mut board = Board::new();
+    board.outline = Some(Rect::from_corners(
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+        Point::new(Length::from_mm(40.0), Length::from_mm(20.0)),
+    ));
+    // Keepout in the centre.
+    board.keepouts.push(pcb_core::Keepout {
+        id: pcb_core::Id::new(),
+        polygon: vec![
+            Point::new(Length::from_mm(10.0), Length::from_mm(5.0)),
+            Point::new(Length::from_mm(30.0), Length::from_mm(5.0)),
+            Point::new(Length::from_mm(30.0), Length::from_mm(15.0)),
+            Point::new(Length::from_mm(10.0), Length::from_mm(15.0)),
+        ],
+        layers: vec![],
+        nets_allowed: vec![],
+        label: "test".into(),
+    });
+    // A trace running right through the keepout.
+    board.traces.push(Trace {
+        id: pcb_core::Id::new(),
+        layer: pcb_core::CopperLayer::Top,
+        start: Point::new(Length::from_mm(5.0), Length::from_mm(10.0)),
+        end: Point::new(Length::from_mm(35.0), Length::from_mm(10.0)),
+        width: Length::from_mm(0.25),
+        net: "FOO".into(),
+    });
+    let report = run(&board, &DrcOptions::default());
+    let kp_violations: Vec<_> = report
+        .violations
+        .iter()
+        .filter(|v| v.kind == ViolationKind::KeepoutViolation)
+        .collect();
+    assert!(
+        !kp_violations.is_empty(),
+        "expected at least one KeepoutViolation, got: {:#?}",
+        report.violations,
+    );
+}

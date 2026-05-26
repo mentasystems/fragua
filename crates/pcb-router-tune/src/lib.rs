@@ -128,6 +128,7 @@ impl Genome {
             via_drill: baseline.via_drill,
             via_diameter: baseline.via_diameter,
             net_overrides: HashMap::<String, NetOverride>::new(),
+            schematic: baseline.schematic.clone(),
             initial_net_order: Some(self.net_order.clone()),
         }
     }
@@ -580,6 +581,7 @@ fn hill_climb_rotations(
         } else {
             Some(net_order.clone())
         },
+        schematic: baseline_opts.schematic.clone(),
     };
 
     let mut current_board = start_board.clone();
@@ -682,6 +684,7 @@ fn run_ga(
     should_stop: &AtomicBool,
     on_progress: &mut dyn FnMut(&GaProgress, &Board),
 ) -> Result<(Board, GaOutcome), String> {
+    use rayon::prelude::*;
     let start = Instant::now();
     let mut cache: HashMap<String, f64> = HashMap::new();
     let mut best_board: Option<Board> = None;
@@ -725,7 +728,6 @@ fn run_ga(
         // Phase 2 (parallel): score the uncached genomes across cores.
         // Each trial clones the input board so there's no shared mutable
         // state; only the routing/DRC computation runs concurrently.
-        use rayon::prelude::*;
         let evaluated: Vec<(Genome, TrialMetrics, Board, f64)> = to_eval
             .into_par_iter()
             .map(|genome| {

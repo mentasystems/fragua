@@ -217,14 +217,81 @@ pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result
     // pour clearance on every side). Empty when `has_pour` is false.
     let mut void_flashes: Vec<(u32, Point)> = Vec::new();
     let mut void_draws: Vec<(u32, Point, Point)> = Vec::new();
+    // Thermal-relief spokes: 4 narrow copper bars per same-net pad
+    // when the pour requests `Spokes4`. Emitted as dark draws AFTER
+    // the LPC void pass so the pad ↔ pour bridge survives the ring.
+    let mut spoke_draws: Vec<(u32, Point, Point)> = Vec::new();
     if has_pour {
         let cl = POUR_CLEARANCE;
+        // Build a quick {net -> ThermalRelief} for the pours on this
+        // layer so we can decide whether to add thermal voids+spokes
+        // around same-net pads.
+        let pour_relief: HashMap<&str, pcb_core::ThermalRelief> = board
+            .pours
+            .iter()
+            .filter(|p| p.layer == layer)
+            .map(|p| (p.net.as_str(), p.thermal_relief))
+            .collect();
         for fp in board.footprints_in_order() {
             for pad in &fp.pads {
                 if pad.layer != layer {
                     continue;
                 }
-                if pad.net.as_deref().is_some_and(|n| pour_nets.contains(n)) {
+                let pad_net = pad.net.as_deref();
+                let same_net_pour = pad_net.and_then(|n| pour_relief.get(n).copied());
+                if let Some(relief) = same_net_pour {
+                    if let pcb_core::ThermalRelief::Spokes4 {
+                        spoke_width_mm,
+                        gap_mm,
+                    } = relief
+                    {
+                        // Thermal ring: a rectangle the same shape as
+                        // the pad but inflated by `gap_mm` is voided
+                        // in clear polarity, leaving a halo around the
+                        // pad copper. The four spoke bars (dark) are
+                        // emitted after to bridge pad→pour.
+                        let center = fp.pad_world_center(pad);
+                        let (pw, ph) = fp.pad_world_size(pad);
+                        let gap = Length::from_mm(gap_mm);
+                        let ring_id = table.intern(Aperture::Rect {
+                            w: pw + gap + gap,
+                            h: ph + gap + gap,
+                        });
+                        void_flashes.push((ring_id, center));
+                        // Spoke aperture: circular trace, width =
+                        // spoke_width_mm. Each spoke runs from the pad
+                        // edge to just past the gap.
+                        let spoke_id = table.intern(Aperture::Round {
+                            d: Length::from_mm(spoke_width_mm),
+                        });
+                        let half_w = pw.0 / 2;
+                        let half_h = ph.0 / 2;
+                        let len = gap.0 + 100_000; // gap + 0.1 mm overshoot
+                        // East / west
+                        spoke_draws.push((
+                            spoke_id,
+                            Point::new(Length(center.x.0 - half_w - len), center.y),
+                            Point::new(Length(center.x.0 - half_w + 50_000), center.y),
+                        ));
+                        spoke_draws.push((
+                            spoke_id,
+                            Point::new(Length(center.x.0 + half_w - 50_000), center.y),
+                            Point::new(Length(center.x.0 + half_w + len), center.y),
+                        ));
+                        // North / south
+                        spoke_draws.push((
+                            spoke_id,
+                            Point::new(center.x, Length(center.y.0 - half_h - len)),
+                            Point::new(center.x, Length(center.y.0 - half_h + 50_000)),
+                        ));
+                        spoke_draws.push((
+                            spoke_id,
+                            Point::new(center.x, Length(center.y.0 + half_h - 50_000)),
+                            Point::new(center.x, Length(center.y.0 + half_h + len)),
+                        ));
+                    }
+                    // Solid (or non-Spokes4): no void, no spoke — pad
+                    // melts into the pour, legacy behaviour.
                     continue;
                 }
                 let center = fp.pad_world_center(pad);
@@ -336,8 +403,18 @@ pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result
             line_to(w, *b)?;
         }
         // 3. Back to dark for the regular pad/trace/via flashes that
-        //    follow.
+        //    follow. Thermal-relief spokes are dark draws bridging
+        //    pad → pour through the gap ring punched above.
         writeln!(w, "%LPD*%")?;
+        let mut current_spoke = 0u32;
+        for (id, a, b) in &spoke_draws {
+            if *id != current_spoke {
+                select(w, *id)?;
+                current_spoke = *id;
+            }
+            move_to(w, *a)?;
+            line_to(w, *b)?;
+        }
     }
 
     let mut current = 0u32;
@@ -716,4 +793,91 @@ fn footprint_body_local(fp: &pcb_core::Footprint) -> Option<(Length, Length)> {
     }
     // Mimic the 0.4 mm body expand the renderer uses.
     Some((lo - Length::from_mm(0.4), hi + Length::from_mm(0.4)))
+}
+
+#[cfg(test)]
+mod thermal_relief_tests {
+    use super::*;
+    use pcb_core::{Board, CopperLayer, Footprint, Id, Pad, Pour, Rect, ThermalRelief};
+
+    fn board_with_pour(relief: ThermalRelief) -> Board {
+        let mut b = Board::new();
+        b.outline = Some(Rect::from_corners(
+            Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            Point::new(Length::from_mm(40.0), Length::from_mm(20.0)),
+        ));
+        b.add_footprint(Footprint {
+            id: Id::new(),
+            reference: "R1".into(),
+            value: String::new(),
+            library: "test".into(),
+            position: Point::new(Length::from_mm(10.0), Length::from_mm(10.0)),
+            rotation: 0.0,
+            layer: CopperLayer::Top,
+            pads: vec![Pad {
+                number: "1".into(),
+                name: String::new(),
+                offset: Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+                size: (Length::from_mm(1.5), Length::from_mm(1.5)),
+                layer: CopperLayer::Top,
+                net: Some("GND".into()),
+                drill: None,
+            }],
+            key: String::new(),
+            description: String::new(),
+            edge_mounted: false,
+            silk: Vec::new(),
+        });
+        b.add_pour(Pour {
+            net: "GND".into(),
+            layer: CopperLayer::Top,
+            thermal_relief: relief,
+        });
+        b
+    }
+
+    #[test]
+    fn pour_with_spokes_generates_4_bridges_per_pad() {
+        let b = board_with_pour(ThermalRelief::Spokes4 {
+            spoke_width_mm: 0.4,
+            gap_mm: 0.4,
+        });
+        let mut out = Vec::new();
+        write_copper(&b, Side::Top, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        // 4 spoke draws → 4 "D01" move/draw pairs in the dark
+        // section after LPD. They sit AFTER the LPC void pass, and
+        // each pair is 1 move_to (D02) + 1 line_to (D01).
+        let lpd_idx = text.rfind("%LPD*%").expect("missing LPD section");
+        let tail = &text[lpd_idx..];
+        let d01_count = tail.matches("D01*").count();
+        assert!(
+            d01_count >= 4,
+            "expected >=4 D01 ops post-LPD for 4 thermal spokes, got {d01_count}\n{tail}"
+        );
+    }
+
+    #[test]
+    fn pour_solid_unchanged() {
+        // Solid pour: no thermal voids or spokes around the same-net
+        // pad; the LPC section after the pour region only contains
+        // foreign-net keepouts (none here). So the D01 count after
+        // LPD should reflect just the pad/trace/via flashes, no
+        // thermal spokes.
+        let b = board_with_pour(ThermalRelief::Solid);
+        let mut out = Vec::new();
+        write_copper(&b, Side::Top, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        // Solid relief means no spoke "D02 ... D01 ..." line pairs
+        // were emitted. The only D01 after %LPD*% should be the
+        // explicit dark-mode flashes (pads/vias use D03, not D01;
+        // traces use D01 but there are none here).
+        let lpd_idx = text.rfind("%LPD*%").expect("missing LPD section");
+        let tail = &text[lpd_idx..];
+        let d01_count = tail.matches("D01*").count();
+        assert_eq!(
+            d01_count, 0,
+            "solid relief should not emit any D01 line draws after LPD, got {d01_count}\n{tail}"
+        );
+    }
 }
