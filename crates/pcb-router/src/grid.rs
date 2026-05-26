@@ -172,6 +172,42 @@ impl Grid {
         )
     }
 
+    /// Stamp each footprint's full body bbox as `Obstacle` on its
+    /// copper layer. Prevents foreign-net traces from running
+    /// underneath component bodies on the same side — some packages
+    /// (ESP32-S3-Zero etc.) carry un-modelled pads or thermal slugs
+    /// under the body, and a trace there is a shorting risk even when
+    /// no pad is declared. Call this BEFORE `stamp_pads` so the pad
+    /// cells overwrite the obstacle inside the bbox. For TH footprints
+    /// (any pad with `drill`) the body is stamped on both layers
+    /// because the package physically straddles both.
+    pub fn stamp_bodies(&mut self, board: &Board) {
+        for fp in board.footprints_in_order() {
+            let Some(bounds) = fp.bounds() else { continue };
+            let is_th = fp.pads.iter().any(|p| p.drill.is_some());
+            let primary: u8 = match fp.layer {
+                CopperLayer::Top => 0,
+                CopperLayer::Bottom => 1,
+            };
+            let layers: &[u8] = if is_th { &[0, 1] } else { &[primary] };
+            let cmin = self.snap(bounds.min, fp.layer);
+            let cmax = self.snap(bounds.max, fp.layer);
+            for &layer in layers {
+                for r in cmin.row..=cmax.row {
+                    for c in cmin.col..=cmax.col {
+                        let gp = GridPoint { layer, col: c, row: r };
+                        if !self.in_bounds(gp) {
+                            continue;
+                        }
+                        if matches!(self.get(gp), Cell::Free) {
+                            self.set(gp, Cell::Obstacle);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Stamp obstacles for every pad: the pad rectangle expanded by
     /// `clearance` is marked `Obstacle` for foreign nets and `NetPad`
     /// for its own net (so the search can enter it).

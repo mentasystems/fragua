@@ -460,6 +460,10 @@ fn route_pass(
         c
     };
     let net_id_lookup = |n: &str| net_id_of.get(n).copied();
+    // Bodies first, then pads: pad cells overwrite the obstacle body
+    // stamp inside the same bbox, leaving the pad reachable while the
+    // rest of the body blocks foreign nets from cutting underneath.
+    grid.stamp_bodies(board);
     grid.stamp_pads(board, &net_id_lookup, max_clearance);
     // Halo around freshly-laid traces, in cells: max_clearance / cell.
     // Round up so 0.20 mm clearance on a 0.25 mm grid still gives one
@@ -608,6 +612,7 @@ fn route_pass(
                 opts,
                 halo_cells,
                 net_trace_width,
+                Some(spoke.center),
             );
             net_segments += segs;
             net_vias += vias;
@@ -700,6 +705,7 @@ fn bump_corridor(snap_grid: &Grid, cost_map: &mut CostMap, pads: &[NetPadInfo], 
 /// subsequent nets honour them as obstacles. Returns
 /// `(segments, vias, length_mm)` where `length_mm` is the sum of all
 /// straight segments laid (vias themselves contribute zero length).
+#[allow(clippy::too_many_arguments)]
 fn lay_path(
     board: &mut Board,
     grid: &mut Grid,
@@ -709,6 +715,7 @@ fn lay_path(
     opts: &RouteOptions,
     halo_cells: i32,
     trace_width: Length,
+    target_world: Option<Point>,
 ) -> (usize, usize, f64) {
     if path.len() < 2 {
         return (0, 0, 0.0);
@@ -731,6 +738,7 @@ fn lay_path(
                     opts,
                     halo_cells,
                     trace_width,
+                    None,
                 );
                 segments += 1;
             }
@@ -756,6 +764,7 @@ fn lay_path(
             opts,
             halo_cells,
             trace_width,
+            target_world,
         );
         segments += 1;
     }
@@ -765,7 +774,12 @@ fn lay_path(
 /// Emit one straight segment per consecutive same-layer pair in `path`.
 /// Theta* hands us explicit corners (any-angle), so each window is
 /// already a straight LOS run — no need to detect direction changes.
-/// Returns total Euclidean length in mm.
+/// Returns total Euclidean length in mm. If `target_world` is `Some`,
+/// the LAST segment's end is overridden with that exact world point
+/// (typically the spoke pad's true centre, not the snapped grid cell).
+/// Cleans up the visual gap a grid-rounded endpoint leaves between
+/// trace and pad copper.
+#[allow(clippy::too_many_arguments)]
 fn emit_trace(
     board: &mut Board,
     grid: &mut Grid,
@@ -775,20 +789,26 @@ fn emit_trace(
     _opts: &RouteOptions,
     halo_cells: i32,
     trace_width: Length,
+    target_world: Option<Point>,
 ) -> f64 {
     if path.len() < 2 {
         return 0.0;
     }
     let layer = path[0].copper_layer();
     let mut total_mm = 0.0_f64;
-    for w in path.windows(2) {
+    let last_idx = path.len() - 2;
+    for (i, w) in path.windows(2).enumerate() {
         let s = w[0];
         let e = w[1];
         if s == e {
             continue;
         }
         let start = grid.unsnap(s);
-        let end = grid.unsnap(e);
+        let end = if i == last_idx {
+            target_world.unwrap_or_else(|| grid.unsnap(e))
+        } else {
+            grid.unsnap(e)
+        };
         let dx = start.x.to_mm() - end.x.to_mm();
         let dy = start.y.to_mm() - end.y.to_mm();
         let len_mm = (dx * dx + dy * dy).sqrt();

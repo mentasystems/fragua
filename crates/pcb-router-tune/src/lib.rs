@@ -174,6 +174,24 @@ fn is_rotation_locked(fp: &pcb_core::Footprint) -> bool {
     fp.pads.len() > 6
 }
 
+/// Cheap O(N²) bbox-overlap check. Returns true if any two footprints
+/// occupy the same area on the board. Used to bail out of routing for
+/// invalid rotation combinations the GA generates.
+fn board_has_overlaps(board: &Board) -> bool {
+    let fps: Vec<&pcb_core::Footprint> = board.footprints_in_order().collect();
+    for i in 0..fps.len() {
+        let Some(bi) = fps[i].bounds() else { continue };
+        for fp in fps.iter().skip(i + 1) {
+            if let Some(bj) = fp.bounds() {
+                if bi.intersects(&bj) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Snap an arbitrary rotation (the placer may have left a footprint at
 /// e.g. -90°) to the closest member of `ROTATION_CHOICES_DEG`. Keeps
 /// the baseline genome on the canonical 4-state lattice.
@@ -386,6 +404,10 @@ fn mutate(g: &mut Genome, rate: f64, rng: &mut StdRng) {
 /// return both the metrics and the routed board. The `rotations`
 /// override the cloned board's footprint rotations by `footprint_ids`
 /// index before routing — empty slice = use board's current rotations.
+/// Trials whose rotation choice produces footprint-bbox overlap are
+/// rejected immediately with a high failed-nets penalty: routing an
+/// invalid layout takes much longer than a clean one (the router
+/// exhausts the grid before giving up) and the result is useless.
 fn evaluate_in_process(
     original_board: &Board,
     drc_opts: &DrcOptions,
@@ -400,6 +422,24 @@ fn evaluate_in_process(
                 fp.rotation = *rot;
             }
         }
+    }
+    if board_has_overlaps(&work) {
+        // Mark every net as failed so the GA score (failed_nets *
+        // 100_000) dwarfs anything legal, without paying the
+        // routing cost on an unroutable layout.
+        let failed_nets = options
+            .net_overrides
+            .len()
+            .max(work.footprints.len());
+        return (
+            TrialMetrics {
+                drc_errors: 0,
+                failed_nets,
+                total_length_mm: 0.0,
+                via_count: 0,
+            },
+            work,
+        );
     }
     let report = pcb_router::route(&mut work, options);
     let drc = pcb_drc::run(&work, drc_opts);
@@ -464,7 +504,7 @@ pub fn run_search(
         StdRng::seed_from_u64(config.seed)
     };
 
-    match config.algorithm {
+    let (best_board, outcome) = match config.algorithm {
         Algorithm::Ga => run_ga(
             board,
             config,
@@ -486,7 +526,148 @@ pub fn run_search(
             should_stop,
             &mut on_progress,
         ),
+    }?;
+
+    // Hill-climb post-pass: for every movable footprint, try the three
+    // other rotations one at a time and keep any that improves the
+    // score. Local search closes off the GA's coverage gaps -- if the
+    // population happened not to land a beneficial single-component
+    // rotation, this pass catches it deterministically. Cheap: N
+    // footprints * 3 rotations = ~15 extra evals for the gateway.
+    if !should_stop.load(Ordering::SeqCst) && !footprint_ids.is_empty() {
+        hill_climb_rotations(
+            &best_board,
+            &outcome,
+            &baseline_opts,
+            drc_opts,
+            &footprint_ids,
+            should_stop,
+            &mut on_progress,
+        )
+        .map(|(b, o)| (b, o))
+        .or(Ok((best_board, outcome)))
+    } else {
+        Ok((best_board, outcome))
     }
+}
+
+/// Walk each movable footprint, try the other 3 rotations, keep the
+/// best. Returns updated board+outcome if anything improved, else
+/// `None` to let the caller fall back to the GA's winner.
+#[allow(clippy::too_many_arguments)]
+fn hill_climb_rotations(
+    start_board: &Board,
+    start_outcome: &GaOutcome,
+    baseline_opts: &RouteOptions,
+    drc_opts: &DrcOptions,
+    footprint_ids: &[Id],
+    should_stop: &AtomicBool,
+    on_progress: &mut dyn FnMut(&GaProgress, &Board),
+) -> Result<(Board, GaOutcome), String> {
+    let start_t = Instant::now();
+    let best_progress = start_outcome.best.as_ref().ok_or("no GA best to refine")?;
+    let net_order = best_progress.best_net_order.clone();
+    let route_opts = RouteOptions {
+        cell: Length::from_mm(best_progress.best_cell_mm),
+        trace_width: baseline_opts.trace_width,
+        clearance: Length::from_mm(best_progress.best_clearance_mm),
+        via_cost: best_progress.best_via_cost,
+        via_drill: baseline_opts.via_drill,
+        via_diameter: baseline_opts.via_diameter,
+        net_overrides: HashMap::<String, NetOverride>::new(),
+        initial_net_order: if net_order.is_empty() {
+            None
+        } else {
+            Some(net_order.clone())
+        },
+    };
+
+    let mut current_board = start_board.clone();
+    let mut current_score = best_progress.best_score;
+    let mut current_rotations: Vec<f32> = footprint_ids
+        .iter()
+        .map(|id| {
+            current_board
+                .footprints
+                .get(id)
+                .map_or(0.0, |fp| snap_rotation(fp.rotation))
+        })
+        .collect();
+    let mut current_metrics = TrialMetrics {
+        drc_errors: best_progress.best_drc_errors,
+        failed_nets: best_progress.best_failed_nets,
+        total_length_mm: best_progress.best_length_mm,
+        via_count: best_progress.best_vias,
+    };
+
+    let mut local_evaluations = 0usize;
+    let mut local_improved = false;
+
+    for (idx, _id) in footprint_ids.iter().enumerate() {
+        if should_stop.load(Ordering::SeqCst) {
+            break;
+        }
+        let original_rot = current_rotations[idx];
+        for &cand in ROTATION_CHOICES_DEG {
+            if (cand - original_rot).abs() < 1.0 {
+                continue;
+            }
+            let mut probe = current_rotations.clone();
+            probe[idx] = cand;
+            let mut opts = route_opts.clone();
+            opts.initial_net_order = if net_order.is_empty() {
+                None
+            } else {
+                Some(net_order.clone())
+            };
+            let (metrics, work) =
+                evaluate_in_process(start_board, drc_opts, &opts, footprint_ids, &probe);
+            let score = compute_score_from_metrics(&metrics);
+            local_evaluations += 1;
+
+            let improved = score < current_score;
+            let progress = GaProgress {
+                generation: start_outcome.generations + 1,
+                evaluations: start_outcome.total_evaluations + local_evaluations,
+                cache_hits: start_outcome.cache_hits,
+                elapsed_secs: start_outcome.elapsed_secs + start_t.elapsed().as_secs_f64(),
+                best_score: current_score.min(score),
+                best_drc_errors: if improved { metrics.drc_errors } else { current_metrics.drc_errors },
+                best_failed_nets: if improved { metrics.failed_nets } else { current_metrics.failed_nets },
+                best_length_mm: if improved { metrics.total_length_mm } else { current_metrics.total_length_mm },
+                best_vias: if improved { metrics.via_count } else { current_metrics.via_count },
+                best_cell_mm: best_progress.best_cell_mm,
+                best_via_cost: best_progress.best_via_cost,
+                best_clearance_mm: best_progress.best_clearance_mm,
+                best_net_order: net_order.clone(),
+                improved,
+            };
+            on_progress(&progress, &work);
+
+            if improved {
+                current_score = score;
+                current_board = work;
+                current_rotations = probe;
+                current_metrics = metrics;
+                local_improved = true;
+                break; // accept first improvement per footprint, move on
+            }
+        }
+    }
+
+    let mut new_outcome = start_outcome.clone();
+    new_outcome.total_evaluations += local_evaluations;
+    new_outcome.elapsed_secs += start_t.elapsed().as_secs_f64();
+    if local_improved {
+        if let Some(best) = new_outcome.best.as_mut() {
+            best.best_score = current_score;
+            best.best_drc_errors = current_metrics.drc_errors;
+            best.best_failed_nets = current_metrics.failed_nets;
+            best.best_length_mm = current_metrics.total_length_mm;
+            best.best_vias = current_metrics.via_count;
+        }
+    }
+    Ok((current_board, new_outcome))
 }
 
 #[allow(clippy::too_many_arguments)]

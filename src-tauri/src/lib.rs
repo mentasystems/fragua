@@ -863,6 +863,10 @@ fn start_autoroute(
         let result = pcb_router_tune::run_search(&board, &config, &drc_opts, &stop_flag, |p, trial_board| {
             let now = std::time::Instant::now();
             if p.improved || now.duration_since(last_commit).as_millis() >= 500 {
+                // Sync rotations first so the SVG re-render the
+                // RoutingChanged event triggers picks up the GA's
+                // current orientation pick alongside the new traces.
+                progress_project.sync_footprint_rotations(trial_board);
                 progress_project.replace_routing(
                     trial_board.traces.clone(),
                     trial_board.vias.clone(),
@@ -875,6 +879,7 @@ fn start_autoroute(
 
         match result {
             Ok((best_board, outcome)) => {
+                project.sync_footprint_rotations(&best_board);
                 project.replace_routing(best_board.traces.clone(), best_board.vias.clone());
                 let best_payload: Option<AutorouteProgressPayload> =
                     outcome.best.as_ref().map(Into::into);

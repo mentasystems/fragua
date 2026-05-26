@@ -92,11 +92,25 @@ pub fn search(
 
     let via_scaled = via_cost.saturating_mul(SCALE);
 
+    // A drilled (through-hole) target accepts either layer for free:
+    // the existing PTH already connects top and bottom, so reaching it
+    // from the opposite side doesn't actually need a router via. Skip
+    // the layer-mismatch via_cost in the heuristic when the target is
+    // a DrilledPad on either layer.
+    let target_is_th = matches!(grid.get(target), Cell::DrilledPad(_))
+        || matches!(
+            grid.get(GridPoint { layer: 1 - target.layer, col: target.col, row: target.row }),
+            Cell::DrilledPad(_)
+        );
     let h = |p: GridPoint| -> u32 {
         let dc = f64::from(p.col - target.col);
         let dr = f64::from(p.row - target.row);
         let dist = (dc * dc + dr * dr).sqrt();
-        let dl = if p.layer == target.layer { 0 } else { via_scaled };
+        let dl = if p.layer == target.layer || target_is_th {
+            0
+        } else {
+            via_scaled
+        };
         (dist * f64::from(SCALE)).round() as u32 + dl
     };
 
@@ -141,7 +155,19 @@ pub fn search(
     });
 
     while let Some(Node { p, g, .. }) = open.pop() {
-        if p == target
+        // Termination: same column/row as target, AND either same
+        // layer OR the cell is a DrilledPad of the target net (the
+        // TH connects both layers, so entering from either side
+        // counts as landing).
+        let at_target = p.col == target.col
+            && p.row == target.row
+            && (p.layer == target.layer
+                || (target_is_th
+                    && matches!(
+                        grid.get(p),
+                        Cell::DrilledPad(n) if n == target_net
+                    )));
+        if at_target
             && matches!(grid.get(p), Cell::NetPad(n) | Cell::DrilledPad(n) if n == target_net)
         {
             let mut path = vec![p];

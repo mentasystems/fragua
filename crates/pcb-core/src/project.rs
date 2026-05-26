@@ -890,6 +890,23 @@ impl Project {
         });
     }
 
+    /// Copy footprint rotations from `from` into this project's
+    /// matching-id footprints. No validation, no event — the caller
+    /// should follow up with `replace_routing` (or another bus event)
+    /// so the UI's project_state refetch picks up the changes.
+    /// Footprints absent in `from` are left untouched; ids in `from`
+    /// that don't exist here are silently skipped. Used by the
+    /// auto-router so every trial's UI commit reflects the GA's
+    /// rotation choices, not just the traces.
+    pub fn sync_footprint_rotations(&self, from: &Board) {
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        for (id, src) in &from.footprints {
+            if let Some(dst) = inner.board.footprints.get_mut(id) {
+                dst.rotation = src.rotation;
+            }
+        }
+    }
+
     /// Atomically replace all routing with the given traces and vias and
     /// publish a single `RoutingChanged` event. Used by the auto-router
     /// to commit a trial board without firing one event per trace, which
