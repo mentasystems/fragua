@@ -272,6 +272,7 @@ fn unpowered_power_net_silent_when_pour_supplies_it() {
         net: "GND".into(),
         layer: CopperLayer::Bottom,
         thermal_relief: pcb_core::ThermalRelief::default(),
+        stitching: pcb_core::StitchPolicy::None,
     });
     let report = run(&board, &sch, &ErcOptions::default());
     assert!(!report

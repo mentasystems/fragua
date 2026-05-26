@@ -517,6 +517,26 @@ impl Project {
         changed
     }
 
+    /// Update the stitching policy of every existing pour on `net`.
+    /// Returns the number of pours updated.
+    pub fn set_pour_stitching(&self, net: &str, policy: crate::board::StitchPolicy) -> usize {
+        let (changed, count) = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            let mut changed = 0_usize;
+            for p in &mut inner.board.pours {
+                if p.net == net {
+                    p.stitching = policy;
+                    changed += 1;
+                }
+            }
+            (changed, inner.board.pours.len())
+        };
+        if changed > 0 {
+            self.bus.publish(Event::PoursChanged { count });
+        }
+        changed
+    }
+
     /// Add a polygonal keepout. Returns its id and publishes
     /// `KeepoutsChanged`.
     pub fn add_keepout(&self, keepout: Keepout) -> Id {

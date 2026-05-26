@@ -545,7 +545,6 @@ pub fn run_search(
             should_stop,
             &mut on_progress,
         )
-        .map(|(b, o)| (b, o))
         .or(Ok((best_board, outcome)))
     } else {
         Ok((best_board, outcome))

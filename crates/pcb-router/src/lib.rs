@@ -13,6 +13,10 @@
 
 mod astar;
 mod grid;
+mod length_match;
 mod router;
+mod stitching;
 
+pub use length_match::{length_match_pass, LengthAdjustment};
 pub use router::{route, NetOverride, Outcome, RouteOptions, RouteReport};
+pub use stitching::add_stitching_vias;

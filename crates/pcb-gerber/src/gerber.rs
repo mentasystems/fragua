@@ -832,6 +832,7 @@ mod thermal_relief_tests {
             net: "GND".into(),
             layer: CopperLayer::Top,
             thermal_relief: relief,
+            stitching: pcb_core::StitchPolicy::None,
         });
         b
     }

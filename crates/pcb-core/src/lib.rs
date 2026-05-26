@@ -19,7 +19,7 @@ pub mod units;
 
 pub use board::{
     rotate_margin_trbl, Board, CopperLayer, Footprint, FootprintSilk, Id, Keepout, Pad, Pour,
-    SilkAnchor, SilkLayer, SilkLine, SilkText, ThermalRelief, Trace, Via,
+    SilkAnchor, SilkLayer, SilkLine, SilkText, StitchPolicy, ThermalRelief, Trace, Via,
 };
 pub use event::{ActivityLevel, Event, EventBus};
 pub use geometry::{Point, Rect};

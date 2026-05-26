@@ -395,6 +395,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "pour.add" => tool_pour_add(project, args),
         "pour.remove" => tool_pour_remove(project, args),
         "pour.relief" => tool_pour_relief(project, args),
+        "pour.stitch" => tool_pour_stitch(project, args),
         "keepout.add" => tool_keepout_add(project, args),
         "keepout.list" => tool_keepout_list(project),
         "keepout.remove" => tool_keepout_remove(project, args),
@@ -2549,6 +2550,7 @@ fn tool_pour_add(project: &Project, args: &Value) -> Result<Value, ToolError> {
         net: input.net.clone(),
         layer,
         thermal_relief: pcb_core::ThermalRelief::default(),
+        stitching: pcb_core::StitchPolicy::None,
     });
     project.log(
         ActivityLevel::Info,
@@ -2684,6 +2686,47 @@ fn tool_pour_relief(project: &Project, args: &Value) -> Result<Value, ToolError>
         format!("No pour found on net `{}`", input.net)
     })
     .with_data(json!({"changed": changed, "net": input.net, "style": input.style})))
+}
+
+#[derive(Debug, Deserialize)]
+struct PourStitchInput {
+    net: String,
+    policy: String,
+    #[serde(default)]
+    pitch_mm: Option<f64>,
+    #[serde(default)]
+    clearance_mm: Option<f64>,
+}
+
+fn tool_pour_stitch(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: PourStitchInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("pour.stitch: {e}")))?;
+    let policy = match input.policy.as_str() {
+        "none" => pcb_core::StitchPolicy::None,
+        "grid" => pcb_core::StitchPolicy::Grid {
+            pitch_mm: input.pitch_mm.unwrap_or(5.0),
+            clearance_mm: input.clearance_mm.unwrap_or(0.5),
+        },
+        other => {
+            return Err(ToolError::invalid_params(format!(
+                "pour.stitch: policy must be none|grid, got `{other}`"
+            )));
+        }
+    };
+    let changed = project.set_pour_stitching(&input.net, policy);
+    project.log(
+        ActivityLevel::Info,
+        format!("pour.stitch: net={} policy={}", input.net, input.policy),
+    );
+    Ok(text_result(if changed > 0 {
+        format!(
+            "Updated {} pour(s) on net `{}` to stitching={}",
+            changed, input.net, input.policy
+        )
+    } else {
+        format!("No pour found on net `{}`", input.net)
+    })
+    .with_data(json!({"changed": changed, "net": input.net, "policy": input.policy})))
 }
 
 fn tool_pour_remove(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -3289,6 +3332,15 @@ struct SetClassInput {
     /// implicitly by `route`).
     #[serde(default)]
     pour: Option<PourLayersInput>,
+    /// Length-match target (mm). When set, the router post-pass
+    /// extends nets in this class with a serpentine to reach this
+    /// length.
+    #[serde(default)]
+    target_length_mm: Option<f64>,
+    /// Tolerance (mm) for length match. Defaults to the NetClass
+    /// default (0.5 mm) when absent.
+    #[serde(default)]
+    length_tolerance_mm: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -3345,6 +3397,10 @@ fn tool_schematic_set_class(project: &Project, args: &Value) -> Result<Value, To
             .pour
             .map(PourLayersInput::to_layers)
             .unwrap_or_default(),
+        target_length_mm: input.target_length_mm,
+        length_tolerance_mm: input
+            .length_tolerance_mm
+            .unwrap_or(pcb_core::NetClass::default().length_tolerance_mm),
     };
     project.set_net_class(class);
     let mut text = format!("class {} set", input.name);
@@ -3406,6 +3462,7 @@ fn materialize_class_pours(project: &Project) -> ClassPourSummary {
             net: net.clone(),
             layer,
             thermal_relief: pcb_core::ThermalRelief::default(),
+            stitching: pcb_core::StitchPolicy::None,
         });
         summary.added.push(format!("{net}/{}", layer_to_str(layer)));
     }

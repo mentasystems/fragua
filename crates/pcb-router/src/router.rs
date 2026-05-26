@@ -237,6 +237,11 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
         o
     };
 
+    // Diff-pair adjacency: any net whose class declares `diff_pair_with = X`
+    // must route immediately AFTER X so the "follow" mode can read X's
+    // already-laid geometry. Stable in the rest of the ordering.
+    order = reorder_for_diff_pairs(order, opts);
+
     // Cost map shared across iterations: starts at 0, accumulates bias
     // around the corridors of failed/inefficient nets so the next pass
     // detours easy nets out of those corridors. Built from a one-shot
@@ -336,6 +341,13 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     }
     for via in best_work.vias {
         board.add_via(via);
+    }
+    // Post-passes: auto-stitching vias for pours with a Grid policy,
+    // then length matching for nets that ask for it. Length matching
+    // requires a schematic (it's the source of target lengths).
+    crate::stitching::add_stitching_vias(board, opts);
+    if let Some(sch) = opts.schematic.as_ref() {
+        let _ = crate::length_match::length_match_pass(board, sch.as_ref());
     }
     best_report
 }
@@ -585,6 +597,64 @@ fn route_pass(
             ));
             continue;
         }
+
+        // Differential-pair follow attempt. If this net's class names
+        // a partner that already has traces, try to lay parallel
+        // geometry first. On success we skip the normal Theta* loop
+        // for this net; on failure we log and fall through.
+        let (net_trace_width_early, _) = effective_net_rules(opts, net_name);
+        if let Some(partner) = diff_pair_partner(opts, net_name) {
+            let partner_traces: Vec<Trace> = board
+                .traces
+                .iter()
+                .filter(|t| t.net == partner)
+                .cloned()
+                .collect();
+            if !partner_traces.is_empty() {
+                let gap_mm = opts
+                    .schematic
+                    .as_ref()
+                    .and_then(|s| s.class_for(net_name).diff_gap_mm)
+                    .unwrap_or(0.2);
+                match try_diff_pair_follow(
+                    board,
+                    &mut grid,
+                    pad_points,
+                    &partner_traces,
+                    net_name,
+                    net_id,
+                    net_trace_width_early,
+                    gap_mm,
+                    opts,
+                    halo_cells,
+                    via_safe_radius,
+                    cost_map,
+                ) {
+                    Ok((segs, vias, length_mm)) => {
+                        total_traces += segs;
+                        total_vias += vias;
+                        total_length_mm += length_mm;
+                        total_lower_bound_mm += hpwl_mm(pad_points);
+                        per_net.push((
+                            net_name.clone(),
+                            Outcome::Ok {
+                                trace_segments: segs,
+                                vias,
+                                length_mm,
+                                lower_bound_mm: hpwl_mm(pad_points),
+                            },
+                        ));
+                        continue;
+                    }
+                    Err(reason) => {
+                        eprintln!(
+                            "diff_pair.fallback: net={net_name} reason={reason}"
+                        );
+                    }
+                }
+            }
+        }
+
         // Lower bound = HPWL: half-perimeter of the pad bounding box,
         // mm. The minimum wire length any tree connecting these pads
         // can use, regardless of topology. Same metric the DRC reports
@@ -893,6 +963,431 @@ pub struct NetPadInfo {
     pub center: Point,
     pub layer: CopperLayer,
     pub pad_ref: String,
+}
+
+/// Board-coord corridor check for diff-pair follow. We reject a
+/// proposed B segment when it intersects a foreign-net trace, a pad of
+/// any other net, or a keepout polygon — but ALLOW running close to
+/// the partner trace (which is the whole point of diff-pair routing).
+fn check_diff_corridor_clear(
+    board: &Board,
+    t: &Trace,
+    self_net: &str,
+    partner_net: &str,
+) -> Result<(), String> {
+    let half_w = t.width.to_mm() / 2.0;
+    // Foreign-net traces — except the partner, which we deliberately
+    // want to run alongside.
+    for other in &board.traces {
+        if other.net == self_net || other.net == partner_net {
+            continue;
+        }
+        if other.layer != t.layer {
+            continue;
+        }
+        let half_other = other.width.to_mm() / 2.0;
+        let min_dist = (half_w + half_other) * 0.5;
+        let d = segment_to_segment_distance_mm(t, other);
+        if d < min_dist {
+            return Err(format!("crosses foreign net `{}`", other.net));
+        }
+    }
+    // Keepouts.
+    for kp in &board.keepouts {
+        if kp.polygon.len() < 3 {
+            continue;
+        }
+        // Sample a few points along the segment.
+        for k in 0..=10 {
+            let f = f64::from(k) / 10.0;
+            let x = t.start.x.to_mm() + f * (t.end.x.to_mm() - t.start.x.to_mm());
+            let y = t.start.y.to_mm() + f * (t.end.y.to_mm() - t.start.y.to_mm());
+            if simple_point_in_polygon(&kp.polygon, x, y) {
+                return Err("enters keepout".into());
+            }
+        }
+    }
+    // Foreign pads.
+    for fp in board.footprints_in_order() {
+        for pad in &fp.pads {
+            if pad.net.as_deref() == Some(self_net) {
+                continue;
+            }
+            if pad.layer != t.layer {
+                continue;
+            }
+            let c = fp.pad_world_center(pad);
+            let (pw, ph) = fp.pad_world_size(pad);
+            // Distance from pad center to segment.
+            let d = point_to_segment_mm(
+                c.x.to_mm(),
+                c.y.to_mm(),
+                t.start.x.to_mm(),
+                t.start.y.to_mm(),
+                t.end.x.to_mm(),
+                t.end.y.to_mm(),
+            );
+            let pad_r = pw.to_mm().max(ph.to_mm()) / 2.0;
+            if d < pad_r + half_w {
+                return Err(format!(
+                    "crosses pad of net `{}`",
+                    pad.net.as_deref().unwrap_or("(no-net)")
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn point_to_segment_mm(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-12 {
+        let ex = px - ax;
+        let ey = py - ay;
+        return (ex * ex + ey * ey).sqrt();
+    }
+    let t = ((px - ax) * dx + (py - ay) * dy) / len2;
+    let t = t.clamp(0.0, 1.0);
+    let cx = ax + t * dx;
+    let cy = ay + t * dy;
+    let ex = px - cx;
+    let ey = py - cy;
+    (ex * ex + ey * ey).sqrt()
+}
+
+fn segment_to_segment_distance_mm(a: &Trace, b: &Trace) -> f64 {
+    // Approximate: minimum of the four endpoint→segment distances.
+    let ax1 = a.start.x.to_mm();
+    let ay1 = a.start.y.to_mm();
+    let ax2 = a.end.x.to_mm();
+    let ay2 = a.end.y.to_mm();
+    let bx1 = b.start.x.to_mm();
+    let by1 = b.start.y.to_mm();
+    let bx2 = b.end.x.to_mm();
+    let by2 = b.end.y.to_mm();
+    let mut d = point_to_segment_mm(ax1, ay1, bx1, by1, bx2, by2);
+    d = d.min(point_to_segment_mm(ax2, ay2, bx1, by1, bx2, by2));
+    d = d.min(point_to_segment_mm(bx1, by1, ax1, ay1, ax2, ay2));
+    d = d.min(point_to_segment_mm(bx2, by2, ax1, ay1, ax2, ay2));
+    d
+}
+
+fn simple_point_in_polygon(poly: &[Point], x: f64, y: f64) -> bool {
+    let n = poly.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let pix = poly[i].x.to_mm();
+        let piy = poly[i].y.to_mm();
+        let pjx = poly[j].x.to_mm();
+        let pjy = poly[j].y.to_mm();
+        if (piy > y) != (pjy > y) {
+            let denom = pjy - piy;
+            if denom.abs() > 1e-12 {
+                let xi = pix + (y - piy) * (pjx - pix) / denom;
+                if x < xi {
+                    inside = !inside;
+                }
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Resolve the diff-pair partner net for `net_name` from the schematic.
+/// Returns the partner only when the schematic declares one and it is a
+/// different net.
+fn diff_pair_partner(opts: &RouteOptions, net_name: &str) -> Option<String> {
+    let sch = opts.schematic.as_ref()?;
+    let partner = sch.class_for(net_name).diff_pair_with.as_ref()?.clone();
+    if partner == net_name {
+        return None;
+    }
+    Some(partner)
+}
+
+/// Attempt to lay net `B`'s traces as parallel offsets of partner A's
+/// existing traces, then short stub paths to B's pads. Returns
+/// `(segments, vias, length_mm)` on success or an error string on
+/// failure (caller falls back to plain Theta*).
+#[allow(clippy::too_many_arguments)]
+fn try_diff_pair_follow(
+    board: &mut Board,
+    grid: &mut crate::grid::Grid,
+    b_pads: &[NetPadInfo],
+    partner_traces: &[Trace],
+    net_b: &str,
+    net_id_b: u32,
+    width_b: Length,
+    gap_mm: f64,
+    opts: &RouteOptions,
+    halo_cells: i32,
+    via_safe_radius: i32,
+    cost_map: &crate::grid::CostMap,
+) -> Result<(usize, usize, f64), String> {
+    use crate::astar::search;
+    if b_pads.len() < 2 {
+        return Err("less than 2 pads on follower".into());
+    }
+    // Pick a layer that the partner actually uses (same layer for both).
+    let layer = partner_traces[0].layer;
+    if !partner_traces.iter().all(|t| t.layer == layer) {
+        return Err("partner uses multiple layers".into());
+    }
+    // Width of partner traces (assume all the same — first one wins).
+    let width_a_mm = partner_traces[0].width.to_mm();
+    let width_b_mm = width_b.to_mm();
+    let offset_mm = width_a_mm / 2.0 + gap_mm + width_b_mm / 2.0;
+
+    // Choose offset side: pick the side that puts the parallel run
+    // closer to B's pad cluster centroid.
+    let centroid_x_mm: f64 =
+        b_pads.iter().map(|p| p.center.x.to_mm()).sum::<f64>() / b_pads.len() as f64;
+    let centroid_y_mm: f64 =
+        b_pads.iter().map(|p| p.center.y.to_mm()).sum::<f64>() / b_pads.len() as f64;
+
+    let mut emitted: Vec<Trace> = Vec::with_capacity(partner_traces.len());
+    let mut total_len_mm = 0.0_f64;
+    for t in partner_traces {
+        let sx = t.start.x.to_mm();
+        let sy = t.start.y.to_mm();
+        let ex = t.end.x.to_mm();
+        let ey = t.end.y.to_mm();
+        let dx = ex - sx;
+        let dy = ey - sy;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-9 {
+            continue;
+        }
+        let nx = -dy / len;
+        let ny = dx / len;
+        // Side selection per segment: pick the side whose midpoint is
+        // closer to B's centroid.
+        let mid_x = f64::midpoint(sx, ex);
+        let mid_y = f64::midpoint(sy, ey);
+        let pos_d = (mid_x + offset_mm * nx - centroid_x_mm).powi(2)
+            + (mid_y + offset_mm * ny - centroid_y_mm).powi(2);
+        let neg_d = (mid_x - offset_mm * nx - centroid_x_mm).powi(2)
+            + (mid_y - offset_mm * ny - centroid_y_mm).powi(2);
+        let sign = if pos_d <= neg_d { 1.0 } else { -1.0 };
+        let ox = sign * offset_mm * nx;
+        let oy = sign * offset_mm * ny;
+        let p_start = Point::new(
+            Length::from_mm(sx + ox),
+            Length::from_mm(sy + oy),
+        );
+        let p_end = Point::new(
+            Length::from_mm(ex + ox),
+            Length::from_mm(ey + oy),
+        );
+        emitted.push(Trace {
+            id: pcb_core::Id::new(),
+            layer,
+            start: p_start,
+            end: p_end,
+            width: width_b,
+            net: net_b.to_string(),
+        });
+        total_len_mm += len;
+    }
+    if emitted.is_empty() {
+        return Err("no usable partner segments".into());
+    }
+
+    // Check the parallel corridor in board coords (not via the grid):
+    // the grid's halo around the partner trace would falsely reject
+    // the very-close diff-pair offset because gap < default clearance
+    // by design. We check foreign-net traces (excluding the partner),
+    // foreign pads, and keepouts directly.
+    let partner_net_str = diff_pair_partner(opts, net_b).unwrap_or_default();
+    for t in &emitted {
+        check_diff_corridor_clear(board, t, net_b, &partner_net_str)?;
+    }
+    // Commit traces and stamp them on the grid.
+    let mut segments = 0usize;
+    for t in &emitted {
+        let a = grid.snap(t.start, t.layer);
+        let b = grid.snap(t.end, t.layer);
+        grid.stamp_trace(a, b, net_id_b, halo_cells);
+        board.add_trace(t.clone());
+        segments += 1;
+    }
+
+    // Now do short Theta* end-cap searches from the closest emitted
+    // endpoint to each pad of B. We attempt to land each pad onto the
+    // existing parallel net. Multi-source over Trace(net_id_b) covers
+    // that for free.
+    let mut vias = 0usize;
+    let mut total_segs = segments;
+    for pad in b_pads {
+        let spoke_grid = grid.snap(pad.center, pad.layer);
+        // If pad already lands on a same-net trace, skip.
+        if matches!(grid.get(spoke_grid), crate::grid::Cell::Trace(n) if n == net_id_b) {
+            continue;
+        }
+        // If the pad is very close to one of the emitted parallel
+        // endpoints (within a couple of grid cells), emit a direct
+        // stub trace instead of running A* — A* sometimes refuses to
+        // start from cells already stamped as `NetPad(self)` because
+        // the pad cell is the search start AND target.
+        let mut nearest: Option<(Point, f64)> = None;
+        for t in &emitted {
+            for ep in [t.start, t.end] {
+                let dx = ep.x.to_mm() - pad.center.x.to_mm();
+                let dy = ep.y.to_mm() - pad.center.y.to_mm();
+                let d = (dx * dx + dy * dy).sqrt();
+                if nearest.is_none_or(|(_, nd)| d < nd) {
+                    nearest = Some((ep, d));
+                }
+            }
+        }
+        if let Some((closest, d)) = nearest {
+            // Two grid cells worth of stub is the threshold for a
+            // direct connection — A* would just emit the same line.
+            if d <= 2.0 * grid.cell_nm as f64 / 1_000_000.0 {
+                let stub = Trace {
+                    id: pcb_core::Id::new(),
+                    layer,
+                    start: closest,
+                    end: pad.center,
+                    width: width_b,
+                    net: net_b.to_string(),
+                };
+                let a = grid.snap(stub.start, stub.layer);
+                let b = grid.snap(stub.end, stub.layer);
+                grid.stamp_trace(a, b, net_id_b, halo_cells);
+                board.add_trace(stub);
+                total_segs += 1;
+                total_len_mm += d;
+                continue;
+            }
+        }
+        // Synthesise a "seed" — pick the closest emitted endpoint as
+        // the start (multi-source A* will also see the Trace cells).
+        let mut best_seed = grid.snap(emitted[0].start, layer);
+        let mut best_d = u64::MAX;
+        for t in &emitted {
+            for ep in [t.start, t.end] {
+                let gp = grid.snap(ep, layer);
+                let dc = u64::from((gp.col - spoke_grid.col).unsigned_abs());
+                let dr = u64::from((gp.row - spoke_grid.row).unsigned_abs());
+                let d = dc + dr;
+                if d < best_d {
+                    best_d = d;
+                    best_seed = gp;
+                }
+            }
+        }
+        let Some(result) = search(
+            grid,
+            best_seed,
+            net_id_b,
+            opts.via_cost,
+            spoke_grid,
+            via_safe_radius,
+            halo_cells,
+            cost_map,
+        ) else {
+            return Err(format!("no end-cap to pad {}", pad.pad_ref));
+        };
+        let (segs, vs, len) = lay_path(
+            board,
+            grid,
+            &result.path,
+            net_b,
+            net_id_b,
+            opts,
+            halo_cells,
+            width_b,
+            Some(pad.center),
+        );
+        total_segs += segs;
+        vias += vs;
+        total_len_mm += len;
+    }
+    Ok((total_segs, vias, total_len_mm))
+}
+
+/// Reorder so any net whose class declares `diff_pair_with = X` is
+/// scheduled IMMEDIATELY after X. The partner has to be in the board's
+/// net set too — otherwise we can't follow what isn't there.
+/// Preserves the relative order of every other net.
+fn reorder_for_diff_pairs(order: Vec<String>, opts: &RouteOptions) -> Vec<String> {
+    let Some(sch) = opts.schematic.as_ref() else {
+        return order;
+    };
+    let present: HashSet<&str> = order.iter().map(String::as_str).collect();
+    // For each net, the partner it depends on (if any).
+    let mut depends_on: HashMap<String, String> = HashMap::new();
+    for n in &order {
+        if let Some(p) = sch.class_for(n).diff_pair_with.as_ref() {
+            if p != n && present.contains(p.as_str()) {
+                depends_on.insert(n.clone(), p.clone());
+            }
+        }
+    }
+    if depends_on.is_empty() {
+        return order;
+    }
+    // Pair declarations are symmetric (A pair=B and B pair=A). To avoid
+    // both halves being treated as followers, break ties by picking
+    // whichever appears FIRST in `order` as the leader, then the other
+    // becomes the follower. Net names that aren't part of any cycle
+    // keep their leader/follower roles as declared.
+    let mut leader_of_follower: HashMap<String, String> = HashMap::new();
+    let order_idx: HashMap<&str, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+    for (b, a) in &depends_on {
+        // If `a` also depends on `b`, this is a symmetric pair → the
+        // earlier one wins as leader.
+        if depends_on.get(a).is_some_and(|x| x == b) {
+            let bi = order_idx.get(b.as_str()).copied().unwrap_or(usize::MAX);
+            let ai = order_idx.get(a.as_str()).copied().unwrap_or(usize::MAX);
+            if ai < bi {
+                // a leads, b follows.
+                leader_of_follower.insert(b.clone(), a.clone());
+            }
+            // else: b is earlier or equal → b leads; skip recording this
+            // (the partner direction `a depends on b` will handle b's
+            // follower role from its own loop iteration).
+        } else {
+            // Asymmetric — `b` depends on `a`, `a` doesn't depend on
+            // `b`. `b` is the follower.
+            leader_of_follower.insert(b.clone(), a.clone());
+        }
+    }
+    if leader_of_follower.is_empty() {
+        return order;
+    }
+    let followers: HashSet<&str> = leader_of_follower.keys().map(String::as_str).collect();
+    let mut followers_of: HashMap<String, Vec<String>> = HashMap::new();
+    for (b, a) in &leader_of_follower {
+        followers_of.entry(a.clone()).or_default().push(b.clone());
+    }
+    let mut out: Vec<String> = Vec::with_capacity(order.len());
+    for n in &order {
+        if followers.contains(n.as_str()) {
+            continue;
+        }
+        out.push(n.clone());
+        if let Some(fs) = followers_of.get(n) {
+            let mut sorted: Vec<&String> = fs.iter().collect();
+            sorted.sort_by_key(|f| order.iter().position(|x| x == *f).unwrap_or(usize::MAX));
+            for f in sorted {
+                out.push(f.clone());
+            }
+        }
+    }
+    out
 }
 
 /// For every footprint pad with a net assignment, record the pad's

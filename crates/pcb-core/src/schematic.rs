@@ -189,7 +189,7 @@ pub struct Net {
 /// override the call-site defaults of the router and DRC; unset
 /// fields fall back to the defaults so a class can override only what
 /// it cares about.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NetClass {
     pub name: String,
     /// Trace width (mm) the router lays for nets in this class.
@@ -230,6 +230,37 @@ pub struct NetClass {
     /// the listed pours. Empty = no pour, route as normal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pour_layers: Vec<CopperLayer>,
+    /// Length-match target for nets in this class. If `Some(L)`, every
+    /// net in the class is post-processed to end up close to L mm.
+    /// Differential pair partners auto-derive their target from each
+    /// other (longer partner's length becomes the shared target).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_length_mm: Option<f64>,
+    /// Tolerance for length match (mm). Default 0.5 mm.
+    #[serde(default = "default_length_tolerance_mm")]
+    pub length_tolerance_mm: f64,
+}
+
+fn default_length_tolerance_mm() -> f64 {
+    0.5
+}
+
+impl Default for NetClass {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            trace_width_mm: None,
+            clearance_mm: None,
+            via_diameter_mm: None,
+            via_drill_mm: None,
+            target_impedance_ohms: None,
+            diff_pair_with: None,
+            diff_gap_mm: None,
+            pour_layers: Vec::new(),
+            target_length_mm: None,
+            length_tolerance_mm: default_length_tolerance_mm(),
+        }
+    }
 }
 
 /// Static default class returned by `Schematic::class_for` when the
@@ -245,6 +276,8 @@ static DEFAULT_NET_CLASS: NetClass = NetClass {
     diff_pair_with: None,
     diff_gap_mm: None,
     pour_layers: Vec::new(),
+    target_length_mm: None,
+    length_tolerance_mm: 0.5,
 };
 
 /// Effective routing rules for one net, with each field resolved to a

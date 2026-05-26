@@ -379,6 +379,30 @@ pub struct Pour {
     /// next render; set to `Solid` to recover the old flood behaviour.
     #[serde(default)]
     pub thermal_relief: ThermalRelief,
+    /// Auto-stitching policy: when set to `Grid`, the router post-pass
+    /// sprinkles vias on this pour's net to tie the top and bottom
+    /// pours together. Defaults to `None` — historical behaviour.
+    #[serde(default)]
+    pub stitching: StitchPolicy,
+}
+
+/// Automatic stitching-via policy for a `Pour`. Stitching vias tie a
+/// same-net pour on the opposite copper layer to this one, so a
+/// ground plane spread across both sides behaves as one electrically.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StitchPolicy {
+    /// No automatic stitching (current behaviour).
+    #[default]
+    None,
+    /// Sprinkle vias on a `pitch_mm` grid inside the pour, skipping
+    /// cells too close to traces, pads, vias, or keepouts. Only fires
+    /// when another `Pour` exists on the OPPOSITE layer for the same
+    /// net.
+    Grid {
+        pitch_mm: f64,
+        clearance_mm: f64,
+    },
 }
 
 /// How a copper pour connects to same-net pads sitting inside it.

@@ -591,12 +591,51 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
             }
         }
         "pour" => {
-            // Two syntaxes:
-            //   pour NET LAYER                 — add pour
-            //   pour relief NET solid          — set thermal relief style
+            // Syntaxes:
+            //   pour NET LAYER                          — add pour
+            //   pour relief NET solid                   — set thermal relief style
             //   pour relief NET spokes [width=N] [gap=N]
-            need_args(line, tokens, 2, "pour NET LAYER | pour relief NET ...")?;
-            if tokens[1] == "relief" {
+            //   pour stitch NET none                    — disable stitching
+            //   pour stitch NET grid [pitch=N] [clearance=N]
+            need_args(line, tokens, 2, "pour NET LAYER | pour relief NET ... | pour stitch NET ...")?;
+            if tokens[1] == "stitch" {
+                need_args(
+                    line,
+                    tokens,
+                    3,
+                    "pour stitch NET (none|grid [pitch=N] [clearance=N])",
+                )?;
+                let net = tokens[2].clone();
+                let policy = tokens[3].as_str();
+                match policy {
+                    "none" => Ok(Cmd {
+                        line,
+                        tool: "pour.stitch".into(),
+                        args: json!({"net": net, "policy": "none"}),
+                    }),
+                    "grid" => {
+                        let mut args = json!({"net": net, "policy": "grid"});
+                        apply_kv(
+                            &mut args,
+                            &tokens[4..],
+                            line,
+                            &[
+                                ("pitch", AttrType::NumInto("pitch_mm")),
+                                ("clearance", AttrType::NumInto("clearance_mm")),
+                            ],
+                        )?;
+                        Ok(Cmd {
+                            line,
+                            tool: "pour.stitch".into(),
+                            args,
+                        })
+                    }
+                    other => Err(ParseError::at(
+                        line,
+                        format!("pour stitch: expected none|grid, got `{other}`"),
+                    )),
+                }
+            } else if tokens[1] == "relief" {
                 need_args(
                     line,
                     tokens,
