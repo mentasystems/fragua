@@ -161,9 +161,9 @@ pub fn suggest_trace_width_for_impedance(z_target: f64, stackup: &LayerStackup) 
     let z = |w: f64| {
         compute_microstrip_z0(
             w,
-            stackup.dielectric_thickness_mm,
-            stackup.dielectric_er,
-            stackup.copper_thickness_mm,
+            stackup.dielectric_thickness_mm(),
+            stackup.dielectric_er(),
+            stackup.copper_thickness_mm(),
         )
     };
     // Narrower traces give HIGHER impedance, so the function is
@@ -343,9 +343,9 @@ fn check_impedance(board: &Board, opts: &DrcOptions, report: &mut DrcReport) {
         let width_mm = class.trace_width_mm.unwrap_or(default_width);
         let z_actual = compute_microstrip_z0(
             width_mm,
-            board.stackup.dielectric_thickness_mm,
-            board.stackup.dielectric_er,
-            board.stackup.copper_thickness_mm,
+            board.stackup.dielectric_thickness_mm(),
+            board.stackup.dielectric_er(),
+            board.stackup.copper_thickness_mm(),
         );
         if z_actual <= 0.0 {
             continue;
@@ -1431,9 +1431,9 @@ mod feature3_tests {
         let w = suggest_trace_width_for_impedance(target, &stackup);
         let z = compute_microstrip_z0(
             w,
-            stackup.dielectric_thickness_mm,
-            stackup.dielectric_er,
-            stackup.copper_thickness_mm,
+            stackup.dielectric_thickness_mm(),
+            stackup.dielectric_er(),
+            stackup.copper_thickness_mm(),
         );
         assert!(
             (z - target).abs() < 0.5,

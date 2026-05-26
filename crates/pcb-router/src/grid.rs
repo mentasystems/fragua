@@ -1,7 +1,8 @@
 //! Uniform-cell occupancy grid used by the Theta* router.
 //!
-//! Two parallel layers (top / bottom). Each cell on each layer is one
-//! of:
+//! N parallel layers (top / bottom plus optional inner layers — set at
+//! `Grid::new` time, defaults to 2 to preserve the pre-Phase-4 router
+//! contract). Each cell on each layer is one of:
 //! - `Free`        — routable.
 //! - `Obstacle`    — never enter (foreign pad, board edge).
 //! - `NetPad(u32)` — entrance point for the named net; obstacle for
@@ -15,7 +16,7 @@
 //! consistently across visibility, cost accumulation, and obstacle
 //! stamping.
 
-use pcb_core::{Board, CopperLayer, Keepout, Length, Point, Rect};
+use pcb_core::{Board, CopperLayer, Keepout, Layer, Length, Point, Rect};
 
 /// Per-cell extra cost layered on top of the grid for negotiated
 /// congestion. A* adds `at(p)` to the step cost when entering `p`, so
@@ -26,6 +27,7 @@ use pcb_core::{Board, CopperLayer, Keepout, Length, Point, Rect};
 pub struct CostMap {
     cols: i32,
     rows: i32,
+    layer_count: u8,
     /// Layer-major: index = layer * cols * rows + r * cols + c.
     extra: Vec<u32>,
 }
@@ -34,7 +36,12 @@ impl CostMap {
     /// Bias for the cell at `p`. Returns 0 for out-of-bounds points so
     /// callers don't need a separate bounds check.
     pub fn at(&self, p: GridPoint) -> u32 {
-        if p.col < 0 || p.row < 0 || p.col >= self.cols || p.row >= self.rows || p.layer >= 2 {
+        if p.col < 0
+            || p.row < 0
+            || p.col >= self.cols
+            || p.row >= self.rows
+            || p.layer >= self.layer_count
+        {
             return 0;
         }
         let idx = (p.layer as usize) * (self.cols * self.rows) as usize
@@ -43,7 +50,7 @@ impl CostMap {
     }
 
     /// Bump every cell inside the inclusive rectangle `[c0..=c1, r0..=r1]`
-    /// on both layers by `amount`, capped at `max`. Out-of-range columns
+    /// on every layer by `amount`, capped at `max`. Out-of-range columns
     /// and rows are silently clipped.
     pub fn bump_box(&mut self, c0: i32, r0: i32, c1: i32, r1: i32, amount: u32, max: u32) {
         let c0 = c0.max(0);
@@ -54,7 +61,7 @@ impl CostMap {
             return;
         }
         let stride = (self.cols * self.rows) as usize;
-        for layer in 0..2usize {
+        for layer in 0..self.layer_count as usize {
             for r in r0..=r1 {
                 let row_base = layer * stride + (r * self.cols) as usize;
                 for c in c0..=c1 {
@@ -88,31 +95,47 @@ pub struct Grid {
     pub cell_nm: i64,
     pub cols: i32,
     pub rows: i32,
-    /// Two layers, row-major — index = layer * cols * rows + r * cols + c.
+    /// Number of copper layers the grid was sized for. Always ≥ 2;
+    /// defaults to 2 via `Grid::new` for pre-Phase-4 callers.
+    pub layer_count: u8,
+    /// `layer_count` layers, row-major — index = layer * cols * rows + r * cols + c.
     cells: Vec<Cell>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GridPoint {
-    pub layer: u8, // 0 = top, 1 = bottom
+    pub layer: u8, // 0 = top, layer_count - 1 = bottom
     pub col: i32,
     pub row: i32,
 }
 
 impl GridPoint {
+    /// Convert back to the model `Layer`. Identity mapping.
     pub fn copper_layer(self) -> CopperLayer {
-        match self.layer {
-            0 => CopperLayer::Top,
-            _ => CopperLayer::Bottom,
-        }
+        Layer { index: self.layer }
     }
 }
 
 impl Grid {
-    /// Build a grid covering the routing region. Caller chooses cell
-    /// pitch — common choice is 0.25 mm so that 0.2 mm traces with
-    /// 0.2 mm clearance comfortably fit per cell.
+    /// Build a 2-layer grid (legacy default). Use `with_layers` for an
+    /// N-layer routing surface.
+    #[allow(dead_code)]
     pub fn new(region: Rect, cell: Length) -> Self {
+        Self::with_layers(region, cell, 2)
+    }
+
+    /// Build a grid covering the routing region with `layer_count`
+    /// copper layers. Caller chooses cell pitch — common choice is
+    /// 0.25 mm so that 0.2 mm traces with 0.2 mm clearance comfortably
+    /// fit per cell. `layer_count` is clamped to `[2, 8]` and aligned
+    /// to an even number (manufacturing constraint).
+    pub fn with_layers(region: Rect, cell: Length, layer_count: u8) -> Self {
+        let layer_count = layer_count.clamp(2, 8);
+        let layer_count = if layer_count.is_multiple_of(2) {
+            layer_count
+        } else {
+            layer_count + 1
+        };
         let cell_nm = cell.0.max(1);
         let w_nm = region.width().0;
         let h_nm = region.height().0;
@@ -123,7 +146,8 @@ impl Grid {
             cell_nm,
             cols,
             rows,
-            cells: vec![Cell::Free; (cols * rows * 2) as usize],
+            layer_count,
+            cells: vec![Cell::Free; (cols * rows * i32::from(layer_count)) as usize],
         }
     }
 
@@ -133,7 +157,11 @@ impl Grid {
     }
 
     pub fn in_bounds(&self, p: GridPoint) -> bool {
-        p.col >= 0 && p.col < self.cols && p.row >= 0 && p.row < self.rows && p.layer < 2
+        p.col >= 0
+            && p.col < self.cols
+            && p.row >= 0
+            && p.row < self.rows
+            && p.layer < self.layer_count
     }
 
     pub fn get(&self, p: GridPoint) -> Cell {
@@ -154,11 +182,18 @@ impl Grid {
     pub fn snap(&self, p: Point, layer: CopperLayer) -> GridPoint {
         let dx = p.x.0 - self.origin_nm.0;
         let dy = p.y.0 - self.origin_nm.1;
+        // Multi-layer mapping: `CopperLayer::Bottom` (index 1) maps to
+        // the BOTTOM of the actual stackup, not literal index 1. The
+        // router/grid mostly works in terms of `Layer { index }` now;
+        // this helper is for legacy 2-layer call sites.
+        let raw_idx = layer.index;
+        let actual = if raw_idx == 1 && self.layer_count > 2 {
+            self.layer_count - 1
+        } else {
+            raw_idx
+        };
         GridPoint {
-            layer: match layer {
-                CopperLayer::Top => 0,
-                CopperLayer::Bottom => 1,
-            },
+            layer: actual.min(self.layer_count - 1),
             col: (dx + self.cell_nm / 2) as i32 / self.cell_nm as i32,
             row: (dy + self.cell_nm / 2) as i32 / self.cell_nm as i32,
         }
@@ -182,17 +217,27 @@ impl Grid {
     /// (any pad with `drill`) the body is stamped on both layers
     /// because the package physically straddles both.
     pub fn stamp_bodies(&mut self, board: &Board) {
+        let bottom = self.layer_count - 1;
         for fp in board.footprints_in_order() {
             let Some(bounds) = fp.bounds() else { continue };
             let is_th = fp.pads.iter().any(|p| p.drill.is_some());
-            let primary: u8 = match fp.layer {
-                CopperLayer::Top => 0,
-                CopperLayer::Bottom => 1,
+            // Map the model layer to a grid-layer index. Pre-Phase-4
+            // boards only use Top/Bottom; on a 4-layer grid Bottom
+            // still means "the very bottom".
+            let primary: u8 = if fp.layer.is_top() {
+                0
+            } else if fp.layer.index == 1 {
+                bottom
+            } else {
+                fp.layer.index.min(bottom)
             };
-            let layers: &[u8] = if is_th { &[0, 1] } else { &[primary] };
+            // TH pads punch every copper layer they straddle. Since
+            // we currently only model through-hole vias top↔bottom,
+            // stamp the outer two for TH parts.
+            let layers: Vec<u8> = if is_th { vec![0, bottom] } else { vec![primary] };
             let cmin = self.snap(bounds.min, fp.layer);
             let cmax = self.snap(bounds.max, fp.layer);
-            for &layer in layers {
+            for &layer in &layers {
                 for r in cmin.row..=cmax.row {
                     for c in cmin.col..=cmax.col {
                         let gp = GridPoint { layer, col: c, row: r };
@@ -217,12 +262,16 @@ impl Grid {
         net_id_of: &dyn Fn(&str) -> Option<u32>,
         clearance: Length,
     ) {
+        let bottom = self.layer_count - 1;
         for fp in board.footprints_in_order() {
             for pad in &fp.pads {
                 let is_th = pad.drill.is_some();
-                let primary_layer = match pad.layer {
-                    CopperLayer::Top => 0,
-                    CopperLayer::Bottom => 1,
+                let primary_layer: u8 = if pad.layer.is_top() {
+                    0
+                } else if pad.layer.index == 1 {
+                    bottom
+                } else {
+                    pad.layer.index.min(bottom)
                 };
                 let center = fp.pad_world_center(pad);
                 let (pw, ph) = fp.pad_world_size(pad);
@@ -238,11 +287,13 @@ impl Grid {
                     (Some(id), false) => Cell::NetPad(id),
                     (None, _) => Cell::Obstacle,
                 };
-                // TH pads punch both layers — stamp the copper region on
-                // both so the via-safe check sees the drilled cells from
-                // either side of a layer flip.
-                let layers: &[u8] = if is_th { &[0, 1] } else { &[primary_layer] };
-                for &layer in layers {
+                // TH pads punch every copper layer — stamp the copper
+                // region on the outer two (vias still only go
+                // top↔bottom in this iteration; inner-layer landing
+                // pads are unmodelled) so the via-safe check sees the
+                // drilled cells from either side of a layer flip.
+                let layers: Vec<u8> = if is_th { vec![0, bottom] } else { vec![primary_layer] };
+                for &layer in &layers {
                     for r in cmin.row..=cmax.row {
                         for c in cmin.col..=cmax.col {
                             let gp = GridPoint { layer, col: c, row: r };
@@ -268,14 +319,20 @@ impl Grid {
             if kp.polygon.len() < 3 {
                 continue;
             }
+            let bottom = self.layer_count - 1;
             let layers: Vec<u8> = if kp.layers.is_empty() {
-                vec![0, 1]
+                (0..self.layer_count).collect()
             } else {
                 kp.layers
                     .iter()
-                    .map(|l| match l {
-                        CopperLayer::Top => 0,
-                        CopperLayer::Bottom => 1,
+                    .map(|l| {
+                        if l.is_top() {
+                            0
+                        } else if l.index == 1 {
+                            bottom
+                        } else {
+                            l.index.min(bottom)
+                        }
                     })
                     .collect()
             };
@@ -376,12 +433,12 @@ impl Grid {
         sum
     }
 
-    /// Mark a via and its halo on both layers. Vias punch through, so
-    /// they need clearance on copper top *and* bottom; otherwise a
-    /// trace on the opposite layer might come right up against the
-    /// via pad.
+    /// Mark a via and its halo on every copper layer. Vias punch
+    /// through (top↔bottom only in this iteration), so they need
+    /// clearance on every copper layer; otherwise a trace on the
+    /// opposite layer might come right up against the via pad.
     pub fn stamp_via(&mut self, p: GridPoint, net: u32, halo: i32) {
-        for layer in 0..2u8 {
+        for layer in 0..self.layer_count {
             self.stamp_cell_with_halo(layer, p.col, p.row, net, halo);
         }
     }
@@ -392,7 +449,8 @@ impl Grid {
         CostMap {
             cols: self.cols,
             rows: self.rows,
-            extra: vec![0; (self.cols * self.rows * 2) as usize],
+            layer_count: self.layer_count,
+            extra: vec![0; (self.cols * self.rows * i32::from(self.layer_count)) as usize],
         }
     }
 

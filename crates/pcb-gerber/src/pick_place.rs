@@ -2,15 +2,12 @@
 
 use std::io::{self, Write};
 
-use pcb_core::{Board, CopperLayer};
+use pcb_core::Board;
 
 pub fn write(board: &Board, w: &mut impl Write) -> io::Result<()> {
     writeln!(w, "Reference,Value,Footprint,X,Y,Rotation,Side")?;
     for fp in board.footprints_in_order() {
-        let side = match fp.layer {
-            CopperLayer::Top => "top",
-            CopperLayer::Bottom => "bottom",
-        };
+        let side = if fp.layer.is_top() { "top" } else { "bottom" };
         writeln!(
             w,
             "{},{},{},{:.4},{:.4},{:.2},{}",

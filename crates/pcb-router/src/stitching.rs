@@ -21,10 +21,14 @@ pub fn add_stitching_vias(board: &mut Board, opts: &RouteOptions) -> usize {
         if pitch_mm <= 0.0 {
             continue;
         }
-        // Require a same-net pour on the OPPOSITE layer.
-        let opposite = match pour.layer {
-            CopperLayer::Top => CopperLayer::Bottom,
-            CopperLayer::Bottom => CopperLayer::Top,
+        // Require a same-net pour on the OPPOSITE outer layer. With
+        // multi-layer stackups we'd ideally consult board.stackup;
+        // for now we keep the legacy top↔bottom flip since vias still
+        // punch top↔bottom only.
+        let opposite: CopperLayer = if pour.layer.is_top() {
+            CopperLayer::Bottom
+        } else {
+            CopperLayer::Top
         };
         if !board
             .pours

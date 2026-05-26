@@ -23,12 +23,20 @@ pub fn write_fab_pack(
 
     let stem = sanitize(project_name);
 
-    paths.push(write_to(out_dir, &format!("{stem}-F_Cu.gbr"), |w| {
-        gerber::write_copper(board, Side::Top, w)
-    })?);
-    paths.push(write_to(out_dir, &format!("{stem}-B_Cu.gbr"), |w| {
-        gerber::write_copper(board, Side::Bottom, w)
-    })?);
+    // Multi-layer: one copper file per stackup layer. The filename
+    // uses the layer's `name` (sanitised) so fab portals auto-detect
+    // the layer order from the file list. Pre-Phase-4 2-layer boards
+    // collapse to the historical "{stem}-F_Cu.gbr" + "{stem}-B_Cu.gbr"
+    // pair because the default stackup names ARE "F.Cu" / "B.Cu".
+    for (idx, layer_spec) in board.stackup.layers.iter().enumerate() {
+        let sanitized = sanitize_layer_name(&layer_spec.name);
+        let layer = pcb_core::Layer { index: idx as u8 };
+        paths.push(write_to(
+            out_dir,
+            &format!("{stem}-{sanitized}.gbr"),
+            |w| gerber::write_copper_layer(board, layer, w),
+        )?);
+    }
     paths.push(write_to(out_dir, &format!("{stem}-F_Mask.gbr"), |w| {
         gerber::write_mask(board, Side::Top, w)
     })?);
@@ -71,6 +79,26 @@ where
         .map_err(|e| io::Error::other(format!("flush {name}: {e}")))?
         .sync_all()?;
     Ok(path)
+}
+
+/// Sanitise a layer name for use as a Gerber filename. Replaces dots
+/// (KiCad uses `F.Cu` but the historical filename pattern is `F_Cu`)
+/// and any non-filename-safe char with `_`. The result keeps the
+/// pre-Phase-4 stems for 2-layer boards: "F.Cu" → "F_Cu", "B.Cu" →
+/// "B_Cu", so existing fab portals see the same filenames.
+fn sanitize_layer_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push_str("Layer");
+    }
+    out
 }
 
 /// Replace anything outside `[A-Za-z0-9._-]` with `_`. Fab portals

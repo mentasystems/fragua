@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 
 use pcb_core::{
-    hershey, silk_clip, Board, CopperLayer, FootprintSilk, Length, Point, Rect, SilkAnchor,
+    hershey, silk_clip, Board, CopperLayer, FootprintSilk, Layer, Length, Point, Rect, SilkAnchor,
     SilkLayer,
 };
 
@@ -195,6 +195,100 @@ fn footer(w: &mut impl Write) -> io::Result<()> {
 /// route) are filtered out before flashing — those would otherwise
 /// appear in the fab files as dangling copper that the fab house
 /// would manufacture for no reason.
+/// Multi-layer entry point: write the copper layer at `index` in the
+/// board's stackup. For 2-layer boards this is a 1:1 wrapper over
+/// `write_copper(Side::Top|Bottom)`; for 4/6/8-layer boards each call
+/// emits one of the inner signal/plane layers using its stackup name.
+pub fn write_copper_layer(board: &Board, layer: Layer, w: &mut impl Write) -> io::Result<()> {
+    if layer.is_top() {
+        return write_copper(board, Side::Top, w);
+    }
+    let bottom = board.stackup.layer_count().saturating_sub(1);
+    if layer.index == bottom {
+        return write_copper(board, Side::Bottom, w);
+    }
+    // Inner layer: emit a copper file scoped to that layer only.
+    // Reuses the same machinery as `write_copper` but with a custom
+    // header label sourced from the stackup so the fab portal can
+    // pick it up.
+    let label = board
+        .stackup
+        .layers
+        .get(layer.index as usize)
+        .map_or_else(|| format!("In{}.Cu", layer.index), |l| l.name.clone());
+    write_copper_inner_layer(board, layer, &label, w)
+}
+
+fn write_copper_inner_layer(
+    board: &Board,
+    target_layer: Layer,
+    label: &str,
+    w: &mut impl Write,
+) -> io::Result<()> {
+    write_header(w, label)?;
+    // Pre-collect what we need.
+    let mut table = Table::default();
+    // Pads on this layer.
+    for fp in board.footprints_in_order() {
+        for pad in &fp.pads {
+            if pad.layer != target_layer {
+                continue;
+            }
+            let (pw, ph) = fp.pad_world_size(pad);
+            table.intern(Aperture::Rect { w: pw, h: ph });
+        }
+    }
+    // Traces on this layer.
+    let orphans = board.orphan_trace_ids();
+    for t in &board.traces {
+        if t.layer != target_layer || orphans.contains(&t.id) {
+            continue;
+        }
+        table.intern(Aperture::Round { d: t.width });
+    }
+    // Vias punch through, so include their copper pad on every layer.
+    let orphan_vias = board.orphan_via_ids();
+    for v in &board.vias {
+        if orphan_vias.contains(&v.id) {
+            continue;
+        }
+        table.intern(Aperture::Round { d: v.diameter });
+    }
+    write_apertures(w, &table)?;
+    // Pads.
+    for fp in board.footprints_in_order() {
+        for pad in &fp.pads {
+            if pad.layer != target_layer {
+                continue;
+            }
+            let (pw, ph) = fp.pad_world_size(pad);
+            let id = table.intern(Aperture::Rect { w: pw, h: ph });
+            select(w, id)?;
+            flash(w, fp.pad_world_center(pad))?;
+        }
+    }
+    // Traces.
+    for t in &board.traces {
+        if t.layer != target_layer || orphans.contains(&t.id) {
+            continue;
+        }
+        let id = table.intern(Aperture::Round { d: t.width });
+        select(w, id)?;
+        move_to(w, t.start)?;
+        line_to(w, t.end)?;
+    }
+    // Vias copper.
+    for v in &board.vias {
+        if orphan_vias.contains(&v.id) {
+            continue;
+        }
+        let id = table.intern(Aperture::Round { d: v.diameter });
+        select(w, id)?;
+        flash(w, v.position)?;
+    }
+    footer(w)
+}
+
 pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result<()> {
     write_header(w, side.copper_label())?;
     let layer = side.copper_layer();
@@ -608,9 +702,10 @@ pub fn write_silk(board: &Board, side: Side, w: &mut impl Write) -> io::Result<(
 
         if fp.silk.is_empty() {
             // Default `{REF}` label, matching the renderer.
-            let default_layer = match fp.layer {
-                CopperLayer::Top => SilkLayer::Top,
-                CopperLayer::Bottom => SilkLayer::Bottom,
+            let default_layer = if fp.layer.is_top() {
+                SilkLayer::Top
+            } else {
+                SilkLayer::Bottom
             };
             if default_layer != layer {
                 continue;

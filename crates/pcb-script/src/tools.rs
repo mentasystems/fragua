@@ -413,6 +413,10 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "sheet.bind" => tool_sheet_bind(project, args),
         "stackup.show" => tool_stackup_show(project),
         "stackup.set" => tool_stackup_set(project, args),
+        "layer.list" => tool_layer_list(project),
+        "layer.add" => tool_layer_add(project, args),
+        "layer.remove" => tool_layer_remove(project, args),
+        "layer.rename" => tool_layer_rename(project, args),
         "impedance.suggest" => tool_impedance_suggest(project, args),
         "fab.profile" => tool_fab_profile(project, args),
         "fab.profile_clear" => tool_fab_profile_clear(project),
@@ -755,18 +759,31 @@ struct PadInput {
     drill_mm: Option<f64>,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy)]
-#[serde(rename_all = "lowercase")]
+/// Multi-layer-friendly layer selector. Pre-Phase-4 callers passed
+/// `"top"` or `"bottom"` (lowercase), which now alias to layer index 0
+/// and `bottom_of(stackup)`. Inner layers can be addressed by either
+/// the stackup's `name` string (e.g. `"In1.Cu"`) or by 0-based index.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
 enum LayerInput {
-    Top,
-    Bottom,
+    Named(String),
+    Index(u8),
 }
 
 impl From<LayerInput> for CopperLayer {
     fn from(value: LayerInput) -> Self {
         match value {
-            LayerInput::Top => Self::Top,
-            LayerInput::Bottom => Self::Bottom,
+            LayerInput::Index(n) => CopperLayer { index: n },
+            LayerInput::Named(s) => match s.to_ascii_lowercase().as_str() {
+                "top" | "f.cu" => CopperLayer::Top,
+                "bottom" | "b.cu" => CopperLayer::Bottom,
+                // Inner layer alias "in1" => index 2, "in2" => 3, ...
+                inner if inner.starts_with("in") => {
+                    let n: u8 = inner[2..].parse().unwrap_or(1);
+                    CopperLayer { index: n + 1 }
+                }
+                _ => CopperLayer::Top,
+            },
         }
     }
 }
@@ -774,8 +791,17 @@ impl From<LayerInput> for CopperLayer {
 impl From<LayerInput> for SilkLayer {
     fn from(value: LayerInput) -> Self {
         match value {
-            LayerInput::Top => Self::Top,
-            LayerInput::Bottom => Self::Bottom,
+            LayerInput::Index(n) => {
+                if n == 0 {
+                    Self::Top
+                } else {
+                    Self::Bottom
+                }
+            }
+            LayerInput::Named(s) => match s.to_ascii_lowercase().as_str() {
+                "top" | "f.silks" => Self::Top,
+                _ => Self::Bottom,
+            },
         }
     }
 }
@@ -803,7 +829,7 @@ fn default_anchor_middle() -> AnchorInput {
 }
 
 fn default_layer() -> LayerInput {
-    LayerInput::Top
+    LayerInput::Named("top".into())
 }
 
 fn tool_placement_add(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -918,7 +944,7 @@ fn tool_view_snapshot(project: &Project) -> Result<Value, ToolError> {
         .map(|t| json!({
             "id": t.id.0.to_string(),
             "net": t.net,
-            "layer": match t.layer { pcb_core::CopperLayer::Top => "top", pcb_core::CopperLayer::Bottom => "bottom" },
+            "layer": if t.layer.is_top() { "top" } else { "bottom" },
             "x1_mm": t.start.x.to_mm(), "y1_mm": t.start.y.to_mm(),
             "x2_mm": t.end.x.to_mm(),   "y2_mm": t.end.y.to_mm(),
             "width_mm": t.width.to_mm(),
@@ -1464,7 +1490,7 @@ fn tool_palette_add(project: &Project, args: &Value) -> Result<Value, ToolError>
                             Length::from_mm(pad_plan.w_mm),
                             Length::from_mm(pad_plan.h_mm),
                         ),
-                        layer: pad_plan.layer.into(),
+                        layer: pad_plan.layer.clone().into(),
                         net,
                         drill: pad_plan.drill_mm.map(Length::from_mm),
                     }
@@ -2112,7 +2138,7 @@ fn tool_palette_add_from_library(project: &Project, args: &Value) -> Result<Valu
                     name: p.name.clone(),
                     offset: Point::new(Length::from_mm(x_mm), Length::from_mm(y_mm)),
                     size: (Length::from_mm(w_mm), Length::from_mm(h_mm)),
-                    layer: input.layer.into(),
+                    layer: input.layer.clone().into(),
                     net,
                     drill: p.drill_mm.map(Length::from_mm),
                 }
@@ -2145,7 +2171,7 @@ fn tool_palette_add_from_library(project: &Project, args: &Value) -> Result<Valu
         library: format!("library:{}", input.key),
         position: Point::new(Length::from_mm(-100.0), Length::from_mm(-100.0)),
         rotation: input.rotation.unwrap_or(entry.default_rotation_deg),
-        layer: input.layer.into(),
+        layer: input.layer.clone().into(),
         pads,
         key: key_field,
         description: description_field,
@@ -2500,17 +2526,18 @@ struct AddTraceInput {
 fn tool_route_add_trace(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: AddTraceInput = serde_json::from_value(args.clone())
         .map_err(|e| ToolError::invalid_params(format!("route.add_trace: {e}")))?;
+    let layer: CopperLayer = input.layer.clone().into();
     let id = project.add_trace(Trace {
         id: pcb_core::Id::new(),
-        layer: input.layer.into(),
+        layer,
         start: Point::new(Length::from_mm(input.x1_mm), Length::from_mm(input.y1_mm)),
         end: Point::new(Length::from_mm(input.x2_mm), Length::from_mm(input.y2_mm)),
         width: Length::from_mm(input.width_mm),
         net: input.net.clone(),
     });
     Ok(text_result(format!(
-        "trace {} on {:?} ({})",
-        id.0, input.layer, input.net
+        "trace {} on {} ({})",
+        id.0, layer_to_str(layer), input.net
     ))
     .with_data(json!({"id": id.0.to_string()})))
 }
@@ -2844,9 +2871,23 @@ fn layer_to_str_silk(layer: SilkLayer) -> &'static str {
 }
 
 fn layer_to_str(layer: CopperLayer) -> &'static str {
-    match layer {
-        CopperLayer::Top => "top",
-        CopperLayer::Bottom => "bottom",
+    // Multi-layer: keep the legacy "top" / "bottom" labels for outer
+    // layers (the only ones today's UI knows about). Inner layers
+    // become "in1", "in2", etc.
+    if layer.is_top() {
+        "top"
+    } else if layer.index == 1 {
+        "bottom"
+    } else {
+        match layer.index {
+            2 => "in1",
+            3 => "in2",
+            4 => "in3",
+            5 => "in4",
+            6 => "in5",
+            7 => "in6",
+            _ => "inner",
+        }
     }
 }
 
@@ -3799,22 +3840,46 @@ fn tool_sheet_bind(project: &Project, args: &Value) -> Result<Value, ToolError> 
 
 fn tool_stackup_show(project: &Project) -> Result<Value, ToolError> {
     let snap = project.read();
-    let s = snap.board().stackup;
+    let s = snap.board().stackup.clone();
     drop(snap);
+    let layers_json: Vec<Value> = s
+        .layers
+        .iter()
+        .map(|l| {
+            json!({
+                "name": l.name,
+                "kind": match l.kind {
+                    pcb_core::LayerKind::Signal => "signal",
+                    pcb_core::LayerKind::Plane => "plane",
+                    pcb_core::LayerKind::Mixed => "mixed",
+                },
+                "copper_thickness_mm": l.copper_thickness_mm,
+            })
+        })
+        .collect();
+    let dielectrics_json: Vec<Value> = s
+        .dielectrics
+        .iter()
+        .map(|d| json!({ "thickness_mm": d.thickness_mm, "er": d.er }))
+        .collect();
     let text = format!(
-        "stackup: copper {:.3} mm, dielectric {:.3} mm (Er {:.2}), mask {:.3} mm (Er {:.2})",
-        s.copper_thickness_mm,
-        s.dielectric_thickness_mm,
-        s.dielectric_er,
+        "stackup: {n} layer(s), copper {:.3} mm, dielectric {:.3} mm (Er {:.2}), mask {:.3} mm (Er {:.2})",
+        s.copper_thickness_mm(),
+        s.dielectric_thickness_mm(),
+        s.dielectric_er(),
         s.soldermask_thickness_mm,
         s.soldermask_er,
+        n = s.layers.len(),
     );
     Ok(text_result(text).with_data(json!({
-        "copper_thickness_mm": s.copper_thickness_mm,
-        "dielectric_thickness_mm": s.dielectric_thickness_mm,
-        "dielectric_er": s.dielectric_er,
+        "copper_thickness_mm": s.copper_thickness_mm(),
+        "dielectric_thickness_mm": s.dielectric_thickness_mm(),
+        "dielectric_er": s.dielectric_er(),
         "soldermask_thickness_mm": s.soldermask_thickness_mm,
         "soldermask_er": s.soldermask_er,
+        "layer_count": s.layers.len(),
+        "layers": layers_json,
+        "dielectrics": dielectrics_json,
     })))
 }
 
@@ -3836,14 +3901,30 @@ fn tool_stackup_set(project: &Project, args: &Value) -> Result<Value, ToolError>
     let input: StackupSetInput = serde_json::from_value(args.clone())
         .map_err(|e| ToolError::invalid_params(format!("stackup.set: {e}")))?;
     project.update_stackup(|s| {
+        // Multi-layer model: the legacy "single copper thickness" maps
+        // to every layer; the legacy "single dielectric" maps to every
+        // slab. Phase-4 boards that want per-layer control should use
+        // the `layer add` verbs instead.
         if let Some(v) = input.copper_thickness_mm {
-            s.copper_thickness_mm = v;
+            for l in &mut s.layers {
+                l.copper_thickness_mm = v;
+            }
         }
         if let Some(v) = input.dielectric_thickness_mm {
-            s.dielectric_thickness_mm = v;
+            // Spread the requested total evenly across all slabs.
+            let per = if s.dielectrics.is_empty() {
+                v
+            } else {
+                v / s.dielectrics.len() as f64
+            };
+            for d in &mut s.dielectrics {
+                d.thickness_mm = per;
+            }
         }
         if let Some(v) = input.dielectric_er {
-            s.dielectric_er = v;
+            for d in &mut s.dielectrics {
+                d.er = v;
+            }
         }
         if let Some(v) = input.soldermask_thickness_mm {
             s.soldermask_thickness_mm = v;
@@ -3865,18 +3946,203 @@ struct ImpedanceSuggestInput {
     target_ohms: f64,
 }
 
+// === Phase 4: multi-layer stackup verbs ===
+
+fn tool_layer_list(project: &Project) -> Result<Value, ToolError> {
+    let snap = project.read();
+    let s = snap.board().stackup.clone();
+    drop(snap);
+    let mut lines = Vec::with_capacity(s.layers.len());
+    let layers_json: Vec<Value> = s
+        .layers
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let kind = match l.kind {
+                pcb_core::LayerKind::Signal => "signal",
+                pcb_core::LayerKind::Plane => "plane",
+                pcb_core::LayerKind::Mixed => "mixed",
+            };
+            lines.push(format!(
+                "  [{i}] {name} ({kind}, {th:.3} mm)",
+                name = l.name,
+                kind = kind,
+                th = l.copper_thickness_mm,
+            ));
+            json!({
+                "index": i,
+                "name": l.name,
+                "kind": kind,
+                "copper_thickness_mm": l.copper_thickness_mm,
+            })
+        })
+        .collect();
+    let text = format!("stackup: {} layer(s)\n{}", s.layers.len(), lines.join("\n"));
+    Ok(text_result(text).with_data(json!({
+        "layer_count": s.layers.len(),
+        "layers": layers_json,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct LayerAddInput {
+    name: String,
+    #[serde(default = "default_signal_kind")]
+    kind: String,
+    #[serde(default)]
+    thickness_mm: Option<f64>,
+}
+
+fn default_signal_kind() -> String {
+    "signal".into()
+}
+
+fn parse_layer_kind(s: &str) -> Result<pcb_core::LayerKind, ToolError> {
+    match s.to_ascii_lowercase().as_str() {
+        "signal" => Ok(pcb_core::LayerKind::Signal),
+        "plane" => Ok(pcb_core::LayerKind::Plane),
+        "mixed" => Ok(pcb_core::LayerKind::Mixed),
+        other => Err(ToolError::invalid_params(format!(
+            "layer.add: kind must be signal|plane|mixed, got `{other}`"
+        ))),
+    }
+}
+
+fn tool_layer_add(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: LayerAddInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("layer.add: {e}")))?;
+    let kind = parse_layer_kind(&input.kind)?;
+    let thickness = input.thickness_mm.unwrap_or(0.035);
+    let name = input.name.clone();
+    project.update_stackup(|s| {
+        // Default new dielectric slab: average of existing slabs, or
+        // the FR-4 default if there are none.
+        let new_slab = pcb_core::Dielectric {
+            thickness_mm: if s.dielectrics.is_empty() {
+                1.5
+            } else {
+                s.dielectrics.iter().map(|d| d.thickness_mm).sum::<f64>()
+                    / s.dielectrics.len() as f64
+            },
+            er: if s.dielectrics.is_empty() {
+                4.5
+            } else {
+                s.dielectrics.iter().map(|d| d.er).sum::<f64>() / s.dielectrics.len() as f64
+            },
+        };
+        s.push_layer(
+            pcb_core::LayerSpec {
+                name: name.clone(),
+                kind,
+                copper_thickness_mm: thickness,
+            },
+            new_slab,
+        );
+    });
+    project.log(ActivityLevel::Info, "layer.add");
+    Ok(text_result(format!("added layer `{name}`")).with_data(json!({ "name": input.name })))
+}
+
+#[derive(Debug, Deserialize)]
+struct LayerNameInput {
+    name: String,
+}
+
+fn tool_layer_remove(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: LayerNameInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("layer.remove: {e}")))?;
+    // Refuse if any copper item references the layer.
+    let snap = project.read();
+    let board = snap.board();
+    let Some(target) = board.stackup.find_by_name(&input.name) else {
+        return Err(ToolError::invalid_params(format!(
+            "layer.remove: no layer named `{}`",
+            input.name
+        )));
+    };
+    let mut uses = 0usize;
+    for fp in board.footprints_in_order() {
+        if fp.layer == target {
+            uses += 1;
+        }
+        for pad in &fp.pads {
+            if pad.layer == target {
+                uses += 1;
+            }
+        }
+    }
+    for t in &board.traces {
+        if t.layer == target {
+            uses += 1;
+        }
+    }
+    drop(snap);
+    if uses > 0 {
+        return Err(ToolError::invalid_params(format!(
+            "layer.remove: {uses} item(s) still on layer `{}`",
+            input.name
+        )));
+    }
+    let mut removed = false;
+    let name_for_closure = input.name.clone();
+    project.update_stackup(|s| {
+        removed = s.remove_named(&name_for_closure);
+    });
+    if !removed {
+        return Err(ToolError::invalid_params(format!(
+            "layer.remove: refused to remove `{}` (would leave fewer than 2 layers)",
+            input.name
+        )));
+    }
+    project.log(ActivityLevel::Info, "layer.remove");
+    Ok(text_result(format!("removed layer `{}`", input.name))
+        .with_data(json!({ "name": input.name })))
+}
+
+#[derive(Debug, Deserialize)]
+struct LayerRenameInput {
+    old: String,
+    new: String,
+}
+
+fn tool_layer_rename(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: LayerRenameInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("layer.rename: {e}")))?;
+    let mut renamed = false;
+    let old_for_closure = input.old.clone();
+    let new_for_closure = input.new.clone();
+    project.update_stackup(|s| {
+        for l in &mut s.layers {
+            if l.name == old_for_closure {
+                l.name.clone_from(&new_for_closure);
+                renamed = true;
+                break;
+            }
+        }
+    });
+    if !renamed {
+        return Err(ToolError::invalid_params(format!(
+            "layer.rename: no layer named `{}`",
+            input.old
+        )));
+    }
+    project.log(ActivityLevel::Info, "layer.rename");
+    Ok(text_result(format!("renamed `{}` → `{}`", input.old, input.new))
+        .with_data(json!({ "old": input.old, "new": input.new })))
+}
+
 fn tool_impedance_suggest(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: ImpedanceSuggestInput = serde_json::from_value(args.clone())
         .map_err(|e| ToolError::invalid_params(format!("impedance.suggest: {e}")))?;
     let snap = project.read();
-    let stackup = snap.board().stackup;
+    let stackup = snap.board().stackup.clone();
     drop(snap);
     let w = pcb_drc::suggest_trace_width_for_impedance(input.target_ohms, &stackup);
     let z = pcb_drc::compute_microstrip_z0(
         w,
-        stackup.dielectric_thickness_mm,
-        stackup.dielectric_er,
-        stackup.copper_thickness_mm,
+        stackup.dielectric_thickness_mm(),
+        stackup.dielectric_er(),
+        stackup.copper_thickness_mm(),
     );
     let label = input.net.as_deref().unwrap_or("(unspecified)");
     Ok(text_result(format!(

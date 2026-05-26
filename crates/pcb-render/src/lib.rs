@@ -17,7 +17,7 @@ use std::fmt::Write;
 use std::collections::HashMap;
 
 use pcb_core::{
-    hershey, silk_clip, Board, CopperLayer, Footprint, FootprintSilk, Length, Pad, PlacementMargin,
+    hershey, silk_clip, Board, Footprint, FootprintSilk, Layer, Length, Pad, PlacementMargin,
     Point, Rect, SilkAnchor, SilkLayer, SilkText, Trace, Via,
 };
 
@@ -107,12 +107,17 @@ pub fn render_svg_with_margins(board: &Board, margins: &PlacementMarginMap) -> S
     // not pollute the visual.
     let orphans = board.orphan_trace_ids();
     let orphan_vias = board.orphan_via_ids();
-    for trace in board
-        .traces
-        .iter()
-        .filter(|t| t.layer == CopperLayer::Bottom && !orphans.contains(&t.id))
-    {
-        write_trace(&mut svg, trace);
+    // Multi-layer rendering: walk the stackup BOTTOM → TOP so traces
+    // on higher (smaller-index) layers visually win at crossings. On
+    // a 2-layer board this collapses to "bottom then top" — the
+    // pre-Phase-4 behaviour.
+    let stackup_count = board.stackup.layer_count();
+    for idx in (1..stackup_count).rev() {
+        for trace in board.traces.iter().filter(|t| {
+            t.layer.index == idx && !orphans.contains(&t.id)
+        }) {
+            write_trace(&mut svg, trace);
+        }
     }
     // Ratsnest BELOW footprints so the labels stay readable.
     write_ratsnest(&mut svg, board);
@@ -120,10 +125,11 @@ pub fn render_svg_with_margins(board: &Board, margins: &PlacementMarginMap) -> S
         let margin = footprint_margin(fp, margins);
         write_footprint(&mut svg, fp, &board.pours, margin);
     }
+    // Top traces drawn last so they sit visually on top.
     for trace in board
         .traces
         .iter()
-        .filter(|t| t.layer == CopperLayer::Top && !orphans.contains(&t.id))
+        .filter(|t| t.layer.is_top() && !orphans.contains(&t.id))
     {
         write_trace(&mut svg, trace);
     }
@@ -204,9 +210,10 @@ fn write_footprint_silk(svg: &mut String, fp: &Footprint, side: SilkLayer, outli
         // Default: a single `{REF}` label above the footprint body
         // bbox on TOP silk. Bottom-mounted footprints get the label on
         // bottom silk so it stays readable from the right side.
-        let default_side = match fp.layer {
-            CopperLayer::Top => SilkLayer::Top,
-            CopperLayer::Bottom => SilkLayer::Bottom,
+        let default_side = if fp.layer.is_top() {
+            SilkLayer::Top
+        } else {
+            SilkLayer::Bottom
         };
         if default_side != side {
             return;
@@ -780,10 +787,7 @@ fn write_pad(svg: &mut String, pad: &Pad, pours: &[pcb_core::Pour]) {
     // wash; pads on other nets get a dark clearance ring around
     // them (drawn by `write_pour_polygon` as evenodd cutouts).
     let _ = pours;
-    let fill = match pad.layer {
-        CopperLayer::Top => "#c97a2b",
-        CopperLayer::Bottom => "#2b6cc9",
-    };
+    let fill = layer_pad_fill(pad.layer);
     let _ = write!(
         svg,
         r#"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="{fill}" pointer-events="none"/>"#,
@@ -1104,14 +1108,8 @@ fn write_trace(svg: &mut String, trace: &Trace) {
     // eye can separate "where copper lands on a component" from "where
     // copper carries a signal". Top: gold against the orange pads;
     // bottom: cyan against the blue pads.
-    let stroke = match trace.layer {
-        CopperLayer::Top => "#ffd166",
-        CopperLayer::Bottom => "#4ec9ff",
-    };
-    let layer_label = match trace.layer {
-        CopperLayer::Top => "top",
-        CopperLayer::Bottom => "bottom",
-    };
+    let stroke = layer_trace_stroke(trace.layer);
+    let layer_label = layer_text_label(trace.layer);
     let _ = write!(
         svg,
         r#"<line data-trace-id="{id}" pathLength="1" x1="{x1:.3}" y1="{y1:.3}" x2="{x2:.3}" y2="{y2:.3}" stroke="{stroke}" stroke-width="{w:.3}" stroke-linecap="round"><title>{net} ({layer_label})</title></line>"#,
@@ -1270,10 +1268,7 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
     // edge-clearance amount as everything else. Smaller radius (or
     // zero, sharp corners) = sharper inner pour corners.
     let pour_radius = (board.outline_corner_radius.to_mm() - inset).max(0.0);
-    let layer_tag = match pour.layer {
-        CopperLayer::Top => "t",
-        CopperLayer::Bottom => "b",
-    };
+    let layer_tag = layer_short_tag(pour.layer);
     let mask_id = format!("pour-mask-{layer_tag}-{}", sanitize_id(&pour.net));
     let cl = POUR_CLEARANCE_MM;
 
@@ -1772,6 +1767,81 @@ fn escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
 }
+
+/// Per-layer fill colour for pads. Layer 0 = orange, last = cyan,
+/// inner signal layers cycle through a saturated palette so a
+/// 4/6/8-layer render stays legible without consulting a legend.
+/// Pre-Phase-4 boards (2 layers) get the historical orange/blue pair.
+fn layer_pad_fill(layer: Layer) -> &'static str {
+    // We can't see the stackup from here so we treat index 1 as the
+    // bottom for the 2-layer historical case AND as the first inner
+    // for N>2. The renderer only ever materialises items currently
+    // declared in `Trace.layer`/`Pad.layer`, which today are at most
+    // index 1 (CopperLayer::Bottom). For inner layers we still want
+    // a colour mapping so the multi-layer support is in place.
+    PAD_PALETTE
+        .get(layer.index as usize)
+        .copied()
+        .unwrap_or("#888")
+}
+
+fn layer_trace_stroke(layer: Layer) -> &'static str {
+    TRACE_PALETTE
+        .get(layer.index as usize)
+        .copied()
+        .unwrap_or("#aaa")
+}
+
+fn layer_text_label(layer: Layer) -> &'static str {
+    match layer.index {
+        0 => "top",
+        1 => "bottom",
+        2 => "in1",
+        3 => "in2",
+        4 => "in3",
+        5 => "in4",
+        6 => "in5",
+        _ => "inner",
+    }
+}
+
+fn layer_short_tag(layer: Layer) -> &'static str {
+    match layer.index {
+        0 => "t",
+        1 => "b",
+        2 => "i1",
+        3 => "i2",
+        4 => "i3",
+        5 => "i4",
+        6 => "i5",
+        _ => "in",
+    }
+}
+
+/// Palette for pad fills, one entry per layer index.
+const PAD_PALETTE: &[&str] = &[
+    "#c97a2b", // 0 - top — historical orange.
+    "#2b6cc9", // 1 - bottom (2-layer historical blue) OR inner-1.
+    "#3aa66c", // 2 - inner green.
+    "#a63a8c", // 3 - inner purple.
+    "#d6b500", // 4 - inner yellow.
+    "#b0303a", // 5 - inner red.
+    "#3aa6a6", // 6 - inner teal.
+    "#9c6b3a", // 7 - inner sienna.
+];
+
+/// Palette for trace strokes — brighter variants of `PAD_PALETTE` so
+/// traces visually float above their pads.
+const TRACE_PALETTE: &[&str] = &[
+    "#ffd166", // top - gold (historical).
+    "#4ec9ff", // bottom - cyan (historical).
+    "#84e8b3", // inner green.
+    "#e495d2", // inner purple.
+    "#ffe89a", // inner yellow.
+    "#ff95a0", // inner red.
+    "#9ce5e5", // inner teal.
+    "#deb887", // inner sienna.
+];
 
 #[cfg(test)]
 mod tests {

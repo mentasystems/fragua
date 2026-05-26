@@ -38,7 +38,7 @@ use std::io;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 
-use pcb_core::{Board, CopperLayer, Length, Pad, Point};
+use pcb_core::{Board, Length, Pad, Point};
 
 pub mod features;
 pub mod tar;
@@ -205,10 +205,7 @@ fn build_eda_data(board: &Board) -> String {
             x = fp.position.x.to_mm(),
             y = fp.position.y.to_mm(),
             rot = fp.rotation,
-            layer = match fp.layer {
-                CopperLayer::Top => "T",
-                CopperLayer::Bottom => "B",
-            },
+            layer = if fp.layer.is_top() { "T" } else { "B" },
             ref_ = sanitize_token(&fp.reference),
             val = sanitize_token(&fp.value),
         ));

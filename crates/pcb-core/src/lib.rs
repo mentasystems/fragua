@@ -18,8 +18,9 @@ pub mod silk_clip;
 pub mod units;
 
 pub use board::{
-    rotate_margin_trbl, Board, CopperLayer, Footprint, FootprintSilk, Id, Keepout, LayerStackup,
-    Pad, Pour, SilkAnchor, SilkLayer, SilkLine, SilkText, StitchPolicy, ThermalRelief, Trace, Via,
+    rotate_margin_trbl, Board, CopperLayer, Dielectric, Footprint, FootprintSilk, Id, Keepout,
+    Layer, LayerKind, LayerSpec, LayerStackup, Pad, Pour, SilkAnchor, SilkLayer, SilkLine,
+    SilkText, StitchPolicy, ThermalRelief, Trace, Via,
 };
 pub use event::{ActivityLevel, Event, EventBus};
 pub use geometry::{Point, Rect};

@@ -1270,6 +1270,57 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 )),
             }
         }
+        "layer" => {
+            // layer list
+            // layer add NAME (signal|plane|mixed) [thickness=N]
+            // layer remove NAME
+            // layer rename OLD NEW
+            need_args(line, tokens, 1, "layer list|add|remove|rename ...")?;
+            match tokens[1].as_str() {
+                "list" => Ok(Cmd {
+                    line,
+                    tool: "layer.list".into(),
+                    args: json!({}),
+                }),
+                "add" => {
+                    need_args(line, tokens, 3, "layer add NAME (signal|plane|mixed) [thickness=N]")?;
+                    let name = tokens[2].as_str();
+                    let kind = tokens[3].as_str();
+                    let mut args = json!({ "name": name, "kind": kind });
+                    apply_kv(
+                        &mut args,
+                        &tokens[4..],
+                        line,
+                        &[("thickness", AttrType::NumInto("thickness_mm"))],
+                    )?;
+                    Ok(Cmd {
+                        line,
+                        tool: "layer.add".into(),
+                        args,
+                    })
+                }
+                "remove" => {
+                    need_args(line, tokens, 2, "layer remove NAME")?;
+                    Ok(Cmd {
+                        line,
+                        tool: "layer.remove".into(),
+                        args: json!({ "name": tokens[2] }),
+                    })
+                }
+                "rename" => {
+                    need_args(line, tokens, 3, "layer rename OLD NEW")?;
+                    Ok(Cmd {
+                        line,
+                        tool: "layer.rename".into(),
+                        args: json!({ "old": tokens[2], "new": tokens[3] }),
+                    })
+                }
+                other => Err(ParseError::at(
+                    line,
+                    format!("layer: unknown subcommand `{other}` (list|add|remove|rename)"),
+                )),
+            }
+        }
         "impedance" => {
             // impedance suggest NET Z
             need_args(line, tokens, 1, "impedance suggest NET Z")?;

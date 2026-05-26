@@ -2632,6 +2632,7 @@ name = "pcb-router"
 version = "0.0.0"
 dependencies = [
  "pcb-core",
+ "serde_json",
 ]
 
 [[package]]

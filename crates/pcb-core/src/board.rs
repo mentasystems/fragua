@@ -6,7 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Deserializer};
+use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::geometry::{Point, Rect};
@@ -36,12 +37,176 @@ impl Default for Id {
     }
 }
 
-/// Copper layer slot. Phase 1 only models the two outer layers; inner
-/// layers are added when we tackle multi-layer routing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum CopperLayer {
-    Top,
-    Bottom,
+/// Copper layer identifier — an index into the board's `LayerStackup`.
+///
+/// Phase 4 generalised this from a fixed `{Top, Bottom}` enum to an
+/// `index`-carrying handle so boards can carry 2, 4, 6, or 8 copper
+/// layers. By convention layer 0 is always the top and layer
+/// `stackup.layers.len() - 1` is always the bottom; the helper
+/// `Layer::TOP` and `Layer::Bottom`/`Layer::Top` associated constants
+/// give source-level back-compat with the pre-Phase-4 `CopperLayer`
+/// API so old call sites compile unchanged.
+///
+/// Serde back-compat: deserialisation accepts the legacy `"Top"` /
+/// `"Bottom"` strings (the on-disk form pre-Phase-4) AND the new
+/// `{ "index": N }` form. Serialisation emits the legacy strings for
+/// layers 0 and 1 so existing 2-layer projects remain byte-identical,
+/// and the structural form for inner layers (index ≥ 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Layer {
+    pub index: u8,
+}
+
+/// Pre-Phase-4 type alias: every existing call site that wrote
+/// `CopperLayer` (the field type, the test literals, the type-only
+/// imports) keeps compiling. New code should prefer `Layer`.
+pub type CopperLayer = Layer;
+
+impl Layer {
+    /// The top (outermost upper) copper layer — index 0 by definition.
+    pub const TOP: Layer = Layer { index: 0 };
+
+    /// Source-level back-compat for `CopperLayer::Top` literal usage
+    /// (struct construction, comparisons). Same value as `TOP`.
+    #[allow(non_upper_case_globals)]
+    pub const Top: Layer = Layer { index: 0 };
+
+    /// Source-level back-compat for `CopperLayer::Bottom` literal
+    /// usage. Without a stackup we can only assume "the other outer
+    /// layer of a 2-layer board" — i.e. index 1. Multi-layer code
+    /// that needs the *true* bottom of an N-layer board should call
+    /// `Layer::bottom_of(&stackup)` instead.
+    #[allow(non_upper_case_globals)]
+    pub const Bottom: Layer = Layer { index: 1 };
+
+    /// True iff this is the top copper layer.
+    #[must_use]
+    pub const fn is_top(self) -> bool {
+        self.index == 0
+    }
+
+    /// True iff this is the bottom copper layer of the given stackup.
+    #[must_use]
+    pub fn is_bottom_of(self, stackup: &LayerStackup) -> bool {
+        stackup
+            .layers
+            .len()
+            .checked_sub(1)
+            .is_some_and(|last| self.index as usize == last)
+    }
+
+    /// Resolve the bottom layer for an N-layer stackup.
+    /// Falls back to `Layer { index: 1 }` for an empty stackup so
+    /// 2-layer assumptions still hold during construction.
+    #[must_use]
+    pub fn bottom_of(stackup: &LayerStackup) -> Layer {
+        let last = stackup.layers.len().saturating_sub(1) as u8;
+        Layer { index: last.max(1) }
+    }
+
+    /// True iff the layer is a signal layer in the given stackup.
+    /// Out-of-range layers return false.
+    #[must_use]
+    pub fn is_signal(self, stackup: &LayerStackup) -> bool {
+        stackup
+            .layers
+            .get(self.index as usize)
+            .is_some_and(|l| matches!(l.kind, LayerKind::Signal | LayerKind::Mixed))
+    }
+
+    /// Pre-Phase-4 helpers: spell out the layer as a short legacy
+    /// string. Returns "Top" for index 0, "Bottom" for index 1, and
+    /// "InN" for inner layer N (N = index, only meaningful when the
+    /// stackup itself is known).
+    #[must_use]
+    pub fn legacy_name(self) -> &'static str {
+        match self.index {
+            0 => "Top",
+            1 => "Bottom",
+            2 => "In1",
+            3 => "In2",
+            4 => "In3",
+            5 => "In4",
+            6 => "In5",
+            7 => "In6",
+            _ => "Inner",
+        }
+    }
+}
+
+impl Default for Layer {
+    fn default() -> Self {
+        Self::TOP
+    }
+}
+
+impl Serialize for Layer {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        // Pre-Phase-4 boards stored CopperLayer as a tagged string —
+        // emit the same strings for the two outer layers so legacy
+        // projects round-trip byte-identical.
+        match self.index {
+            0 => ser.serialize_str("Top"),
+            1 => ser.serialize_str("Bottom"),
+            n => {
+                use serde::ser::SerializeStruct;
+                let mut s = ser.serialize_struct("Layer", 1)?;
+                s.serialize_field("index", &n)?;
+                s.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Layer {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        // Accept three forms, in priority order:
+        //   1. legacy strings "Top" / "Bottom"
+        //   2. the new struct form `{ "index": N }`
+        //   3. a bare integer (handy for hand-written tests)
+        struct V;
+        impl<'de> de::Visitor<'de> for V {
+            type Value = Layer;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("\"Top\" / \"Bottom\" / { index: N } / integer")
+            }
+            fn visit_str<E: de::Error>(self, s: &str) -> Result<Layer, E> {
+                match s {
+                    "Top" | "top" | "F.Cu" => Ok(Layer { index: 0 }),
+                    "Bottom" | "bottom" | "B.Cu" => Ok(Layer { index: 1 }),
+                    other if other.starts_with("In") => {
+                        let n = other[2..].parse::<u8>().map_err(de::Error::custom)?;
+                        Ok(Layer { index: n + 1 })
+                    }
+                    other => Err(de::Error::custom(format!("unknown layer: {other}"))),
+                }
+            }
+            fn visit_u64<E: de::Error>(self, n: u64) -> Result<Layer, E> {
+                Ok(Layer { index: n as u8 })
+            }
+            fn visit_i64<E: de::Error>(self, n: i64) -> Result<Layer, E> {
+                if n < 0 {
+                    return Err(de::Error::custom("negative layer index"));
+                }
+                Ok(Layer { index: n as u8 })
+            }
+            fn visit_map<M: de::MapAccess<'de>>(self, mut map: M) -> Result<Layer, M::Error> {
+                let mut idx: Option<u8> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "index" => idx = Some(map.next_value()?),
+                        _ => {
+                            let _ = map.next_value::<de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(Layer {
+                    index: idx.ok_or_else(|| de::Error::missing_field("index"))?,
+                })
+            }
+        }
+        de.deserialize_any(V)
+    }
 }
 
 /// Silkscreen side. Mirrors `CopperLayer` but lives in its own enum
@@ -467,26 +632,68 @@ pub struct Keepout {
     pub label: String,
 }
 
-/// Minimal copper / dielectric stackup. Lives on the board so DRC can
-/// derive single-ended impedance from a trace width without per-call
-/// configuration. Defaults represent a generic 2-layer 1.5 mm FR-4 board
-/// with 1 oz copper — JLCPCB's standard offering.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct LayerStackup {
-    /// Copper thickness in mm (default 0.035 mm = 1 oz).
+/// Kind of a single copper layer in the stackup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerKind {
+    /// Routable signal layer.
+    #[default]
+    Signal,
+    /// Solid plane (typically GND or PWR) — the router treats it as
+    /// reserved for a pour, never for individual traces.
+    Plane,
+    /// Mixed signal/plane layer — both routed traces and a pour can
+    /// share the layer.
+    Mixed,
+}
+
+/// Per-copper-layer spec. Ordered top → bottom in `LayerStackup::layers`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayerSpec {
+    /// Fabricator-facing name. KiCad-flavoured defaults: "F.Cu" for the
+    /// top, "B.Cu" for the bottom, "In1.Cu".."In6.Cu" for 4/6/8-layer
+    /// inner signal layers. Used as the Gerber/ODB++ filename stem.
+    pub name: String,
+    #[serde(default)]
+    pub kind: LayerKind,
+    /// Copper thickness, mm. Default 0.035 mm = 1 oz.
     #[serde(default = "default_copper_thickness_mm")]
     pub copper_thickness_mm: f64,
-    /// Dielectric thickness between top and bottom copper (default 1.5 mm).
-    #[serde(default = "default_dielectric_thickness_mm")]
-    pub dielectric_thickness_mm: f64,
-    /// Dielectric Er (default 4.5 for FR-4).
-    #[serde(default = "default_dielectric_er")]
-    pub dielectric_er: f64,
-    /// Soldermask thickness (default 0.025 mm).
-    #[serde(default = "default_soldermask_thickness_mm")]
+}
+
+/// Dielectric slab between two consecutive copper layers.
+/// `LayerStackup::dielectrics.len() == layers.len() - 1`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Dielectric {
+    pub thickness_mm: f64,
+    pub er: f64,
+}
+
+/// Multi-layer copper / dielectric stackup. Ordered top → bottom.
+///
+/// Lives on the board so DRC can derive single-ended impedance from a
+/// trace width and so the router/gerber writer know how many copper
+/// layers to emit. Defaults to a generic 2-layer 1.5 mm FR-4 board with
+/// 1 oz copper — JLCPCB's standard offering, identical to the pre-Phase-4
+/// hard-wired stackup. Even-count stackups (2, 4, 6, 8) are the only
+/// sensible physical builds; the constructor enforces that.
+///
+/// Serde back-compat: the on-disk shape pre-Phase-4 was a single flat
+/// struct with `copper_thickness_mm`, `dielectric_thickness_mm`,
+/// `dielectric_er`, `soldermask_thickness_mm`, `soldermask_er`. The
+/// custom `Deserialize` impl accepts both shapes — the new structural
+/// `{ layers: [...], dielectrics: [...] }` and the legacy flat form,
+/// which we lift into a 2-layer stackup with one dielectric slab.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerStackup {
+    /// Ordered top → bottom signal/plane layers. Always non-empty.
+    pub layers: Vec<LayerSpec>,
+    /// Dielectric between consecutive copper layers.
+    /// `len() == layers.len() - 1`.
+    pub dielectrics: Vec<Dielectric>,
+    /// Soldermask thickness, mm. Default 0.025 mm.
     pub soldermask_thickness_mm: f64,
-    /// Soldermask Er (default 3.5).
-    #[serde(default = "default_soldermask_er")]
+    /// Soldermask Er. Default 3.5.
     pub soldermask_er: f64,
 }
 
@@ -506,7 +713,168 @@ fn default_soldermask_er() -> f64 {
     3.5
 }
 
+impl LayerStackup {
+    /// Construct an N-layer FR-4 stackup with the JLCPCB defaults.
+    /// `n` MUST be even and in `2..=8`; out-of-range values are clamped
+    /// silently to the nearest legal even count.
+    #[must_use]
+    pub fn fr4(n: u8) -> Self {
+        let n = n.clamp(2, 8);
+        let n = if n.is_multiple_of(2) { n } else { n + 1 };
+        let mut layers: Vec<LayerSpec> = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let name = if i == 0 {
+                "F.Cu".to_string()
+            } else if i == n - 1 {
+                "B.Cu".to_string()
+            } else {
+                format!("In{i}.Cu")
+            };
+            let kind = if i == 0 || i == n - 1 {
+                LayerKind::Signal
+            } else {
+                // Inner layers default to Plane on 4-layer boards (the
+                // common "signal/GND/PWR/signal" topology), Signal on
+                // 6/8-layer ones (where multiple signal layers are the
+                // whole point of the extra cost).
+                if n == 4 {
+                    LayerKind::Plane
+                } else {
+                    LayerKind::Signal
+                }
+            };
+            layers.push(LayerSpec {
+                name,
+                kind,
+                copper_thickness_mm: default_copper_thickness_mm(),
+            });
+        }
+        // For an N-layer board on a 1.6 mm core, split the dielectric
+        // evenly across the N-1 slabs so the total board thickness
+        // stays consistent across stackup choices.
+        let total_dielectric_mm = default_dielectric_thickness_mm();
+        let per_slab = total_dielectric_mm / f64::from(n - 1);
+        let dielectrics = (0..n - 1)
+            .map(|_| Dielectric {
+                thickness_mm: per_slab,
+                er: default_dielectric_er(),
+            })
+            .collect();
+        Self {
+            layers,
+            dielectrics,
+            soldermask_thickness_mm: default_soldermask_thickness_mm(),
+            soldermask_er: default_soldermask_er(),
+        }
+    }
+
+    /// Number of copper layers.
+    #[must_use]
+    pub fn layer_count(&self) -> u8 {
+        self.layers.len() as u8
+    }
+
+    /// Iterate `Layer` handles top → bottom.
+    pub fn layer_handles(&self) -> impl Iterator<Item = Layer> + '_ {
+        (0..self.layer_count()).map(|i| Layer { index: i })
+    }
+
+    /// Look up a layer by its on-disk name. Case sensitive — matches
+    /// the canonical "F.Cu" / "In1.Cu" / "B.Cu" pattern.
+    #[must_use]
+    pub fn find_by_name(&self, name: &str) -> Option<Layer> {
+        self.layers
+            .iter()
+            .position(|l| l.name == name)
+            .map(|i| Layer { index: i as u8 })
+    }
+
+    /// Append a layer at the BOTTOM of the stack — i.e. the previous
+    /// bottom layer becomes inner, the new one is the new bottom.
+    /// The resulting stackup must still pass the even-count rule, so
+    /// you typically call this twice when going 2 → 4.
+    pub fn push_layer(&mut self, spec: LayerSpec, slab: Dielectric) {
+        self.layers.push(spec);
+        self.dielectrics.push(slab);
+    }
+
+    /// Remove the named layer. Returns true if removed. Refuses to
+    /// remove if doing so would leave fewer than 2 layers.
+    pub fn remove_named(&mut self, name: &str) -> bool {
+        if self.layers.len() <= 2 {
+            return false;
+        }
+        let Some(idx) = self.layers.iter().position(|l| l.name == name) else {
+            return false;
+        };
+        self.layers.remove(idx);
+        // Remove the dielectric BELOW the removed layer when possible,
+        // otherwise the one above. We just need to keep the invariant.
+        let slab_idx = if idx < self.dielectrics.len() {
+            idx
+        } else {
+            self.dielectrics.len() - 1
+        };
+        self.dielectrics.remove(slab_idx);
+        true
+    }
+
+    /// Legacy compat: copper thickness of the TOP layer in mm.
+    /// Pre-Phase-4 callers (DRC, fab) assume a single value.
+    #[must_use]
+    pub fn copper_thickness_mm(&self) -> f64 {
+        self.layers
+            .first()
+            .map_or(default_copper_thickness_mm(), |l| l.copper_thickness_mm)
+    }
+
+    /// Legacy compat: total dielectric stack-up height between TOP
+    /// and BOTTOM copper layers, mm. The DRC's microstrip impedance
+    /// model uses this as the distance to the reference plane on a
+    /// 2-layer board; for a 4-layer board with an inner reference plane
+    /// the caller should pass the per-slab thickness explicitly.
+    #[must_use]
+    pub fn dielectric_thickness_mm(&self) -> f64 {
+        if self.dielectrics.is_empty() {
+            default_dielectric_thickness_mm()
+        } else {
+            self.dielectrics.iter().map(|d| d.thickness_mm).sum()
+        }
+    }
+
+    /// Legacy compat: relative permittivity of the dielectric stack.
+    /// On a multi-dielectric board returns the average — good enough
+    /// for the impedance ballpark the DRC reports.
+    #[must_use]
+    pub fn dielectric_er(&self) -> f64 {
+        if self.dielectrics.is_empty() {
+            default_dielectric_er()
+        } else {
+            let sum: f64 = self.dielectrics.iter().map(|d| d.er).sum();
+            sum / self.dielectrics.len() as f64
+        }
+    }
+}
+
 impl Default for LayerStackup {
+    fn default() -> Self {
+        Self::fr4(2)
+    }
+}
+
+/// Serde back-compat for the pre-Phase-4 flat shape. Deserialise into
+/// this and lift it into the new multi-layer struct.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct LegacyLayerStackup {
+    copper_thickness_mm: f64,
+    dielectric_thickness_mm: f64,
+    dielectric_er: f64,
+    soldermask_thickness_mm: f64,
+    soldermask_er: f64,
+}
+
+impl Default for LegacyLayerStackup {
     fn default() -> Self {
         Self {
             copper_thickness_mm: default_copper_thickness_mm(),
@@ -518,9 +886,83 @@ impl Default for LayerStackup {
     }
 }
 
+impl From<LegacyLayerStackup> for LayerStackup {
+    fn from(legacy: LegacyLayerStackup) -> Self {
+        Self {
+            layers: vec![
+                LayerSpec {
+                    name: "F.Cu".into(),
+                    kind: LayerKind::Signal,
+                    copper_thickness_mm: legacy.copper_thickness_mm,
+                },
+                LayerSpec {
+                    name: "B.Cu".into(),
+                    kind: LayerKind::Signal,
+                    copper_thickness_mm: legacy.copper_thickness_mm,
+                },
+            ],
+            dielectrics: vec![Dielectric {
+                thickness_mm: legacy.dielectric_thickness_mm,
+                er: legacy.dielectric_er,
+            }],
+            soldermask_thickness_mm: legacy.soldermask_thickness_mm,
+            soldermask_er: legacy.soldermask_er,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NewLayerStackup {
+    layers: Vec<LayerSpec>,
+    dielectrics: Vec<Dielectric>,
+    #[serde(default = "default_soldermask_thickness_mm")]
+    soldermask_thickness_mm: f64,
+    #[serde(default = "default_soldermask_er")]
+    soldermask_er: f64,
+}
+
+impl Serialize for LayerStackup {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = ser.serialize_struct("LayerStackup", 4)?;
+        s.serialize_field("layers", &self.layers)?;
+        s.serialize_field("dielectrics", &self.dielectrics)?;
+        s.serialize_field("soldermask_thickness_mm", &self.soldermask_thickness_mm)?;
+        s.serialize_field("soldermask_er", &self.soldermask_er)?;
+        s.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for LayerStackup {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        // We need to peek at the JSON to decide which shape it has.
+        // Cheap and idiomatic: deserialise into `serde_json::Value`
+        // and dispatch. The board model lives in serde_json territory
+        // anyway (the .fragua format is JSON).
+        let val = serde_json::Value::deserialize(de)?;
+        let obj = val.as_object().ok_or_else(|| de::Error::custom(
+            "LayerStackup must be an object",
+        ))?;
+        if obj.contains_key("layers") {
+            let new: NewLayerStackup =
+                serde_json::from_value(val).map_err(de::Error::custom)?;
+            Ok(Self {
+                layers: new.layers,
+                dielectrics: new.dielectrics,
+                soldermask_thickness_mm: new.soldermask_thickness_mm,
+                soldermask_er: new.soldermask_er,
+            })
+        } else {
+            // Legacy flat shape — lift into a 2-layer stackup.
+            let legacy: LegacyLayerStackup =
+                serde_json::from_value(val).map_err(de::Error::custom)?;
+            Ok(LayerStackup::from(legacy))
+        }
+    }
+}
+
 /// Serde helper: emit `LayerStackup` only when it differs from the
 /// default. Keeps existing on-disk projects byte-identical.
-#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_default_stackup(s: &LayerStackup) -> bool {
     *s == LayerStackup::default()
 }

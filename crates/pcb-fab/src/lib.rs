@@ -432,10 +432,7 @@ pub fn write_cpl(board: &Board, provider: Provider, w: &mut impl Write) -> io::R
         Provider::Jlcpcb => {
             writeln!(w, "Designator,Mid X,Mid Y,Layer,Rotation")?;
             for fp in board.footprints_in_order() {
-                let layer = match fp.layer {
-                    pcb_core::CopperLayer::Top => "T",
-                    pcb_core::CopperLayer::Bottom => "B",
-                };
+                let layer = if fp.layer.is_top() { "T" } else { "B" };
                 writeln!(
                     w,
                     "{},{:.4}mm,{:.4}mm,{},{:.2}",
@@ -450,10 +447,7 @@ pub fn write_cpl(board: &Board, provider: Provider, w: &mut impl Write) -> io::R
         Provider::Pcbway | Provider::Generic => {
             writeln!(w, "Reference,Value,Footprint,X,Y,Rotation,Side")?;
             for fp in board.footprints_in_order() {
-                let side = match fp.layer {
-                    pcb_core::CopperLayer::Top => "top",
-                    pcb_core::CopperLayer::Bottom => "bottom",
-                };
+                let side = if fp.layer.is_top() { "top" } else { "bottom" };
                 writeln!(
                     w,
                     "{},{},{},{:.4},{:.4},{:.2},{}",

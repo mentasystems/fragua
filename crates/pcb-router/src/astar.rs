@@ -92,16 +92,17 @@ pub fn search(
 
     let via_scaled = via_cost.saturating_mul(SCALE);
 
-    // A drilled (through-hole) target accepts either layer for free:
-    // the existing PTH already connects top and bottom, so reaching it
-    // from the opposite side doesn't actually need a router via. Skip
-    // the layer-mismatch via_cost in the heuristic when the target is
-    // a DrilledPad on either layer.
-    let target_is_th = matches!(grid.get(target), Cell::DrilledPad(_))
-        || matches!(
-            grid.get(GridPoint { layer: 1 - target.layer, col: target.col, row: target.row }),
+    // A drilled (through-hole) target accepts any copper layer for
+    // free: the existing PTH already connects every copper layer it
+    // straddles, so reaching it from any side doesn't need a router
+    // via. Scan every layer of the stackup for a DrilledPad cell at
+    // the target column/row.
+    let target_is_th = (0..grid.layer_count).any(|l| {
+        matches!(
+            grid.get(GridPoint { layer: l, col: target.col, row: target.row }),
             Cell::DrilledPad(_)
-        );
+        )
+    });
     let h = |p: GridPoint| -> u32 {
         let dc = f64::from(p.col - target.col);
         let dr = f64::from(p.row - target.row);
@@ -126,7 +127,7 @@ pub fn search(
 
     let mut had_trace_source = false;
     let mut best_trace_h: u32 = u32::MAX;
-    for layer in 0..2u8 {
+    for layer in 0..grid.layer_count {
         for row in 0..grid.rows {
             for col in 0..grid.cols {
                 let p = GridPoint { layer, col, row };
@@ -183,7 +184,7 @@ pub fn search(
             continue;
         }
 
-        for (next_p, kind) in neighbours(p) {
+        for (next_p, kind) in neighbours(p, grid.layer_count) {
             if !grid.in_bounds(next_p) {
                 continue;
             }
@@ -200,13 +201,12 @@ pub fn search(
             // collides with the existing PTH drill. No score penalty
             // is high enough to make that legal, so refuse outright.
             if is_via
-                && (matches!(
-                    grid.get(GridPoint { layer: 0, col: next_p.col, row: next_p.row }),
-                    Cell::DrilledPad(_)
-                ) || matches!(
-                    grid.get(GridPoint { layer: 1, col: next_p.col, row: next_p.row }),
-                    Cell::DrilledPad(_)
-                ))
+                && (0..grid.layer_count).any(|l| {
+                    matches!(
+                        grid.get(GridPoint { layer: l, col: next_p.col, row: next_p.row }),
+                        Cell::DrilledPad(_)
+                    )
+                })
             {
                 continue;
             }
@@ -257,13 +257,12 @@ pub fn search(
                 // Soft penalty for landing on an SMD pad (legal but
                 // requires via-in-pad fill at the fab — extra cost).
                 // DrilledPad cases are already hard-rejected above.
-                let on_pad = matches!(
-                    grid.get(GridPoint { layer: 0, col: next_p.col, row: next_p.row }),
-                    Cell::NetPad(_)
-                ) || matches!(
-                    grid.get(GridPoint { layer: 1, col: next_p.col, row: next_p.row }),
-                    Cell::NetPad(_)
-                );
+                let on_pad = (0..grid.layer_count).any(|l| {
+                    matches!(
+                        grid.get(GridPoint { layer: l, col: next_p.col, row: next_p.row }),
+                        Cell::NetPad(_)
+                    )
+                });
                 if on_pad {
                     best_g = best_g.saturating_add(VIA_IN_PAD_PENALTY);
                 }
@@ -287,7 +286,7 @@ pub fn search(
 /// cells on either layer.
 fn via_safe(grid: &Grid, p: GridPoint, target_net: u32, radius: i32) -> bool {
     let r2 = radius * radius;
-    for layer in 0..2u8 {
+    for layer in 0..grid.layer_count {
         for dr in -radius..=radius {
             for dc in -radius..=radius {
                 if dr * dr + dc * dc > r2 {
@@ -316,10 +315,27 @@ enum Move {
     Via,
 }
 
-fn neighbours(p: GridPoint) -> [(GridPoint, Move); 9] {
+fn neighbours(p: GridPoint, layer_count: u8) -> [(GridPoint, Move); 9] {
     let l = p.layer;
     let c = p.col;
     let r = p.row;
+    // Via flip: until blind/buried vias land, every via punches
+    // top↔bottom. On layer 0 the via flips to N-1; on layer N-1 it
+    // flips to 0; on inner layers (Phase 4 has signal layers too) we
+    // still flip to the opposite outer layer — the inner layer pad
+    // sits on the via shaft. This is a conservative model that lets
+    // the search at least reach inner cells; once we add per-via
+    // layer spans the neighbours will become richer.
+    let bottom = layer_count.saturating_sub(1);
+    let via_target = if l == 0 {
+        bottom
+    } else if l == bottom {
+        0
+    } else if l < bottom / 2 {
+        bottom
+    } else {
+        0
+    };
     [
         (GridPoint { layer: l, col: c + 1, row: r }, Move::Ortho),
         (GridPoint { layer: l, col: c - 1, row: r }, Move::Ortho),
@@ -329,6 +345,6 @@ fn neighbours(p: GridPoint) -> [(GridPoint, Move); 9] {
         (GridPoint { layer: l, col: c + 1, row: r - 1 }, Move::Diag),
         (GridPoint { layer: l, col: c - 1, row: r + 1 }, Move::Diag),
         (GridPoint { layer: l, col: c - 1, row: r - 1 }, Move::Diag),
-        (GridPoint { layer: 1 - l, col: c, row: r }, Move::Via),
+        (GridPoint { layer: via_target, col: c, row: r }, Move::Via),
     ]
 }

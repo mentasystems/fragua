@@ -8,5 +8,8 @@ description = "Native autorouter for the pcb tool."
 [dependencies]
 pcb-core = { path = "../pcb-core" }
 
+[dev-dependencies]
+serde_json = "1"
+
 [lints]
 workspace = true

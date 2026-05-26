@@ -266,10 +266,7 @@ fn component_info(
                 "number": p.number,
                 "name": p.name,
                 "net": p.net,
-                "layer": match p.layer {
-                    pcb_core::CopperLayer::Top => "top",
-                    pcb_core::CopperLayer::Bottom => "bottom",
-                },
+                "layer": if p.layer.is_top() { "top" } else { "bottom" },
             })
         })
         .collect();

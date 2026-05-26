@@ -248,7 +248,8 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     // grid only for its dims; the actual obstacle grid is built fresh
     // per pass inside `route_pass`.
     let region = compute_region(board, opts);
-    let mut cost_map = Grid::new(region, opts.cell).new_cost_map();
+    let layer_count = board.stackup.layer_count();
+    let mut cost_map = Grid::with_layers(region, opts.cell, layer_count).new_cost_map();
 
     let mut best: Option<(Board, RouteReport)> = None;
     let mut last_order: Option<Vec<String>> = None;
@@ -302,7 +303,7 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
         // iteration index — if a net survives its first bump, the
         // next iteration applies a stronger one (capped at
         // `CONGESTION_MAX`) until A* finds a way through.
-        let snap_grid = Grid::new(region, opts.cell);
+        let snap_grid = Grid::with_layers(region, opts.cell, layer_count);
         let bump_factor = iterations_run as u32; // 1, 2, 3...
         for name in &failed {
             bump_corridor(
@@ -505,7 +506,7 @@ fn route_pass(
         .collect();
 
     let region = compute_region(board, opts);
-    let mut grid = Grid::new(region, opts.cell);
+    let mut grid = Grid::with_layers(region, opts.cell, board.stackup.layer_count());
     // Effective clearance for grid setup = max across the global
     // default and every per-net override. The grid is built once, so
     // we have to be conservative — using the strictest clearance
