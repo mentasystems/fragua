@@ -90,6 +90,12 @@ pub enum ErcKind {
     /// `Bidir`, or `PowerOut`). Either the input is meant to float
     /// (rare; signal it explicitly) or the agent forgot a driver.
     UnconnectedInput,
+    /// A net whose ONLY pins are `Input` and that has no driver
+    /// anywhere (no `Output`, `Bidir`, `PowerOut`, no power-named
+    /// alias, and no pour). Coarser than `UnconnectedInput` (one
+    /// violation per net, not per pin) so the agent sees a single
+    /// flag when a whole net is dead.
+    UndrivenInput,
     /// Heuristic: a chip's `PowerIn` pin has no capacitor on the same
     /// net within `decoupling_max_dist_mm`. Decoupling caps belong
     /// physically close to the chip pin; absence usually means the
@@ -423,6 +429,25 @@ fn check_role_based_rules(board: &Board, sch: &Schematic, report: &mut ErcReport
                 });
             }
         }
+
+        // Coarser `UndrivenInput`: the whole net's only pin roles are
+        // `Input` and there's no driver anywhere. Single per-net flag
+        // so the agent sees one violation instead of one per pin when
+        // the entire net is dead.
+        let pin_count = pins.len();
+        let input_count = pins.iter().filter(|(_, r)| *r == PinRole::Input).count();
+        if pin_count > 0 && input_count == pin_count && !has_driver {
+            report.push(Violation {
+                kind: ErcKind::UndrivenInput,
+                severity: Severity::Warning,
+                message: format!(
+                    "net {net_name} has only Input pins ({pin_count}) and no driver — every endpoint is reading from a dead net",
+                ),
+                involved: std::iter::once(net_name.clone())
+                    .chain(pins.iter().map(|(l, _)| l.clone()))
+                    .collect(),
+            });
+        }
     }
 }
 
@@ -568,4 +593,127 @@ fn pin_label(sch: &Schematic, sym_id: pcb_core::Id, pin: &str) -> String {
         || format!("?.{pin}"),
         |s| format!("{}.{}", s.reference, pin),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pcb_core::schematic::{Net, NetConnection, PinSide, SchPin, Symbol, SymbolKind};
+    use pcb_core::{Id, Point};
+
+    fn make_ic(reference: &str, pins: Vec<SchPin>) -> Symbol {
+        Symbol {
+            id: Id::new(),
+            reference: reference.into(),
+            value: String::new(),
+            kind: SymbolKind::GenericIc { pins },
+            position: Point::ORIGIN,
+            rotation: 0.0,
+            key: String::new(),
+            description: String::new(),
+        }
+    }
+
+    fn ic_pin(num: &str, role: PinRole) -> SchPin {
+        SchPin {
+            number: num.into(),
+            name: String::new(),
+            side: PinSide::Left,
+            role,
+        }
+    }
+
+    #[test]
+    fn erc_flags_unpowered_powerin_pin() {
+        // U1 has a PowerIn pin on net "WEIRD_RAIL" (not power-named,
+        // no PowerOut, no pour). Expect an UnpoweredPowerNet warning.
+        let mut sch = Schematic::new();
+        let u1 = make_ic("U1", vec![ic_pin("1", PinRole::PowerIn), ic_pin("2", PinRole::Input)]);
+        let u1_id = u1.id;
+        // Second symbol to keep the net from also tripping FloatingNet.
+        let u2 = make_ic("U2", vec![ic_pin("1", PinRole::Passive)]);
+        let u2_id = u2.id;
+        sch.add_symbol(u1);
+        sch.add_symbol(u2);
+        sch.set_net(Net {
+            name: "WEIRD_RAIL".into(),
+            connections: vec![
+                NetConnection { symbol_id: u1_id, pin_number: "1".into() },
+                NetConnection { symbol_id: u2_id, pin_number: "1".into() },
+            ],
+            class: None,
+        });
+
+        let report = run(
+            &pcb_core::Board::new(),
+            &sch,
+            &ErcOptions { heuristics: false, ..ErcOptions::default() },
+        );
+        assert!(
+            report.violations.iter().any(|v| v.kind == ErcKind::UnpoweredPowerNet),
+            "expected UnpoweredPowerNet, got {:?}",
+            report.violations.iter().map(|v| v.kind).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn erc_flags_multiple_drivers() {
+        let mut sch = Schematic::new();
+        let u1 = make_ic("U1", vec![ic_pin("1", PinRole::Output)]);
+        let u1_id = u1.id;
+        let u2 = make_ic("U2", vec![ic_pin("1", PinRole::Output)]);
+        let u2_id = u2.id;
+        sch.add_symbol(u1);
+        sch.add_symbol(u2);
+        sch.set_net(Net {
+            name: "DATA".into(),
+            connections: vec![
+                NetConnection { symbol_id: u1_id, pin_number: "1".into() },
+                NetConnection { symbol_id: u2_id, pin_number: "1".into() },
+            ],
+            class: None,
+        });
+        let report = run(
+            &pcb_core::Board::new(),
+            &sch,
+            &ErcOptions { heuristics: false, ..ErcOptions::default() },
+        );
+        assert_eq!(
+            report.violations.iter().filter(|v| v.kind == ErcKind::MultipleDrivers).count(),
+            1,
+            "{:?}",
+            report.violations,
+        );
+    }
+
+    #[test]
+    fn erc_flags_undriven_input() {
+        // A net whose only pins are Input — both `UnconnectedInput`
+        // and the new per-net `UndrivenInput` should fire.
+        let mut sch = Schematic::new();
+        let u1 = make_ic("U1", vec![ic_pin("1", PinRole::Input)]);
+        let u1_id = u1.id;
+        let u2 = make_ic("U2", vec![ic_pin("1", PinRole::Input)]);
+        let u2_id = u2.id;
+        sch.add_symbol(u1);
+        sch.add_symbol(u2);
+        sch.set_net(Net {
+            name: "READ_ONLY".into(),
+            connections: vec![
+                NetConnection { symbol_id: u1_id, pin_number: "1".into() },
+                NetConnection { symbol_id: u2_id, pin_number: "1".into() },
+            ],
+            class: None,
+        });
+        let report = run(
+            &pcb_core::Board::new(),
+            &sch,
+            &ErcOptions { heuristics: false, ..ErcOptions::default() },
+        );
+        assert!(
+            report.violations.iter().any(|v| v.kind == ErcKind::UndrivenInput),
+            "expected UndrivenInput, got {:?}",
+            report.violations.iter().map(|v| v.kind).collect::<Vec<_>>(),
+        );
+    }
 }

@@ -183,6 +183,65 @@ pub struct Net {
     pub class: Option<String>,
 }
 
+impl Net {
+    /// Whether this net's name uses bus / vector syntax like `D[0:7]`.
+    /// Bus syntax expands at flatten / ERC time into individual nets
+    /// (`D0`, `D1`, …, `D7`).
+    #[must_use]
+    pub fn is_bus(&self) -> bool {
+        parse_bus_range(&self.name).is_some()
+    }
+
+    /// Expand a bus name like `D[0:7]` into the list of individual net
+    /// names it covers. Returns `vec![name.clone()]` for non-bus names.
+    #[must_use]
+    pub fn expand_bus(&self) -> Vec<String> {
+        match parse_bus_range(&self.name) {
+            Some((prefix, lo, hi)) => (lo..=hi).map(|i| format!("{prefix}{i}")).collect(),
+            None => vec![self.name.clone()],
+        }
+    }
+}
+
+/// Parse a bus name `PREFIX[LO:HI]` into `(prefix, lo, hi)`. Reversed
+/// ranges (`[7:0]`) are accepted and normalised low → high. Anything
+/// that doesn't match the syntax returns `None`.
+fn parse_bus_range(name: &str) -> Option<(String, u32, u32)> {
+    let open = name.rfind('[')?;
+    let close = name.rfind(']')?;
+    if close <= open + 1 || close != name.len() - 1 {
+        return None;
+    }
+    let inner = &name[open + 1..close];
+    let (lo_s, hi_s) = inner.split_once(':')?;
+    let a: u32 = lo_s.trim().parse().ok()?;
+    let b: u32 = hi_s.trim().parse().ok()?;
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    Some((name[..open].to_string(), lo, hi))
+}
+
+/// Heuristic: does this net name look like a power rail? Used by ERC's
+/// `UnpoweredPowerNet` rule so a net called `+3V3` / `GND` / `VCC` is
+/// treated as inherently powered even without a `PowerOut` pin or pour.
+#[must_use]
+pub fn is_power_named_net(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with('+') || trimmed.starts_with('-') {
+        return true;
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    if upper == "GND" || upper.starts_with("GND_") || upper == "VSS" {
+        return true;
+    }
+    if upper.starts_with("VCC") || upper.starts_with("VDD") || upper.starts_with("VBAT") {
+        return true;
+    }
+    false
+}
+
 /// A named bundle of physical rules a net adheres to. Power rails
 /// typically use a class with a wider `trace_width_mm`; high-speed
 /// signals use one with tighter `clearance_mm`. Per-class fields
@@ -307,6 +366,82 @@ pub struct Schematic {
     /// net is declared via `connect`).
     #[serde(default)]
     pub net_to_class: HashMap<String, String>,
+    /// Sub-sheets instantiated under this sheet. Each sheet has a
+    /// reference label and its own nested `Schematic` (Feature 8). The
+    /// router/DRC consume the flat view produced by [`Schematic::flatten`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_sheets: Vec<Sheet>,
+    /// Ports this sheet exposes to its parent. Power/signal nets named
+    /// here can be wired through a parent's `Sheet::port_bindings` to
+    /// nets at the parent's namespace level.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<Port>,
+}
+
+/// One instance of a sub-sheet inside a parent schematic. The instance
+/// has a reference (`PSU`, `RF`…) that prefixes every nested symbol's
+/// reference in the flattened view, and a `port_bindings` map that
+/// wires the sub-sheet's exposed `Port`s to nets at the parent level.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sheet {
+    pub id: Id,
+    /// Reference label like "PSU" — must be unique within the parent sheet.
+    pub reference: String,
+    /// Path to the sub-sheet within the project — currently a `Schematic`
+    /// nested by value so the whole tree lives in one project file.
+    /// Future work could swap this to a file path for multi-file projects.
+    pub schematic: Schematic,
+    /// Mapping from this sheet instance's port name → parent net name.
+    /// A port unmapped here is dangling (ERC will warn).
+    #[serde(default)]
+    pub port_bindings: HashMap<String, String>,
+}
+
+/// Direction of a port as seen from inside the sub-sheet. Mirrors
+/// `PinRole` semantics but applies to the sheet boundary itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortDirection {
+    In,
+    Out,
+    Bidir,
+    Power,
+}
+
+/// One port a sheet exposes to its parent. The `net` field is the
+/// internal net name inside this sheet that the port wires to; the
+/// parent binds the port to one of its own nets via
+/// `Sheet::port_bindings`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Port {
+    pub name: String,
+    pub direction: PortDirection,
+    pub net: String,
+}
+
+/// Flattened view of a hierarchical schematic. Every symbol's reference
+/// is prefixed with its sheet path (e.g. `PSU/U1`), and every net in a
+/// sub-sheet that's bound to a port is rewritten to the parent net it
+/// resolves to. The router and DRC consume this flat view — they never
+/// see the hierarchy.
+#[derive(Debug, Clone, Default)]
+pub struct FlatSchematic {
+    /// Symbols keyed by their original id (unchanged), but with
+    /// `reference` rewritten to include the sheet path prefix.
+    pub symbols: HashMap<Id, Symbol>,
+    /// Insertion order across the whole tree (parent first, then each
+    /// child sheet in order).
+    pub symbol_order: Vec<Id>,
+    /// Nets keyed by the FLAT name — sub-sheet nets that map to a port
+    /// bound to a parent net show up under the parent's name. Unbound
+    /// ports stay prefixed with the sheet path.
+    pub nets: HashMap<String, Net>,
+    /// Net-class declarations from every sheet, merged. Sub-sheet
+    /// classes can shadow same-named parent classes — the deepest
+    /// declaration wins.
+    pub net_classes: HashMap<String, NetClass>,
+    /// Net → class mapping, merged across the tree with flat net names.
+    pub net_to_class: HashMap<String, String>,
 }
 
 impl Schematic {
@@ -410,7 +545,33 @@ impl Schematic {
         }
     }
 
-    //// All connections on a given pin, across nets. Each pin should
+    /// Add a sub-sheet instance to this schematic.
+    pub fn add_sub_sheet(&mut self, sheet: Sheet) {
+        self.sub_sheets.push(sheet);
+    }
+
+    /// Declare or replace a port on this sheet.
+    pub fn set_port(&mut self, port: Port) {
+        if let Some(existing) = self.ports.iter_mut().find(|p| p.name == port.name) {
+            *existing = port;
+        } else {
+            self.ports.push(port);
+        }
+    }
+
+    /// Flatten the sheet tree into a single namespace. Symbol references
+    /// are prefixed by the sheet path (`PSU/U1`, `RF/AMP/Q1`); sub-sheet
+    /// nets bound through ports are rewritten to the parent net they
+    /// resolve to. The router and DRC consume the result. See
+    /// [`FlatSchematic`] for the resolved field layout.
+    #[must_use]
+    pub fn flatten(&self) -> FlatSchematic {
+        let mut out = FlatSchematic::default();
+        flatten_into(self, "", &HashMap::new(), &mut out);
+        out
+    }
+
+    /// All connections on a given pin, across nets. Each pin should
     /// belong to at most one net; if it appears in several, only the
     /// first is meaningful and the rest indicate a model bug.
     #[must_use]
@@ -423,6 +584,309 @@ impl Schematic {
             }
         }
         None
+    }
+}
+
+/// Helper: expand a (possibly bus-flavoured) net name into its
+/// individual member nets. `D[0:7]` → `D0`..`D7`; plain names are
+/// returned unchanged in a single-element vec.
+fn expand_bus_name(name: &str) -> Vec<String> {
+    if let Some((prefix, lo, hi)) = parse_bus_range(name) {
+        (lo..=hi).map(|i| format!("{prefix}{i}")).collect()
+    } else {
+        vec![name.to_string()]
+    }
+}
+
+/// Recursive worker for [`Schematic::flatten`]. `path` is the current
+/// sheet path prefix (`""` at the root, `"PSU/"` one level down). The
+/// `net_remap` map carries the parent-supplied rewrites: a sub-sheet's
+/// internal net name → the parent's flat net name it should appear as.
+fn flatten_into(
+    sch: &Schematic,
+    path: &str,
+    net_remap: &HashMap<String, String>,
+    out: &mut FlatSchematic,
+) {
+    let prefix_ref = |r: &str| -> String {
+        if path.is_empty() {
+            r.to_string()
+        } else {
+            format!("{path}{r}")
+        }
+    };
+    let prefix_net = |n: &str| -> String {
+        // Caller-supplied remap wins (port bindings).
+        if let Some(parent) = net_remap.get(n) {
+            return parent.clone();
+        }
+        if path.is_empty() {
+            n.to_string()
+        } else {
+            format!("{path}{n}")
+        }
+    };
+
+    // Symbols — rewrite the reference to include the sheet path.
+    for id in &sch.symbol_order {
+        let Some(sym) = sch.symbols.get(id) else {
+            continue;
+        };
+        let mut cloned = sym.clone();
+        cloned.reference = prefix_ref(&cloned.reference);
+        out.symbols.insert(*id, cloned);
+        out.symbol_order.push(*id);
+    }
+
+    // Nets — rewrite the name and remap any internal references that
+    // collide with bound ports. Bus names like `D[0:7]` expand into
+    // individual sub-nets so the router/DRC see flat names only.
+    for (name, net) in &sch.nets {
+        let flat_name = prefix_net(name);
+        for expanded in expand_bus_name(&flat_name) {
+            let entry = out.nets.entry(expanded.clone()).or_insert_with(|| Net {
+                name: expanded.clone(),
+                connections: Vec::new(),
+                class: net.class.clone(),
+            });
+            for c in &net.connections {
+                entry.connections.push(c.clone());
+            }
+            if entry.class.is_none() {
+                entry.class.clone_from(&net.class);
+            }
+        }
+    }
+
+    // Net classes — last writer wins so child can shadow parent.
+    for (k, v) in &sch.net_classes {
+        out.net_classes.insert(k.clone(), v.clone());
+    }
+    for (net_name, class_name) in &sch.net_to_class {
+        out.net_to_class
+            .insert(prefix_net(net_name), class_name.clone());
+    }
+
+    // Recurse into sub-sheets, computing each child's prefix + remap.
+    for sheet in &sch.sub_sheets {
+        let child_path = if path.is_empty() {
+            format!("{}/", sheet.reference)
+        } else {
+            format!("{path}{}/", sheet.reference)
+        };
+        // For each bound port: the sub-sheet's internal `port.net` name
+        // should appear in the flat view as the parent's net it binds
+        // to. Resolve the parent name through THIS level's remap (so a
+        // chain of nested bindings propagates correctly).
+        let mut child_remap: HashMap<String, String> = HashMap::new();
+        for port in &sheet.schematic.ports {
+            let Some(parent_net) = sheet.port_bindings.get(&port.name) else {
+                continue;
+            };
+            let resolved = if let Some(higher) = net_remap.get(parent_net) {
+                higher.clone()
+            } else if path.is_empty() {
+                parent_net.clone()
+            } else {
+                format!("{path}{parent_net}")
+            };
+            child_remap.insert(port.net.clone(), resolved);
+        }
+        flatten_into(&sheet.schematic, &child_path, &child_remap, out);
+    }
+}
+
+#[cfg(test)]
+mod hierarchy_tests {
+    use super::*;
+    use crate::board::Id;
+
+    fn make_resistor(reference: &str) -> Symbol {
+        Symbol {
+            id: Id::new(),
+            reference: reference.into(),
+            value: "10k".into(),
+            kind: SymbolKind::Resistor,
+            position: crate::geometry::Point::ORIGIN,
+            rotation: 0.0,
+            key: String::new(),
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn sheet_flatten_prefixes_references() {
+        // Parent has R0; child sheet "PSU" has R1, R2.
+        let mut child = Schematic::new();
+        let r1 = make_resistor("R1");
+        let r2 = make_resistor("R2");
+        let r1_id = r1.id;
+        let r2_id = r2.id;
+        child.add_symbol(r1);
+        child.add_symbol(r2);
+        child.set_net(Net {
+            name: "VCC".into(),
+            connections: vec![
+                NetConnection {
+                    symbol_id: r1_id,
+                    pin_number: "1".into(),
+                },
+                NetConnection {
+                    symbol_id: r2_id,
+                    pin_number: "1".into(),
+                },
+            ],
+            class: None,
+        });
+
+        let mut parent = Schematic::new();
+        let r0 = make_resistor("R0");
+        parent.add_symbol(r0);
+        parent.add_sub_sheet(Sheet {
+            id: Id::new(),
+            reference: "PSU".into(),
+            schematic: child,
+            port_bindings: HashMap::new(),
+        });
+
+        let flat = parent.flatten();
+        // Parent's R0 stays as "R0"; child's R1/R2 become "PSU/R1" / "PSU/R2".
+        let refs: Vec<String> = flat
+            .symbol_order
+            .iter()
+            .filter_map(|id| flat.symbols.get(id).map(|s| s.reference.clone()))
+            .collect();
+        assert!(refs.iter().any(|r| r == "R0"), "{refs:?}");
+        assert!(refs.iter().any(|r| r == "PSU/R1"), "{refs:?}");
+        assert!(refs.iter().any(|r| r == "PSU/R2"), "{refs:?}");
+        // Net was unbound — stays prefixed.
+        assert!(flat.nets.contains_key("PSU/VCC"), "{:?}", flat.nets.keys());
+    }
+
+    #[test]
+    fn port_bound_to_parent_net_replaces_internal_name() {
+        // Child has net "INTERNAL_3V3" wired to port "3V3" (power).
+        // Parent binds port "3V3" → "+3V3". Flat net should be "+3V3".
+        let mut child = Schematic::new();
+        let r = make_resistor("R1");
+        let r_id = r.id;
+        child.add_symbol(r);
+        child.set_net(Net {
+            name: "INTERNAL_3V3".into(),
+            connections: vec![NetConnection {
+                symbol_id: r_id,
+                pin_number: "1".into(),
+            }],
+            class: None,
+        });
+        child.set_port(Port {
+            name: "3V3".into(),
+            direction: PortDirection::Power,
+            net: "INTERNAL_3V3".into(),
+        });
+
+        let mut parent = Schematic::new();
+        let mut bindings = HashMap::new();
+        bindings.insert("3V3".into(), "+3V3".into());
+        parent.add_sub_sheet(Sheet {
+            id: Id::new(),
+            reference: "PSU".into(),
+            schematic: child,
+            port_bindings: bindings,
+        });
+
+        let flat = parent.flatten();
+        assert!(
+            flat.nets.contains_key("+3V3"),
+            "expected +3V3, got {:?}",
+            flat.nets.keys()
+        );
+        assert!(
+            !flat.nets.contains_key("PSU/INTERNAL_3V3"),
+            "internal name leaked: {:?}",
+            flat.nets.keys()
+        );
+    }
+
+    #[test]
+    fn bus_expand_creates_individual_nets() {
+        let net = Net {
+            name: "D[0:7]".into(),
+            connections: vec![],
+            class: None,
+        };
+        assert!(net.is_bus());
+        let expanded = net.expand_bus();
+        assert_eq!(expanded.len(), 8);
+        assert_eq!(expanded[0], "D0");
+        assert_eq!(expanded[7], "D7");
+
+        // Reverse form normalises to lo..=hi.
+        let reversed = Net {
+            name: "ADDR[3:0]".into(),
+            connections: vec![],
+            class: None,
+        };
+        let rev = reversed.expand_bus();
+        assert_eq!(rev, vec!["ADDR0", "ADDR1", "ADDR2", "ADDR3"]);
+
+        // Plain name passes through.
+        let plain = Net {
+            name: "VCC".into(),
+            connections: vec![],
+            class: None,
+        };
+        assert!(!plain.is_bus());
+        assert_eq!(plain.expand_bus(), vec!["VCC".to_string()]);
+
+        // Bus net inside a Schematic also expands at flatten time.
+        let mut sch = Schematic::new();
+        sch.set_net(Net {
+            name: "D[0:1]".into(),
+            connections: vec![],
+            class: None,
+        });
+        let flat = sch.flatten();
+        assert!(flat.nets.contains_key("D0"));
+        assert!(flat.nets.contains_key("D1"));
+        assert!(!flat.nets.contains_key("D[0:1]"));
+    }
+
+    #[test]
+    fn unbound_port_kept_with_sheet_prefix() {
+        // Child declares a port but parent doesn't bind it.
+        let mut child = Schematic::new();
+        let r = make_resistor("R1");
+        let r_id = r.id;
+        child.add_symbol(r);
+        child.set_net(Net {
+            name: "DANGLING".into(),
+            connections: vec![NetConnection {
+                symbol_id: r_id,
+                pin_number: "1".into(),
+            }],
+            class: None,
+        });
+        child.set_port(Port {
+            name: "OUT".into(),
+            direction: PortDirection::Out,
+            net: "DANGLING".into(),
+        });
+
+        let mut parent = Schematic::new();
+        parent.add_sub_sheet(Sheet {
+            id: Id::new(),
+            reference: "RF".into(),
+            schematic: child,
+            port_bindings: HashMap::new(),
+        });
+
+        let flat = parent.flatten();
+        assert!(
+            flat.nets.contains_key("RF/DANGLING"),
+            "{:?}",
+            flat.nets.keys()
+        );
     }
 }
 

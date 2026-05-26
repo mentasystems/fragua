@@ -45,6 +45,27 @@ pub struct Project {
     /// Shared across every `Project` clone so the confirm modal sees
     /// the same buffer the script just pushed into.
     pending_library: Arc<RwLock<Vec<PendingLibraryEntry>>>,
+    /// Currently adopted fab capability profile, if any. DRC honors
+    /// this via `DrcOptions::fab_profile`. Lives in memory only —
+    /// not persisted to the project JSON (the agent re-adopts it
+    /// each session via `fab profile <name>`).
+    fab_profile: Arc<RwLock<Option<FabProfileHandle>>>,
+}
+
+/// Cheap handle around a fab profile so the project can share it with
+/// any number of DRC runs without re-cloning the inner struct. Boxed
+/// to avoid pulling `pcb-drc` types into the `Project` struct's public
+/// signature beyond this opaque-ish handle.
+#[derive(Debug, Clone)]
+pub struct FabProfileHandle {
+    pub name: String,
+    pub min_trace_width_mm: f64,
+    pub min_clearance_mm: f64,
+    pub min_drill_mm: f64,
+    pub min_annular_ring_mm: f64,
+    pub min_via_diameter_mm: f64,
+    pub min_edge_clearance_mm: f64,
+    pub max_board_size_mm: (f64, f64),
 }
 
 /// An in-flight library entry waiting for human review. Carries the
@@ -123,6 +144,7 @@ impl Project {
             library: Arc::new(library),
             save_path: Arc::new(RwLock::new(None)),
             pending_library: Arc::new(RwLock::new(Vec::new())),
+            fab_profile: Arc::new(RwLock::new(None)),
         };
         proj.bus.publish(Event::ProjectChanged);
         proj
@@ -273,6 +295,106 @@ impl Project {
             level,
             message: message.into(),
         });
+    }
+
+    /// Add (or replace by reference) a sub-sheet under the top-level
+    /// schematic. Returns `Err` if a sheet with the same reference
+    /// already exists with conflicting content; idempotent otherwise.
+    pub fn add_sub_sheet(&self, sheet: crate::Sheet) -> Result<(), String> {
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        if inner
+            .schematic
+            .sub_sheets
+            .iter()
+            .any(|s| s.reference == sheet.reference)
+        {
+            return Err(format!(
+                "sheet `{}` already exists at the top level",
+                sheet.reference
+            ));
+        }
+        inner.schematic.add_sub_sheet(sheet);
+        Ok(())
+    }
+
+    /// Declare or replace a port on the named sub-sheet (or the
+    /// top-level schematic when `sheet_ref` is empty).
+    pub fn set_sheet_port(
+        &self,
+        sheet_ref: &str,
+        port: crate::Port,
+    ) -> Result<(), String> {
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        if sheet_ref.is_empty() {
+            inner.schematic.set_port(port);
+            return Ok(());
+        }
+        let sheet = inner
+            .schematic
+            .sub_sheets
+            .iter_mut()
+            .find(|s| s.reference == sheet_ref)
+            .ok_or_else(|| format!("no sub-sheet `{sheet_ref}` at the top level"))?;
+        sheet.schematic.set_port(port);
+        Ok(())
+    }
+
+    /// Bind a port on a top-level sub-sheet to a parent net.
+    pub fn bind_sheet_port(
+        &self,
+        sheet_ref: &str,
+        port_name: &str,
+        parent_net: &str,
+    ) -> Result<(), String> {
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        let sheet = inner
+            .schematic
+            .sub_sheets
+            .iter_mut()
+            .find(|s| s.reference == sheet_ref)
+            .ok_or_else(|| format!("no sub-sheet `{sheet_ref}` at the top level"))?;
+        sheet
+            .port_bindings
+            .insert(port_name.to_string(), parent_net.to_string());
+        Ok(())
+    }
+
+    /// Update one or more stackup fields. Empty `updater` is a no-op.
+    pub fn update_stackup(&self, mut updater: impl FnMut(&mut crate::LayerStackup)) {
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        updater(&mut inner.board.stackup);
+    }
+
+    /// Currently adopted fab capability profile (cloned). `None` if
+    /// no profile is set — the agent runs `fab profile <name>` to
+    /// adopt one. DRC honors the profile on every subsequent run.
+    #[must_use]
+    pub fn fab_profile(&self) -> Option<FabProfileHandle> {
+        self.fab_profile
+            .read()
+            .expect("fab_profile lock poisoned")
+            .clone()
+    }
+
+    /// Adopt a fab profile. `None` clears it.
+    pub fn set_fab_profile(&self, profile: Option<FabProfileHandle>) {
+        *self
+            .fab_profile
+            .write()
+            .expect("fab_profile lock poisoned") = profile;
+    }
+
+    /// Flatten the schematic's sheet tree into a single namespace.
+    /// Convenience wrapper that snapshots the schematic and calls
+    /// [`Schematic::flatten`]. The router and DRC consume the FLAT
+    /// schematic — they don't see the hierarchy.
+    #[must_use]
+    pub fn flatten_schematic(&self) -> crate::FlatSchematic {
+        self.inner
+            .read()
+            .expect("project lock poisoned")
+            .schematic
+            .flatten()
     }
 
     /// Read the project state.
@@ -1172,6 +1294,7 @@ impl Project {
             library: Arc::new(library),
             save_path: Arc::new(RwLock::new(Some(path.to_path_buf()))),
             pending_library: Arc::new(RwLock::new(Vec::new())),
+            fab_profile: Arc::new(RwLock::new(None)),
         };
         proj.bus.publish(Event::ProjectChanged);
         Some(proj)

@@ -1173,6 +1173,156 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 args,
             })
         }
+        "sheet" => {
+            // sheet add REFERENCE [NAME]
+            // sheet port NAME (in|out|bidir|power) NET [on=SHEET_REF]
+            // sheet bind SHEET_REF PORT NET
+            need_args(line, tokens, 1, "sheet add|port|bind ...")?;
+            match tokens[1].as_str() {
+                "add" => {
+                    need_args(line, tokens, 2, "sheet add REFERENCE [NAME]")?;
+                    let reference = tokens[2].clone();
+                    let name = tokens.get(3).cloned().unwrap_or_default();
+                    Ok(Cmd {
+                        line,
+                        tool: "sheet.add".into(),
+                        args: json!({ "reference": reference, "name": name }),
+                    })
+                }
+                "port" => {
+                    // sheet port NAME DIR NET [on=SHEET_REF]
+                    need_args(
+                        line,
+                        tokens,
+                        4,
+                        "sheet port NAME (in|out|bidir|power) NET [on=SHEET_REF]",
+                    )?;
+                    let mut args = json!({
+                        "name": tokens[2],
+                        "direction": tokens[3],
+                        "net": tokens[4],
+                        "sheet": "",
+                    });
+                    apply_kv(
+                        &mut args,
+                        &tokens[5..],
+                        line,
+                        &[("on", AttrType::StrInto("sheet"))],
+                    )?;
+                    Ok(Cmd {
+                        line,
+                        tool: "sheet.port".into(),
+                        args,
+                    })
+                }
+                "bind" => {
+                    // sheet bind SHEET_REF PORT NET
+                    need_args(line, tokens, 4, "sheet bind SHEET_REF PORT NET")?;
+                    Ok(Cmd {
+                        line,
+                        tool: "sheet.bind".into(),
+                        args: json!({
+                            "reference": tokens[2],
+                            "port": tokens[3],
+                            "net": tokens[4],
+                        }),
+                    })
+                }
+                other => Err(ParseError::at(
+                    line,
+                    format!("sheet: unknown subcommand `{other}` (add|port|bind)"),
+                )),
+            }
+        }
+        "stackup" => {
+            // stackup show
+            // stackup set [er=N] [h=N] [t=N] [mask_t=N] [mask_er=N]
+            need_args(line, tokens, 1, "stackup show|set ...")?;
+            match tokens[1].as_str() {
+                "show" => Ok(Cmd {
+                    line,
+                    tool: "stackup.show".into(),
+                    args: json!({}),
+                }),
+                "set" => {
+                    let mut args = json!({});
+                    apply_kv(
+                        &mut args,
+                        &tokens[2..],
+                        line,
+                        &[
+                            ("er", AttrType::NumInto("dielectric_er")),
+                            ("h", AttrType::NumInto("dielectric_thickness_mm")),
+                            ("t", AttrType::NumInto("copper_thickness_mm")),
+                            ("mask_t", AttrType::NumInto("soldermask_thickness_mm")),
+                            ("mask_er", AttrType::NumInto("soldermask_er")),
+                        ],
+                    )?;
+                    Ok(Cmd {
+                        line,
+                        tool: "stackup.set".into(),
+                        args,
+                    })
+                }
+                other => Err(ParseError::at(
+                    line,
+                    format!("stackup: unknown subcommand `{other}` (show|set)"),
+                )),
+            }
+        }
+        "impedance" => {
+            // impedance suggest NET Z
+            need_args(line, tokens, 1, "impedance suggest NET Z")?;
+            match tokens[1].as_str() {
+                "suggest" => {
+                    need_args(line, tokens, 3, "impedance suggest NET Z")?;
+                    let z = parse_num(&tokens[3], line, "Z")?;
+                    Ok(Cmd {
+                        line,
+                        tool: "impedance.suggest".into(),
+                        args: json!({ "net": tokens[2], "target_ohms": z }),
+                    })
+                }
+                other => Err(ParseError::at(
+                    line,
+                    format!("impedance: unknown subcommand `{other}` (suggest)"),
+                )),
+            }
+        }
+        "fab" => {
+            // fab profile (jlcpcb|pcbway|oshpark)
+            // fab profile clear
+            // fab check  (alias for `drc` honouring the adopted profile)
+            need_args(line, tokens, 1, "fab profile NAME | fab profile clear | fab check")?;
+            match tokens[1].as_str() {
+                "profile" => {
+                    need_args(line, tokens, 2, "fab profile NAME|clear")?;
+                    let arg = tokens[2].as_str();
+                    if arg == "clear" {
+                        Ok(Cmd {
+                            line,
+                            tool: "fab.profile_clear".into(),
+                            args: json!({}),
+                        })
+                    } else {
+                        Ok(Cmd {
+                            line,
+                            tool: "fab.profile".into(),
+                            args: json!({ "name": arg }),
+                        })
+                    }
+                }
+                "check" => Ok(Cmd {
+                    line,
+                    tool: "drc.run".into(),
+                    args: json!({}),
+                }),
+                other => Err(ParseError::at(
+                    line,
+                    format!("fab: unknown subcommand `{other}` (profile|check)"),
+                )),
+            }
+        }
 
         other => Err(ParseError::at(line, format!("unknown verb `{other}`"))),
     }

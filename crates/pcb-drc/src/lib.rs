@@ -28,8 +28,8 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use pcb_core::{
-    Board, CopperLayer, Footprint, Length, Pad, PlacementMargin, Point, Pour, Rect, Schematic,
-    Trace,
+    Board, CopperLayer, Footprint, LayerStackup, Length, Pad, PlacementMargin, Point, Pour, Rect,
+    Schematic, Trace,
 };
 
 #[derive(Debug, Clone)]
@@ -65,6 +65,29 @@ pub struct DrcOptions {
     /// no `edge_mounted` flag changes that, since "the pads reach the
     /// edge" does not move the body inward.
     pub placement_margins: HashMap<String, PlacementMargin>,
+    /// Fab profile to enforce alongside the project-side minimums.
+    /// Every minimum-style check (trace width, drill, annular ring,
+    /// edge clearance) also gates against the profile's value, and
+    /// reports the worst of the two via `FabProfileMin`. Set via
+    /// `Project::set_fab_profile` or directly when constructing
+    /// `DrcOptions`.
+    pub fab_profile: Option<FabProfile>,
+}
+
+/// Capability profile for a specific fab house. Numbers are the
+/// minimum the fab will accept; anything stricter than this is fine.
+/// Maps to PCB-industry-standard "feature size" published by every
+/// major fab. See `pcb_fab::profiles` for built-in presets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FabProfile {
+    pub name: String,
+    pub min_trace_width_mm: f64,
+    pub min_clearance_mm: f64,
+    pub min_drill_mm: f64,
+    pub min_annular_ring_mm: f64,
+    pub min_via_diameter_mm: f64,
+    pub min_edge_clearance_mm: f64,
+    pub max_board_size_mm: (f64, f64),
 }
 
 /// Per-net rule overrides — fields default to "use the call-site
@@ -88,8 +111,86 @@ impl Default for DrcOptions {
             net_overrides: HashMap::new(),
             schematic: None,
             placement_margins: HashMap::new(),
+            fab_profile: None,
         }
     }
+}
+
+/// IPC-2141 microstrip impedance (single-ended) for a trace of width
+/// `width_mm` sitting over a reference plane separated by `height_mm`
+/// of dielectric with relative permittivity `er`. Copper thickness
+/// `copper_thickness_mm` adjusts the effective conductor width.
+///
+/// `Z0 = (87 / sqrt(Er + 1.41)) * ln(5.98 * H / (0.8 * W + T))`
+///
+/// Accurate to ~10 % within the formula's valid range
+/// (0.1 ≤ W/H ≤ 2.0, 1 ≤ Er ≤ 15). Good enough for the "did the agent
+/// pick a sane trace width" check; precise impedance work needs a 2D
+/// field solver.
+#[must_use]
+pub fn compute_microstrip_z0(
+    width_mm: f64,
+    height_mm: f64,
+    er: f64,
+    copper_thickness_mm: f64,
+) -> f64 {
+    if width_mm <= 0.0 || height_mm <= 0.0 {
+        return 0.0;
+    }
+    let denom = 0.8 * width_mm + copper_thickness_mm;
+    if denom <= 0.0 {
+        return 0.0;
+    }
+    let arg = 5.98 * height_mm / denom;
+    if arg <= 0.0 {
+        return 0.0;
+    }
+    let coeff = 87.0 / (er + 1.41).sqrt();
+    coeff * arg.ln()
+}
+
+/// Trace width that gives `z_target` ohms on the supplied stackup. Uses
+/// bisection between 0.05 mm and 5.0 mm — narrower gives high
+/// impedance, wider gives low. Returns the upper bound (5.0) if the
+/// target is unreachable (e.g. asking for 10 Ω on a 1.5 mm FR-4
+/// stackup).
+#[must_use]
+pub fn suggest_trace_width_for_impedance(z_target: f64, stackup: &LayerStackup) -> f64 {
+    let mut lo = 0.05_f64;
+    let mut hi = 5.0_f64;
+    let z = |w: f64| {
+        compute_microstrip_z0(
+            w,
+            stackup.dielectric_thickness_mm,
+            stackup.dielectric_er,
+            stackup.copper_thickness_mm,
+        )
+    };
+    // Narrower traces give HIGHER impedance, so the function is
+    // monotonically decreasing in width. We bisect to find the width
+    // whose impedance equals z_target.
+    let z_lo = z(lo);
+    let z_hi = z(hi);
+    if z_target >= z_lo {
+        return lo;
+    }
+    if z_target <= z_hi {
+        return hi;
+    }
+    for _ in 0..60 {
+        let mid = f64::midpoint(lo, hi);
+        let zm = z(mid);
+        if (zm - z_target).abs() < 1e-3 {
+            return mid;
+        }
+        if zm > z_target {
+            // mid is narrower than the answer
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    f64::midpoint(lo, hi)
 }
 
 /// Effective clearance required between two nets: the strictest of the
@@ -153,6 +254,18 @@ pub enum ViolationKind {
     /// `nets_allowed` list is not honoured in this iteration (see
     /// `Keepout` docs).
     KeepoutViolation,
+    /// A net's class declares a `target_impedance_ohms`, but the
+    /// trace width assigned to the net (via the class or the global
+    /// default) deviates from the target by more than 5 % when
+    /// evaluated against the board's stackup. Carries the net name,
+    /// target, and actual values in the message.
+    ImpedanceMismatch,
+    /// A geometric property of a routed item is below the currently
+    /// adopted fab profile's minimum (trace width, drill diameter,
+    /// annular ring, edge clearance). Distinct from `NarrowTrace` /
+    /// `SmallDrill` so the agent can see which limit fired — the
+    /// project's own DRC defaults or the fab profile.
+    FabProfileMin,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -205,7 +318,163 @@ pub fn run(board: &Board, opts: &DrcOptions) -> DrcReport {
         check_body_off_board(board, outline, opts, &mut report);
     }
     check_keepouts(board, &mut report);
+    check_impedance(board, opts, &mut report);
+    if let Some(profile) = opts.fab_profile.as_ref() {
+        check_fab_profile(board, profile, &mut report);
+    }
     report
+}
+
+/// For every net whose class declares `target_impedance_ohms`, compute
+/// the Z0 the resolved trace width would actually produce on the
+/// board's stackup and emit `ImpedanceMismatch` when the deviation
+/// exceeds 5 %. Single-ended only — diff-pair impedance is a different
+/// formula and isn't checked here.
+fn check_impedance(board: &Board, opts: &DrcOptions, report: &mut DrcReport) {
+    let Some(sch) = opts.schematic.as_ref() else {
+        return;
+    };
+    let default_width = opts.min_trace_width.to_mm().max(0.10);
+    for net_name in sch.nets.keys() {
+        let class = sch.class_for(net_name);
+        let Some(z_target) = class.target_impedance_ohms else {
+            continue;
+        };
+        let width_mm = class.trace_width_mm.unwrap_or(default_width);
+        let z_actual = compute_microstrip_z0(
+            width_mm,
+            board.stackup.dielectric_thickness_mm,
+            board.stackup.dielectric_er,
+            board.stackup.copper_thickness_mm,
+        );
+        if z_actual <= 0.0 {
+            continue;
+        }
+        let dev = (z_actual - z_target).abs() / z_target;
+        if dev > 0.05 {
+            report.push(Violation {
+                kind: ViolationKind::ImpedanceMismatch,
+                severity: Severity::Warning,
+                message: format!(
+                    "net {net_name}: trace width {width_mm:.3} mm produces Z0≈{z_actual:.1} Ω (target {z_target:.1} Ω, deviation {:.1}%)",
+                    dev * 100.0,
+                ),
+                x_mm: 0.0,
+                y_mm: 0.0,
+                involved: vec![net_name.clone()],
+            });
+        }
+    }
+}
+
+/// Gate every minimum-style check against the adopted fab profile.
+/// Emits `FabProfileMin` for traces narrower than `min_trace_width_mm`,
+/// vias whose drill or annular ring is below the profile, and pads
+/// whose drill is below the profile. Board outline area larger than
+/// the profile's max gets a single warning.
+fn check_fab_profile(board: &Board, profile: &FabProfile, report: &mut DrcReport) {
+    for trace in &board.traces {
+        let w = trace.width.to_mm();
+        if w + 1e-6 < profile.min_trace_width_mm {
+            let mx = f64::midpoint(trace.start.x.to_mm(), trace.end.x.to_mm());
+            let my = f64::midpoint(trace.start.y.to_mm(), trace.end.y.to_mm());
+            report.push(Violation {
+                kind: ViolationKind::FabProfileMin,
+                severity: Severity::Error,
+                message: format!(
+                    "trace {} width {w:.3} mm < {} min {:.3} mm",
+                    trace.net, profile.name, profile.min_trace_width_mm,
+                ),
+                x_mm: mx,
+                y_mm: my,
+                involved: vec![trace.net.clone()],
+            });
+        }
+    }
+    for via in &board.vias {
+        let d = via.drill.to_mm();
+        if d + 1e-6 < profile.min_drill_mm {
+            report.push(Violation {
+                kind: ViolationKind::FabProfileMin,
+                severity: Severity::Error,
+                message: format!(
+                    "via on {} drilled at {d:.3} mm < {} min {:.3} mm",
+                    via.net, profile.name, profile.min_drill_mm,
+                ),
+                x_mm: via.position.x.to_mm(),
+                y_mm: via.position.y.to_mm(),
+                involved: vec![via.net.clone()],
+            });
+        }
+        let ring = (via.diameter.to_mm() - d) / 2.0;
+        if ring + 1e-6 < profile.min_annular_ring_mm {
+            report.push(Violation {
+                kind: ViolationKind::FabProfileMin,
+                severity: Severity::Error,
+                message: format!(
+                    "via on {} annular ring {ring:.3} mm < {} min {:.3} mm",
+                    via.net, profile.name, profile.min_annular_ring_mm,
+                ),
+                x_mm: via.position.x.to_mm(),
+                y_mm: via.position.y.to_mm(),
+                involved: vec![via.net.clone()],
+            });
+        }
+        if via.diameter.to_mm() + 1e-6 < profile.min_via_diameter_mm {
+            report.push(Violation {
+                kind: ViolationKind::FabProfileMin,
+                severity: Severity::Error,
+                message: format!(
+                    "via on {} diameter {:.3} mm < {} min {:.3} mm",
+                    via.net,
+                    via.diameter.to_mm(),
+                    profile.name,
+                    profile.min_via_diameter_mm,
+                ),
+                x_mm: via.position.x.to_mm(),
+                y_mm: via.position.y.to_mm(),
+                involved: vec![via.net.clone()],
+            });
+        }
+    }
+    for fp in board.footprints_in_order() {
+        for pad in &fp.pads {
+            let Some(drill) = pad.drill else { continue };
+            let d = drill.to_mm();
+            if d + 1e-6 < profile.min_drill_mm {
+                let c = fp.pad_world_center(pad);
+                report.push(Violation {
+                    kind: ViolationKind::FabProfileMin,
+                    severity: Severity::Error,
+                    message: format!(
+                        "pad {}/{} drilled at {d:.3} mm < {} min {:.3} mm",
+                        fp.reference, pad.number, profile.name, profile.min_drill_mm,
+                    ),
+                    x_mm: c.x.to_mm(),
+                    y_mm: c.y.to_mm(),
+                    involved: vec![fp.reference.clone()],
+                });
+            }
+        }
+    }
+    if let Some(outline) = board.outline {
+        let w = outline.width().to_mm();
+        let h = outline.height().to_mm();
+        let (mw, mh) = profile.max_board_size_mm;
+        if w > mw + 1e-6 || h > mh + 1e-6 {
+            report.push(Violation {
+                kind: ViolationKind::FabProfileMin,
+                severity: Severity::Warning,
+                message: format!(
+                    "board {w:.1} × {h:.1} mm exceeds {} standard tier {:.0} × {:.0} mm",
+                    profile.name, mw, mh,
+                ),
+                x_mm: f64::midpoint(outline.min.x.to_mm(), outline.max.x.to_mm()),
+                y_mm: f64::midpoint(outline.min.y.to_mm(), outline.max.y.to_mm()),
+                involved: Vec::new(),
+            });
+        }
+    }
 }
 
 /// Every trace and via vs every keepout. A trace violates when any
@@ -1076,4 +1345,217 @@ fn segment_aabb_distance(a: (f64, f64), b: (f64, f64), rect: Rect) -> f64 {
         }
     }
     best
+}
+
+#[cfg(test)]
+mod feature3_tests {
+    use super::*;
+    use pcb_core::{Board, Footprint, Id, NetClass, Pad, Point, Schematic, Trace};
+    use std::sync::Arc;
+
+    fn fr4_stackup() -> LayerStackup {
+        LayerStackup::default()
+    }
+
+    #[test]
+    fn impedance_within_tolerance_passes_drc() {
+        // Standard FR-4 1.5 mm 1 oz: 50 Ω microstrip ≈ 2.85 mm wide.
+        // Compute the actual width that matches first, then set it on
+        // the class so the test is robust to formula constants.
+        let stackup = fr4_stackup();
+        let w_50 = suggest_trace_width_for_impedance(50.0, &stackup);
+        let mut sch = Schematic::new();
+        sch.set_net_class(NetClass {
+            name: "rf50".into(),
+            trace_width_mm: Some(w_50),
+            target_impedance_ohms: Some(50.0),
+            ..NetClass::default()
+        });
+        sch.assign_net_to_class("RFOUT", "rf50");
+        sch.set_net(pcb_core::Net {
+            name: "RFOUT".into(),
+            connections: vec![],
+            class: Some("rf50".into()),
+        });
+
+        let mut board = Board::new();
+        board.stackup = stackup;
+        let opts = DrcOptions {
+            schematic: Some(Arc::new(sch)),
+            ..DrcOptions::default()
+        };
+        let report = run(&board, &opts);
+        assert!(
+            !report.violations.iter().any(|v| v.kind == ViolationKind::ImpedanceMismatch),
+            "expected no impedance mismatch, got {:?}",
+            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn impedance_too_wide_flags_drc() {
+        // 0.25 mm trace on 1.5 mm FR-4 → ~110 Ω, far from 50 Ω target.
+        let stackup = fr4_stackup();
+        let mut sch = Schematic::new();
+        sch.set_net_class(NetClass {
+            name: "rf50".into(),
+            trace_width_mm: Some(0.25),
+            target_impedance_ohms: Some(50.0),
+            ..NetClass::default()
+        });
+        sch.assign_net_to_class("RFOUT", "rf50");
+        sch.set_net(pcb_core::Net {
+            name: "RFOUT".into(),
+            connections: vec![],
+            class: Some("rf50".into()),
+        });
+
+        let mut board = Board::new();
+        board.stackup = stackup;
+        let opts = DrcOptions {
+            schematic: Some(Arc::new(sch)),
+            ..DrcOptions::default()
+        };
+        let report = run(&board, &opts);
+        assert!(
+            report.violations.iter().any(|v| v.kind == ViolationKind::ImpedanceMismatch),
+            "expected impedance mismatch for narrow trace, got {:?}",
+            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn suggest_width_matches_target_after_recompute() {
+        let stackup = fr4_stackup();
+        let target = 50.0;
+        let w = suggest_trace_width_for_impedance(target, &stackup);
+        let z = compute_microstrip_z0(
+            w,
+            stackup.dielectric_thickness_mm,
+            stackup.dielectric_er,
+            stackup.copper_thickness_mm,
+        );
+        assert!(
+            (z - target).abs() < 0.5,
+            "suggested width {w:.4} mm gives {z:.2} Ω, expected {target} Ω",
+        );
+    }
+
+    fn make_pad_fp(net: &str) -> Footprint {
+        Footprint {
+            id: Id::new(),
+            reference: "U1".into(),
+            value: String::new(),
+            library: "lib".into(),
+            position: Point::ORIGIN,
+            rotation: 0.0,
+            layer: pcb_core::CopperLayer::Top,
+            pads: vec![Pad {
+                number: "1".into(),
+                name: String::new(),
+                offset: Point::ORIGIN,
+                size: (pcb_core::Length::from_mm(1.0), pcb_core::Length::from_mm(1.0)),
+                layer: pcb_core::CopperLayer::Top,
+                net: Some(net.into()),
+                drill: None,
+            }],
+            key: String::new(),
+            description: String::new(),
+            edge_mounted: false,
+            silk: vec![],
+        }
+    }
+
+    fn jlc_profile() -> FabProfile {
+        FabProfile {
+            name: "jlcpcb".into(),
+            min_trace_width_mm: 0.127,
+            min_clearance_mm: 0.127,
+            min_drill_mm: 0.20,
+            min_annular_ring_mm: 0.13,
+            min_via_diameter_mm: 0.45,
+            min_edge_clearance_mm: 0.20,
+            max_board_size_mm: (100.0, 100.0),
+        }
+    }
+
+    #[test]
+    fn jlcpcb_profile_flags_subminimum_trace() {
+        let mut board = Board::new();
+        board.add_footprint(make_pad_fp("SIG"));
+        board.add_trace(Trace {
+            id: Id::new(),
+            layer: pcb_core::CopperLayer::Top,
+            start: Point::new(pcb_core::Length::from_mm(0.0), pcb_core::Length::from_mm(0.0)),
+            end: Point::new(pcb_core::Length::from_mm(2.0), pcb_core::Length::from_mm(0.0)),
+            // 0.10 mm is below JLCPCB's 0.127 mm minimum.
+            width: pcb_core::Length::from_mm(0.10),
+            net: "SIG".into(),
+        });
+        let opts = DrcOptions {
+            fab_profile: Some(jlc_profile()),
+            ..DrcOptions::default()
+        };
+        let report = run(&board, &opts);
+        assert!(
+            report.violations.iter().any(|v| v.kind == ViolationKind::FabProfileMin),
+            "expected FabProfileMin, got {:?}",
+            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn jlcpcb_profile_accepts_default_trace() {
+        let mut board = Board::new();
+        board.add_footprint(make_pad_fp("SIG"));
+        // 0.25 mm — well above the 0.127 mm JLCPCB minimum.
+        board.add_trace(Trace {
+            id: Id::new(),
+            layer: pcb_core::CopperLayer::Top,
+            start: Point::new(pcb_core::Length::from_mm(0.0), pcb_core::Length::from_mm(0.0)),
+            end: Point::new(pcb_core::Length::from_mm(2.0), pcb_core::Length::from_mm(0.0)),
+            width: pcb_core::Length::from_mm(0.25),
+            net: "SIG".into(),
+        });
+        let opts = DrcOptions {
+            fab_profile: Some(jlc_profile()),
+            ..DrcOptions::default()
+        };
+        let report = run(&board, &opts);
+        assert!(
+            !report.violations.iter().any(|v| v.kind == ViolationKind::FabProfileMin),
+            "should not flag a 0.25 mm trace; got {:?}",
+            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn clear_profile_drops_violations() {
+        let mut board = Board::new();
+        board.add_footprint(make_pad_fp("SIG"));
+        board.add_trace(Trace {
+            id: Id::new(),
+            layer: pcb_core::CopperLayer::Top,
+            start: Point::new(pcb_core::Length::from_mm(0.0), pcb_core::Length::from_mm(0.0)),
+            end: Point::new(pcb_core::Length::from_mm(2.0), pcb_core::Length::from_mm(0.0)),
+            // Below JLCPCB minimum but above the default min_trace_width.
+            width: pcb_core::Length::from_mm(0.10),
+            net: "SIG".into(),
+        });
+        // With the profile set we expect a FabProfileMin.
+        let with_profile = run(
+            &board,
+            &DrcOptions {
+                fab_profile: Some(jlc_profile()),
+                ..DrcOptions::default()
+            },
+        );
+        assert!(with_profile.violations.iter().any(|v| v.kind == ViolationKind::FabProfileMin));
+        // Without the profile, no FabProfileMin should appear (NarrowTrace may, with default).
+        let without = run(&board, &DrcOptions::default());
+        assert!(
+            !without.violations.iter().any(|v| v.kind == ViolationKind::FabProfileMin),
+            "clearing the profile should drop FabProfileMin violations",
+        );
+    }
 }

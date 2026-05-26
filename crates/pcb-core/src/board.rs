@@ -467,6 +467,64 @@ pub struct Keepout {
     pub label: String,
 }
 
+/// Minimal copper / dielectric stackup. Lives on the board so DRC can
+/// derive single-ended impedance from a trace width without per-call
+/// configuration. Defaults represent a generic 2-layer 1.5 mm FR-4 board
+/// with 1 oz copper — JLCPCB's standard offering.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LayerStackup {
+    /// Copper thickness in mm (default 0.035 mm = 1 oz).
+    #[serde(default = "default_copper_thickness_mm")]
+    pub copper_thickness_mm: f64,
+    /// Dielectric thickness between top and bottom copper (default 1.5 mm).
+    #[serde(default = "default_dielectric_thickness_mm")]
+    pub dielectric_thickness_mm: f64,
+    /// Dielectric Er (default 4.5 for FR-4).
+    #[serde(default = "default_dielectric_er")]
+    pub dielectric_er: f64,
+    /// Soldermask thickness (default 0.025 mm).
+    #[serde(default = "default_soldermask_thickness_mm")]
+    pub soldermask_thickness_mm: f64,
+    /// Soldermask Er (default 3.5).
+    #[serde(default = "default_soldermask_er")]
+    pub soldermask_er: f64,
+}
+
+fn default_copper_thickness_mm() -> f64 {
+    0.035
+}
+fn default_dielectric_thickness_mm() -> f64 {
+    1.5
+}
+fn default_dielectric_er() -> f64 {
+    4.5
+}
+fn default_soldermask_thickness_mm() -> f64 {
+    0.025
+}
+fn default_soldermask_er() -> f64 {
+    3.5
+}
+
+impl Default for LayerStackup {
+    fn default() -> Self {
+        Self {
+            copper_thickness_mm: default_copper_thickness_mm(),
+            dielectric_thickness_mm: default_dielectric_thickness_mm(),
+            dielectric_er: default_dielectric_er(),
+            soldermask_thickness_mm: default_soldermask_thickness_mm(),
+            soldermask_er: default_soldermask_er(),
+        }
+    }
+}
+
+/// Serde helper: emit `LayerStackup` only when it differs from the
+/// default. Keeps existing on-disk projects byte-identical.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_stackup(s: &LayerStackup) -> bool {
+    *s == LayerStackup::default()
+}
+
 /// The board itself.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Board {
@@ -506,6 +564,10 @@ pub struct Board {
     /// separate from footprint-attached silk.
     #[serde(default)]
     pub silk_texts: Vec<SilkText>,
+    /// Copper / dielectric stackup, used by DRC to derive single-ended
+    /// impedance from a trace width. Defaults to FR-4 1.5 mm 1 oz.
+    #[serde(default, skip_serializing_if = "is_default_stackup")]
+    pub stackup: LayerStackup,
 }
 
 /// Serde helper: omit the corner-radius field when it's the default

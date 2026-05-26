@@ -18,6 +18,9 @@
 //! (ERC + DRC + manufacturing-DRC), generates every artifact and
 //! ships them as a single `.zip` ready to upload to the fab portal.
 
+pub mod profiles;
+pub use profiles::FabProfile;
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;

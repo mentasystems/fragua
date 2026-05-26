@@ -408,6 +408,14 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "schematic.assign_net_class" => tool_schematic_assign_net_class(project, args),
         "pour.auto" => tool_auto_pour(project, args),
         "output.fab_pack" => tool_output_fab_pack(project, args),
+        "sheet.add" => tool_sheet_add(project, args),
+        "sheet.port" => tool_sheet_port(project, args),
+        "sheet.bind" => tool_sheet_bind(project, args),
+        "stackup.show" => tool_stackup_show(project),
+        "stackup.set" => tool_stackup_set(project, args),
+        "impedance.suggest" => tool_impedance_suggest(project, args),
+        "fab.profile" => tool_fab_profile(project, args),
+        "fab.profile_clear" => tool_fab_profile_clear(project),
         _ => Err(ToolError {
             code: error_code::METHOD_NOT_FOUND,
             message: format!("unknown tool: {name}"),
@@ -3283,6 +3291,18 @@ fn tool_drc_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         opts.routing_inefficient_ratio = v;
     }
 
+    if let Some(p) = project.fab_profile() {
+        opts.fab_profile = Some(pcb_drc::FabProfile {
+            name: p.name,
+            min_trace_width_mm: p.min_trace_width_mm,
+            min_clearance_mm: p.min_clearance_mm,
+            min_drill_mm: p.min_drill_mm,
+            min_annular_ring_mm: p.min_annular_ring_mm,
+            min_via_diameter_mm: p.min_via_diameter_mm,
+            min_edge_clearance_mm: p.min_edge_clearance_mm,
+            max_board_size_mm: p.max_board_size_mm,
+        });
+    }
     let snap = project.read();
     // Hand the schematic to DRC so per-net class clearances are
     // enforced (no per-net override map needed).
@@ -3645,6 +3665,283 @@ fn tool_output_fab_pack(project: &Project, args: &Value) -> Result<Value, ToolEr
         "out_dir": out_dir.display().to_string(),
         "files": path_strings,
     })))
+}
+
+// ─── Feature 8 — hierarchical schematic ─────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct SheetAddInput {
+    reference: String,
+    /// Display name for the sub-sheet — surfaces in UI labels.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+fn tool_sheet_add(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: SheetAddInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("sheet.add: {e}")))?;
+    if input.reference.trim().is_empty() {
+        return Err(ToolError::invalid_params("sheet.add: reference is empty"));
+    }
+    let sheet = pcb_core::Sheet {
+        id: pcb_core::Id::new(),
+        reference: input.reference.clone(),
+        schematic: pcb_core::Schematic::new(),
+        port_bindings: std::collections::HashMap::new(),
+    };
+    let _ = input.name; // reserved for future UI labelling
+    project
+        .add_sub_sheet(sheet)
+        .map_err(ToolError::invalid_params)?;
+    project.log(
+        ActivityLevel::Info,
+        format!("sheet.add: {}", input.reference),
+    );
+    Ok(text_result(format!("sheet `{}` added", input.reference)).with_data(json!({
+        "reference": input.reference,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct SheetPortInput {
+    /// Sub-sheet reference to attach the port to. Empty = top-level.
+    #[serde(default)]
+    sheet: String,
+    /// Port name as referenced from the parent via bindings.
+    name: String,
+    /// Direction from the sub-sheet's perspective.
+    direction: String,
+    /// Internal net inside the sub-sheet that this port wires to.
+    net: String,
+}
+
+fn tool_sheet_port(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: SheetPortInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("sheet.port: {e}")))?;
+    let dir = match input.direction.to_ascii_lowercase().as_str() {
+        "in" => pcb_core::PortDirection::In,
+        "out" => pcb_core::PortDirection::Out,
+        "bidir" | "io" => pcb_core::PortDirection::Bidir,
+        "power" | "pwr" => pcb_core::PortDirection::Power,
+        other => {
+            return Err(ToolError::invalid_params(format!(
+                "sheet.port: unknown direction `{other}` (in|out|bidir|power)"
+            )))
+        }
+    };
+    let port = pcb_core::Port {
+        name: input.name.clone(),
+        direction: dir,
+        net: input.net.clone(),
+    };
+    project
+        .set_sheet_port(&input.sheet, port)
+        .map_err(ToolError::invalid_params)?;
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "sheet.port: {}.{} -> {}",
+            if input.sheet.is_empty() { "root" } else { input.sheet.as_str() },
+            input.name,
+            input.net
+        ),
+    );
+    Ok(text_result(format!(
+        "port `{}` ({}) on sheet `{}` declared (internal net `{}`)",
+        input.name,
+        input.direction,
+        if input.sheet.is_empty() { "root" } else { input.sheet.as_str() },
+        input.net,
+    ))
+    .with_data(json!({
+        "sheet": input.sheet,
+        "name": input.name,
+        "direction": input.direction,
+        "net": input.net,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct SheetBindInput {
+    /// Sub-sheet instance reference to bind a port on.
+    reference: String,
+    /// Port name (as declared inside the sub-sheet).
+    port: String,
+    /// Parent net to wire the port to.
+    net: String,
+}
+
+fn tool_sheet_bind(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: SheetBindInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("sheet.bind: {e}")))?;
+    project
+        .bind_sheet_port(&input.reference, &input.port, &input.net)
+        .map_err(ToolError::invalid_params)?;
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "sheet.bind: {}.{} -> {}",
+            input.reference, input.port, input.net
+        ),
+    );
+    Ok(text_result(format!(
+        "sheet `{}` port `{}` bound to parent net `{}`",
+        input.reference, input.port, input.net
+    ))
+    .with_data(json!({
+        "reference": input.reference,
+        "port": input.port,
+        "net": input.net,
+    })))
+}
+
+// ─── Feature 10 — stackup + impedance ───────────────────────────────
+
+fn tool_stackup_show(project: &Project) -> Result<Value, ToolError> {
+    let snap = project.read();
+    let s = snap.board().stackup;
+    drop(snap);
+    let text = format!(
+        "stackup: copper {:.3} mm, dielectric {:.3} mm (Er {:.2}), mask {:.3} mm (Er {:.2})",
+        s.copper_thickness_mm,
+        s.dielectric_thickness_mm,
+        s.dielectric_er,
+        s.soldermask_thickness_mm,
+        s.soldermask_er,
+    );
+    Ok(text_result(text).with_data(json!({
+        "copper_thickness_mm": s.copper_thickness_mm,
+        "dielectric_thickness_mm": s.dielectric_thickness_mm,
+        "dielectric_er": s.dielectric_er,
+        "soldermask_thickness_mm": s.soldermask_thickness_mm,
+        "soldermask_er": s.soldermask_er,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct StackupSetInput {
+    #[serde(default)]
+    copper_thickness_mm: Option<f64>,
+    #[serde(default)]
+    dielectric_thickness_mm: Option<f64>,
+    #[serde(default)]
+    dielectric_er: Option<f64>,
+    #[serde(default)]
+    soldermask_thickness_mm: Option<f64>,
+    #[serde(default)]
+    soldermask_er: Option<f64>,
+}
+
+fn tool_stackup_set(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: StackupSetInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("stackup.set: {e}")))?;
+    project.update_stackup(|s| {
+        if let Some(v) = input.copper_thickness_mm {
+            s.copper_thickness_mm = v;
+        }
+        if let Some(v) = input.dielectric_thickness_mm {
+            s.dielectric_thickness_mm = v;
+        }
+        if let Some(v) = input.dielectric_er {
+            s.dielectric_er = v;
+        }
+        if let Some(v) = input.soldermask_thickness_mm {
+            s.soldermask_thickness_mm = v;
+        }
+        if let Some(v) = input.soldermask_er {
+            s.soldermask_er = v;
+        }
+    });
+    project.log(ActivityLevel::Info, "stackup.set");
+    tool_stackup_show(project)
+}
+
+#[derive(Debug, Deserialize)]
+struct ImpedanceSuggestInput {
+    /// Net name — included only for log clarity; the suggestion is a
+    /// pure function of the stackup and target impedance.
+    #[serde(default)]
+    net: Option<String>,
+    target_ohms: f64,
+}
+
+fn tool_impedance_suggest(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: ImpedanceSuggestInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("impedance.suggest: {e}")))?;
+    let snap = project.read();
+    let stackup = snap.board().stackup;
+    drop(snap);
+    let w = pcb_drc::suggest_trace_width_for_impedance(input.target_ohms, &stackup);
+    let z = pcb_drc::compute_microstrip_z0(
+        w,
+        stackup.dielectric_thickness_mm,
+        stackup.dielectric_er,
+        stackup.copper_thickness_mm,
+    );
+    let label = input.net.as_deref().unwrap_or("(unspecified)");
+    Ok(text_result(format!(
+        "net {label}: width {w:.3} mm → Z0 ≈ {z:.1} Ω (target {:.1} Ω)",
+        input.target_ohms
+    ))
+    .with_data(json!({
+        "net": input.net,
+        "target_ohms": input.target_ohms,
+        "trace_width_mm": w,
+        "z0_ohms": z,
+    })))
+}
+
+// ─── Feature 11 — fab capability profiles ───────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct FabProfileInput {
+    name: String,
+}
+
+fn tool_fab_profile(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: FabProfileInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("fab.profile: {e}")))?;
+    let profile = pcb_fab::profiles::by_name(&input.name).ok_or_else(|| {
+        ToolError::invalid_params(format!(
+            "fab.profile: unknown `{}` — supported: jlcpcb, pcbway, oshpark",
+            input.name
+        ))
+    })?;
+    let handle = pcb_core::FabProfileHandle {
+        name: profile.name.clone(),
+        min_trace_width_mm: profile.min_trace_width_mm,
+        min_clearance_mm: profile.min_clearance_mm,
+        min_drill_mm: profile.min_drill_mm,
+        min_annular_ring_mm: profile.min_annular_ring_mm,
+        min_via_diameter_mm: profile.min_via_diameter_mm,
+        min_edge_clearance_mm: profile.min_edge_clearance_mm,
+        max_board_size_mm: profile.max_board_size_mm,
+    };
+    project.set_fab_profile(Some(handle.clone()));
+    project.log(
+        ActivityLevel::Info,
+        format!("fab.profile: adopted {}", handle.name),
+    );
+    Ok(text_result(format!(
+        "adopted fab profile `{}` (min trace {:.3} mm, min drill {:.3} mm)",
+        handle.name, handle.min_trace_width_mm, handle.min_drill_mm
+    ))
+    .with_data(json!({
+        "name": handle.name,
+        "min_trace_width_mm": handle.min_trace_width_mm,
+        "min_clearance_mm": handle.min_clearance_mm,
+        "min_drill_mm": handle.min_drill_mm,
+        "min_annular_ring_mm": handle.min_annular_ring_mm,
+        "min_via_diameter_mm": handle.min_via_diameter_mm,
+        "min_edge_clearance_mm": handle.min_edge_clearance_mm,
+        "max_board_size_mm": [handle.max_board_size_mm.0, handle.max_board_size_mm.1],
+    })))
+}
+
+fn tool_fab_profile_clear(project: &Project) -> Result<Value, ToolError> {
+    project.set_fab_profile(None);
+    project.log(ActivityLevel::Info, "fab.profile_clear");
+    Ok(text_result("fab profile cleared".to_string()).into())
 }
 
 /// Builds the tool result envelope returned to the script API caller.
