@@ -11,7 +11,7 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
-use pcb_core::{Board, Length};
+use pcb_core::{Board, Id, Length};
 use pcb_drc::DrcOptions;
 use pcb_router::{NetOverride, Outcome, RouteOptions, RouteReport};
 
@@ -21,6 +21,9 @@ pub const CELL_CHOICES_MM: &[f64] = &[0.20, 0.25, 0.30, 0.40];
 pub const VIA_COST_CHOICES: &[u32] = &[4, 6, 8, 10, 12, 16];
 /// Choices for the clearance (mm) gene.
 pub const CLEARANCE_CHOICES_MM: &[f64] = &[0.20, 0.25, 0.30, 0.35, 0.40];
+/// Footprint rotation gene. Restricted to 90° increments so KiCad-style
+/// orthogonal layouts stay legible; the placer already snaps to these.
+pub const ROTATION_CHOICES_DEG: &[f32] = &[0.0, 90.0, 180.0, 270.0];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Algorithm {
@@ -109,6 +112,10 @@ struct Genome {
     via_cost: u32,
     clearance_mm: f64,
     net_order: Vec<String>,
+    /// One rotation per footprint, indexed by position in the
+    /// `footprint_ids` vector returned by `collect_footprint_ids`.
+    /// Values are snapped to `ROTATION_CHOICES_DEG`.
+    rotations: Vec<f32>,
 }
 
 impl Genome {
@@ -126,14 +133,61 @@ impl Genome {
     }
 
     fn cache_key(&self) -> String {
+        let rots: Vec<String> = self
+            .rotations
+            .iter()
+            .map(|r| format!("{}", r.round() as i32))
+            .collect();
         format!(
-            "{:.4}|{}|{:.4}|{}",
+            "{:.4}|{}|{:.4}|{}|{}",
             self.cell_mm,
             self.via_cost,
             self.clearance_mm,
-            self.net_order.join(",")
+            self.net_order.join(","),
+            rots.join("_"),
         )
     }
+}
+
+/// Stable list of footprint ids that the GA is allowed to rotate, in
+/// `footprint_order`. Excludes footprints with any through-hole pad
+/// (connectors, headers — their mechanical position is fixed by the
+/// enclosure) and ICs/complex packages with more than 6 pads (rotating
+/// a 40-pin IC almost always makes routing worse, never better; the
+/// reward isn't worth the search-space blow-up). The GA addresses
+/// rotations by index into this vector, so it must be deterministic
+/// across calls on the same board.
+pub fn collect_footprint_ids(board: &Board) -> Vec<Id> {
+    board
+        .footprints_in_order()
+        .filter(|fp| !is_rotation_locked(fp))
+        .map(|fp| fp.id)
+        .collect()
+}
+
+/// Heuristic: should the GA leave this footprint's rotation alone?
+/// True for any footprint with through-hole pads OR more than 6 pads.
+fn is_rotation_locked(fp: &pcb_core::Footprint) -> bool {
+    if fp.pads.iter().any(|p| p.drill.is_some()) {
+        return true;
+    }
+    fp.pads.len() > 6
+}
+
+/// Snap an arbitrary rotation (the placer may have left a footprint at
+/// e.g. -90°) to the closest member of `ROTATION_CHOICES_DEG`. Keeps
+/// the baseline genome on the canonical 4-state lattice.
+fn snap_rotation(deg: f32) -> f32 {
+    let normalised = deg.rem_euclid(360.0);
+    *ROTATION_CHOICES_DEG
+        .iter()
+        .min_by(|a, b| {
+            (normalised - *a)
+                .abs()
+                .partial_cmp(&(normalised - *b).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(&0.0)
 }
 
 /// Collect all net names referenced by board pads, deduplicated, in a
@@ -167,23 +221,37 @@ fn compute_score_from_metrics(m: &TrialMetrics) -> f64 {
         + m.failed_nets as f64 * 100_000.0
 }
 
-fn random_genome(rng: &mut StdRng, nets: &[String]) -> Genome {
+fn random_genome(rng: &mut StdRng, nets: &[String], n_footprints: usize) -> Genome {
     let mut net_order = nets.to_vec();
     net_order.shuffle(rng);
+    let rotations: Vec<f32> = (0..n_footprints)
+        .map(|_| *ROTATION_CHOICES_DEG.choose(rng).expect("non-empty"))
+        .collect();
     Genome {
         cell_mm: *CELL_CHOICES_MM.choose(rng).expect("non-empty"),
         via_cost: *VIA_COST_CHOICES.choose(rng).expect("non-empty"),
         clearance_mm: *CLEARANCE_CHOICES_MM.choose(rng).expect("non-empty"),
         net_order,
+        rotations,
     }
 }
 
-fn baseline_genome(baseline: &RouteOptions, nets: &[String]) -> Genome {
+fn baseline_genome(baseline: &RouteOptions, nets: &[String], board: &Board, ids: &[Id]) -> Genome {
+    let rotations: Vec<f32> = ids
+        .iter()
+        .map(|id| {
+            board
+                .footprints
+                .get(id)
+                .map_or(0.0, |fp| snap_rotation(fp.rotation))
+        })
+        .collect();
     Genome {
         cell_mm: baseline.cell.to_mm(),
         via_cost: baseline.via_cost,
         clearance_mm: baseline.clearance.to_mm(),
         net_order: nets.to_vec(),
+        rotations,
     }
 }
 
@@ -207,11 +275,21 @@ fn crossover(a: &Genome, b: &Genome, rng: &mut StdRng) -> Genome {
         b.clearance_mm
     };
     let net_order = ox1(&a.net_order, &b.net_order, rng);
+    // Uniform per-index crossover for rotations: each footprint picks
+    // its orientation from either parent independently. Recombines
+    // good "this part faces left, this one faces up" partial orderings.
+    let rotations: Vec<f32> = a
+        .rotations
+        .iter()
+        .zip(b.rotations.iter())
+        .map(|(ra, rb)| if rng.gen_bool(0.5) { *ra } else { *rb })
+        .collect();
     Genome {
         cell_mm,
         via_cost,
         clearance_mm,
         net_order,
+        rotations,
     }
 }
 
@@ -295,16 +373,34 @@ fn mutate(g: &mut Genome, rate: f64, rng: &mut StdRng) {
             }
         }
     }
+    // Rotation mutation: with the same rate, pick one footprint and
+    // resample its orientation. One-at-a-time keeps the move local so
+    // a single good rotation (like C3 180°) isn't wiped by a sweep.
+    if !g.rotations.is_empty() && rng.gen_bool(rate) {
+        let i = rng.gen_range(0..g.rotations.len());
+        g.rotations[i] = *ROTATION_CHOICES_DEG.choose(rng).expect("non-empty");
+    }
 }
 
 /// Run one routing trial on a fresh clone of `original_board` and
-/// return both the metrics and the routed board.
+/// return both the metrics and the routed board. The `rotations`
+/// override the cloned board's footprint rotations by `footprint_ids`
+/// index before routing — empty slice = use board's current rotations.
 fn evaluate_in_process(
     original_board: &Board,
     drc_opts: &DrcOptions,
     options: &RouteOptions,
+    footprint_ids: &[Id],
+    rotations: &[f32],
 ) -> (TrialMetrics, Board) {
     let mut work = original_board.clone();
+    for (idx, id) in footprint_ids.iter().enumerate() {
+        if let Some(rot) = rotations.get(idx) {
+            if let Some(fp) = work.footprints.get_mut(id) {
+                fp.rotation = *rot;
+            }
+        }
+    }
     let report = pcb_router::route(&mut work, options);
     let drc = pcb_drc::run(&work, drc_opts);
     let failed_nets = count_failed_nets(&report);
@@ -360,6 +456,7 @@ pub fn run_search(
 ) -> Result<(Board, GaOutcome), String> {
     let baseline_opts = RouteOptions::default();
     let net_names = collect_net_names(board);
+    let footprint_ids = collect_footprint_ids(board);
 
     let mut rng: StdRng = if config.seed == 0 {
         StdRng::from_entropy()
@@ -374,6 +471,7 @@ pub fn run_search(
             drc_opts,
             &baseline_opts,
             &net_names,
+            &footprint_ids,
             &mut rng,
             should_stop,
             &mut on_progress,
@@ -383,6 +481,7 @@ pub fn run_search(
             config,
             drc_opts,
             &baseline_opts,
+            &footprint_ids,
             &mut rng,
             should_stop,
             &mut on_progress,
@@ -397,6 +496,7 @@ fn run_ga(
     drc_opts: &DrcOptions,
     baseline_opts: &RouteOptions,
     net_names: &[String],
+    footprint_ids: &[Id],
     rng: &mut StdRng,
     should_stop: &AtomicBool,
     on_progress: &mut dyn FnMut(&GaProgress, &Board),
@@ -412,9 +512,9 @@ fn run_ga(
     let mut last_improved_gen = 0usize;
 
     let mut population: Vec<Genome> = Vec::with_capacity(config.population);
-    population.push(baseline_genome(baseline_opts, net_names));
+    population.push(baseline_genome(baseline_opts, net_names, board, footprint_ids));
     while population.len() < config.population {
-        population.push(random_genome(rng, net_names));
+        population.push(random_genome(rng, net_names, footprint_ids.len()));
     }
 
     let mut generation = 0usize;
@@ -449,7 +549,13 @@ fn run_ga(
             .into_par_iter()
             .map(|genome| {
                 let options = genome.to_options(baseline_opts);
-                let (metrics, work) = evaluate_in_process(board, drc_opts, &options);
+                let (metrics, work) = evaluate_in_process(
+                    board,
+                    drc_opts,
+                    &options,
+                    footprint_ids,
+                    &genome.rotations,
+                );
                 let score = compute_score_from_metrics(&metrics);
                 (genome, metrics, work, score)
             })
@@ -586,6 +692,7 @@ fn run_random(
     config: &GaConfig,
     drc_opts: &DrcOptions,
     baseline_opts: &RouteOptions,
+    footprint_ids: &[Id],
     rng: &mut StdRng,
     should_stop: &AtomicBool,
     on_progress: &mut dyn FnMut(&GaProgress, &Board),
@@ -602,12 +709,22 @@ fn run_random(
             break;
         }
 
+        let baseline_rotations: Vec<f32> = footprint_ids
+            .iter()
+            .map(|id| {
+                board
+                    .footprints
+                    .get(id)
+                    .map_or(0.0, |fp| snap_rotation(fp.rotation))
+            })
+            .collect();
         let genome = if trial_idx == 0 {
             Genome {
                 cell_mm: baseline_opts.cell.to_mm(),
                 via_cost: baseline_opts.via_cost,
                 clearance_mm: baseline_opts.clearance.to_mm(),
                 net_order: Vec::new(),
+                rotations: baseline_rotations.clone(),
             }
         } else {
             Genome {
@@ -615,11 +732,13 @@ fn run_random(
                 via_cost: *VIA_COST_CHOICES.choose(rng).expect("non-empty"),
                 clearance_mm: *CLEARANCE_CHOICES_MM.choose(rng).expect("non-empty"),
                 net_order: Vec::new(),
+                rotations: baseline_rotations,
             }
         };
 
         let options = genome.to_options(baseline_opts);
-        let (metrics, work) = evaluate_in_process(board, drc_opts, &options);
+        let (metrics, work) =
+            evaluate_in_process(board, drc_opts, &options, footprint_ids, &genome.rotations);
         let score = compute_score_from_metrics(&metrics);
         let is_best = score < best_score;
         if is_best {
