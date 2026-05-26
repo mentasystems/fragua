@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/pcb-core",
     "crates/pcb-router",
+    "crates/pcb-router-tune",
     "crates/pcb-placer",
     "crates/pcb-drc",
     "crates/pcb-erc",

@@ -1,4 +1,4 @@
-//! Uniform-cell occupancy grid used by the A* router.
+//! Uniform-cell occupancy grid used by the Theta* router.
 //!
 //! Two parallel layers (top / bottom). Each cell on each layer is one
 //! of:
@@ -9,6 +9,11 @@
 //! - `Trace(u32)`  — already routed by another net; obstacle for
 //!   everyone else, free for the same net (allows
 //!   multi-segment polylines on a star route).
+//!
+//! Bresenham line rasterisation is shared between `line_of_sight`,
+//! `cost_along`, and `stamp_trace` so any-angle segments behave
+//! consistently across visibility, cost accumulation, and obstacle
+//! stamping.
 
 use pcb_core::{Board, CopperLayer, Length, Point, Rect};
 
@@ -68,6 +73,11 @@ pub enum Cell {
     /// A pad belonging to net id `u32`. Used by the search both as a
     /// source/destination and as an obstacle for foreign nets.
     NetPad(u32),
+    /// A through-hole pad cell. Behaves like `NetPad` for traces, but
+    /// the via-safe check rejects vias landing inside it (the existing
+    /// PTH drill already connects both layers — a router via on top
+    /// would collide with the fab drill).
+    DrilledPad(u32),
     /// A previously-laid trace cell belonging to net `u32`.
     Trace(u32),
 }
@@ -173,7 +183,8 @@ impl Grid {
     ) {
         for fp in board.footprints_in_order() {
             for pad in &fp.pads {
-                let layer = match pad.layer {
+                let is_th = pad.drill.is_some();
+                let primary_layer = match pad.layer {
                     CopperLayer::Top => 0,
                     CopperLayer::Bottom => 1,
                 };
@@ -186,24 +197,23 @@ impl Grid {
                 let cmin = self.snap(min, pad.layer);
                 let cmax = self.snap(max, pad.layer);
                 let net = pad.net.as_deref().and_then(net_id_of);
-                for r in cmin.row..=cmax.row {
-                    for c in cmin.col..=cmax.col {
-                        let gp = GridPoint {
-                            layer,
-                            col: c,
-                            row: r,
-                        };
-                        if !self.in_bounds(gp) {
-                            continue;
-                        }
-                        match net {
-                            Some(id) => {
-                                // Pad core = NetPad; ring of clearance = Obstacle for others
-                                // but we keep it simple: whole expanded box is NetPad on the
-                                // same net, which means the search can enter anywhere in it.
-                                self.set(gp, Cell::NetPad(id));
+                let cell_for_net = match (net, is_th) {
+                    (Some(id), true) => Cell::DrilledPad(id),
+                    (Some(id), false) => Cell::NetPad(id),
+                    (None, _) => Cell::Obstacle,
+                };
+                // TH pads punch both layers — stamp the copper region on
+                // both so the via-safe check sees the drilled cells from
+                // either side of a layer flip.
+                let layers: &[u8] = if is_th { &[0, 1] } else { &[primary_layer] };
+                for &layer in layers {
+                    for r in cmin.row..=cmax.row {
+                        for c in cmin.col..=cmax.col {
+                            let gp = GridPoint { layer, col: c, row: r };
+                            if !self.in_bounds(gp) {
+                                continue;
                             }
-                            None => self.set(gp, Cell::Obstacle),
+                            self.set(gp, cell_for_net);
                         }
                     }
                 }
@@ -213,24 +223,62 @@ impl Grid {
 
     /// Mark the path of an existing trace as `Trace(net)`, plus a
     /// `halo` of cells around it on the same layer so foreign nets
-    /// can't run flush against this one. The halo radius is the
-    /// router's clearance converted to grid cells.
+    /// can't run flush against this one. Works for arbitrary
+    /// straight segments (H/V/diagonal/any angle) via Bresenham.
     pub fn stamp_trace(&mut self, a: GridPoint, b: GridPoint, net: u32, halo: i32) {
         debug_assert_eq!(a.layer, b.layer);
         let layer = a.layer;
-        let (mut c, mut r) = (a.col, a.row);
-        let (tc, tr) = (b.col, b.row);
-        loop {
+        for (c, r) in bresenham(a.col, a.row, b.col, b.row) {
             self.stamp_cell_with_halo(layer, c, r, net, halo);
-            if c == tc && r == tr {
-                break;
-            }
-            if c != tc {
-                c += if tc > c { 1 } else { -1 };
-            } else if r != tr {
-                r += if tr > r { 1 } else { -1 };
+        }
+    }
+
+    /// True if the swept halo of every Bresenham cell between `a` and `b`
+    /// (inclusive of both endpoints) is walkable for `target_net`. The
+    /// `halo` parameter mirrors `stamp_cell_with_halo`: each centre cell
+    /// is checked along with the (2*halo+1)² box around it, so the LOS
+    /// shortcut never lets a trace pass through cells the trace's own
+    /// halo would otherwise overlap with foreign copper.
+    /// Requires `a.layer == b.layer`.
+    pub fn line_of_sight(&self, a: GridPoint, b: GridPoint, target_net: u32, halo: i32) -> bool {
+        debug_assert_eq!(a.layer, b.layer);
+        let layer = a.layer;
+        for (c, r) in bresenham(a.col, a.row, b.col, b.row) {
+            for dr in -halo..=halo {
+                for dc in -halo..=halo {
+                    let gp = GridPoint { layer, col: c + dc, row: r + dr };
+                    match self.get(gp) {
+                        Cell::Free => {}
+                        Cell::NetPad(n) | Cell::DrilledPad(n) | Cell::Trace(n)
+                            if n == target_net => {}
+                        _ => return false,
+                    }
+                }
             }
         }
+        true
+    }
+
+    /// Sum of `cost_map.at(p)` for each cell on the Bresenham line from
+    /// `a` (exclusive) to `b` (inclusive). Used by Theta* to charge
+    /// per-cell congestion bias along an any-angle straight segment.
+    /// Method on `Grid` to keep the line-rasterisation helpers
+    /// co-located, even though it doesn't read the grid itself.
+    #[allow(clippy::unused_self)]
+    pub fn cost_along(&self, cost_map: &CostMap, a: GridPoint, b: GridPoint) -> u32 {
+        debug_assert_eq!(a.layer, b.layer);
+        let layer = a.layer;
+        let mut sum: u32 = 0;
+        let mut first = true;
+        for (c, r) in bresenham(a.col, a.row, b.col, b.row) {
+            if first {
+                first = false;
+                continue;
+            }
+            let gp = GridPoint { layer, col: c, row: r };
+            sum = sum.saturating_add(cost_map.at(gp));
+        }
+        sum
     }
 
     /// Mark a via and its halo on both layers. Vias punch through, so
@@ -284,4 +332,35 @@ impl Grid {
             }
         }
     }
+}
+
+/// Integer Bresenham line from (c0,r0) to (c1,r1) inclusive on both
+/// endpoints. Used by `line_of_sight`, `cost_along`, and `stamp_trace`
+/// so visibility checks, congestion bias, and obstacle stamping all
+/// agree on which cells a straight any-angle segment touches.
+fn bresenham(c0: i32, r0: i32, c1: i32, r1: i32) -> Vec<(i32, i32)> {
+    let dc = (c1 - c0).abs();
+    let dr = (r1 - r0).abs();
+    let sc: i32 = if c0 < c1 { 1 } else { -1 };
+    let sr: i32 = if r0 < r1 { 1 } else { -1 };
+    let mut err = dc - dr;
+    let mut c = c0;
+    let mut r = r0;
+    let mut out = Vec::with_capacity((dc.max(dr) + 1) as usize);
+    loop {
+        out.push((c, r));
+        if c == c1 && r == r1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 > -dr {
+            err -= dr;
+            c += sc;
+        }
+        if e2 < dc {
+            err += dc;
+            r += sr;
+        }
+    }
+    out
 }

@@ -890,6 +890,28 @@ impl Project {
         });
     }
 
+    /// Atomically replace all routing with the given traces and vias and
+    /// publish a single `RoutingChanged` event. Used by the auto-router
+    /// to commit a trial board without firing one event per trace, which
+    /// would saturate the UI render loop.
+    pub fn replace_routing(&self, traces: Vec<Trace>, vias: Vec<Via>) {
+        let (trace_count, via_count) = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.board.clear_routing();
+            for trace in traces {
+                inner.board.add_trace(trace);
+            }
+            for via in vias {
+                inner.board.add_via(via);
+            }
+            (inner.board.traces.len(), inner.board.vias.len())
+        };
+        self.bus.publish(Event::RoutingChanged {
+            trace_count,
+            via_count,
+        });
+    }
+
     pub fn add_symbol(&self, symbol: Symbol) -> Id {
         let id = symbol.id;
         let reference = symbol.reference.clone();

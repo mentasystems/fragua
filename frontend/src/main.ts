@@ -153,7 +153,12 @@ root.innerHTML = `
     <span class="tab" id="toggle-activity" title="show/hide activity log">log</span>
     <span class="label">api</span><span class="value accent" id="proj-api">—</span>
   </div>
-  <div class="palette-strip" id="palette-strip"></div>
+  <div class="palette-strip" id="palette-strip">
+    <button id="autoroute-btn" class="autoroute-btn">Auto Routing</button>
+    <button id="jlcpcb-btn" class="jlcpcb-btn">JLCPCB</button>
+    <span id="autoroute-status" class="autoroute-status"></span>
+    <div class="palette-chips" id="palette-chips"></div>
+  </div>
   <div class="canvas-pane" id="canvas-pane"></div>
   <div class="activity-pane">
     <h2>activity</h2>
@@ -188,6 +193,10 @@ const els = {
   toggleLibrary: document.getElementById("toggle-library")!,
   toggleActivity: document.getElementById("toggle-activity")!,
   palette: document.getElementById("palette-strip")!,
+  paletteChips: document.getElementById("palette-chips")!,
+  autorouteBtn: document.getElementById("autoroute-btn") as HTMLButtonElement,
+  autorouteStatus: document.getElementById("autoroute-status")!,
+  jlcpcbBtn: document.getElementById("jlcpcb-btn") as HTMLButtonElement,
   boardW: document.getElementById("board-w")!,
   boardH: document.getElementById("board-h")!,
   infoModal: document.getElementById("info-modal")!,
@@ -1203,13 +1212,10 @@ function paintDrcMarkers() {
 }
 
 function paintPalette(state: ProjectState) {
-  els.palette.innerHTML = "";
-  if (state.palette.length === 0) {
-    els.palette.classList.add("empty");
-    els.palette.textContent = "palette empty";
-    return;
-  }
-  els.palette.classList.remove("empty");
+  // Only clear the chip container — the Auto Routing button and status
+  // span are permanent strip residents and must survive every refresh.
+  els.paletteChips.innerHTML = "";
+  els.palette.classList.toggle("empty", state.palette.length === 0);
   for (const item of state.palette) {
     const chip = document.createElement("div");
     chip.className = "palette-chip";
@@ -1223,9 +1229,129 @@ function paintPalette(state: ProjectState) {
     chip.querySelector(".chip-val")!.textContent = item.value || item.library;
     // Read-only render: the palette is informational. Placement is
     // agent-driven via the script API (`place REF X Y` in the script).
-    els.palette.appendChild(chip);
+    els.paletteChips.appendChild(chip);
   }
 }
+
+// Auto Routing button: kicks off an in-process GA search on the backend
+// and streams generation/trial progress into the status span via
+// `autoroute:*` events. Toggles between Start/Stop while running.
+let autorouteRunning = false;
+function setAutorouteIdle(label = "Auto Routing") {
+  autorouteRunning = false;
+  els.autorouteBtn.textContent = label;
+  els.autorouteBtn.classList.remove("running");
+  els.autorouteBtn.disabled = false;
+}
+function setAutorouteRunning() {
+  autorouteRunning = true;
+  els.autorouteBtn.textContent = "Stop";
+  els.autorouteBtn.classList.add("running");
+  els.autorouteBtn.disabled = false;
+}
+els.autorouteBtn.addEventListener("click", async () => {
+  if (autorouteRunning) {
+    els.autorouteBtn.disabled = true;
+    try {
+      await invoke("stop_autoroute");
+      els.autorouteStatus.textContent = "stopping… (will commit best so far)";
+    } catch (e) {
+      els.autorouteStatus.textContent = `stop error: ${e}`;
+      els.autorouteStatus.classList.add("error");
+      els.autorouteBtn.disabled = false;
+    }
+    return;
+  }
+  setAutorouteRunning();
+  els.autorouteStatus.className = "autoroute-status";
+  els.autorouteStatus.textContent = "starting…";
+  try {
+    await invoke("start_autoroute", { budgetSecs: 600 });
+  } catch (e) {
+    els.autorouteStatus.textContent = `error: ${e}`;
+    els.autorouteStatus.classList.add("error");
+    setAutorouteIdle();
+  }
+});
+
+type AutorouteProgress = {
+  generation: number;
+  evaluations: number;
+  cache_hits: number;
+  elapsed_secs: number;
+  best_score: number;
+  best_drc_errors: number;
+  best_failed_nets: number;
+  best_length_mm: number;
+  best_vias: number;
+  best_cell_mm: number;
+  best_via_cost: number;
+  best_clearance_mm: number;
+  improved: boolean;
+};
+
+type AutorouteOutcome = {
+  generations: number;
+  total_evaluations: number;
+  cache_hits: number;
+  elapsed_secs: number;
+  best: AutorouteProgress | null;
+};
+
+void listen<AutorouteProgress>("autoroute:progress", (e) => {
+  const p = e.payload;
+  els.autorouteStatus.textContent =
+    `gen ${p.generation} | eval ${p.evaluations} (+${p.cache_hits} cached) | ` +
+    `best ${p.best_length_mm.toFixed(1)}mm vias ${p.best_vias} ` +
+    `(err ${p.best_drc_errors}) | ${p.elapsed_secs.toFixed(0)}s`;
+});
+void listen<AutorouteOutcome>("autoroute:done", (e) => {
+  const o = e.payload;
+  const b = o.best;
+  els.autorouteStatus.classList.remove("error");
+  els.autorouteStatus.classList.add("done");
+  els.autorouteStatus.textContent = b
+    ? `done: ${o.total_evaluations} evals (+${o.cache_hits} cached), ${o.generations} gens in ${o.elapsed_secs.toFixed(0)}s. ` +
+      `best ${b.best_length_mm.toFixed(1)}mm, ${b.best_vias} vias, ${b.best_drc_errors} DRC err, ` +
+      `cell=${b.best_cell_mm}mm via_cost=${b.best_via_cost} clr=${b.best_clearance_mm}mm`
+    : `done: no trials completed`;
+  setAutorouteIdle();
+});
+void listen<string>("autoroute:error", (e) => {
+  els.autorouteStatus.classList.add("error");
+  els.autorouteStatus.textContent = `error: ${e.payload}`;
+  setAutorouteIdle();
+});
+
+type JlcpcbPackResult = {
+  ready: boolean;
+  zip_path: string;
+  file_count: number;
+  blocking_reasons: string[];
+};
+
+els.jlcpcbBtn.addEventListener("click", async () => {
+  els.jlcpcbBtn.disabled = true;
+  els.autorouteStatus.className = "autoroute-status";
+  els.autorouteStatus.textContent = "packing for JLCPCB…";
+  try {
+    const res = await invoke<JlcpcbPackResult>("export_jlcpcb_pack");
+    if (res.ready) {
+      els.autorouteStatus.classList.add("done");
+      els.autorouteStatus.textContent =
+        `JLCPCB ready: ${res.file_count} files → ${res.zip_path}`;
+    } else {
+      els.autorouteStatus.classList.add("error");
+      els.autorouteStatus.textContent =
+        `JLCPCB NOT READY (${res.blocking_reasons.length}): ${res.blocking_reasons.join("; ")} — zip at ${res.zip_path}`;
+    }
+  } catch (e) {
+    els.autorouteStatus.classList.add("error");
+    els.autorouteStatus.textContent = `JLCPCB error: ${e}`;
+  } finally {
+    els.jlcpcbBtn.disabled = false;
+  }
+});
 
 async function refresh() {
   const state = await invoke<ProjectState>("project_state");

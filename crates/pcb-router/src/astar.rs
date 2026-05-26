@@ -1,41 +1,22 @@
-//! A* search on the routing grid.
+//! Theta* (lazy variant) any-angle search on the routing grid.
 //!
-//! Nodes are `(GridPoint, last_direction)`. Tracking the direction lets
-//! us add a *bend penalty* — moving in the same direction is cheap,
-//! turning costs extra, and punching a via flips the layer. Without
-//! the bend term A* happily emits stair-step paths because zigzag has
-//! the same cost as an L-shape; with it, the router prefers long
-//! straight runs and clean orthogonal corners.
+//! Each open node is a `GridPoint`; cost is fixed-point Euclidean (cell
+//! distance × 1000). 8-connected on a layer plus a via flip; on
+//! relaxation, if the parent of the current node has line-of-sight to
+//! the neighbour on the same layer, we shortcut and set parent
+//! directly — that is what produces any-angle paths instead of
+//! grid-aligned staircases.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
 use crate::grid::{Cell, CostMap, Grid, GridPoint};
 
-/// Direction of the last move. `Start` is the entry node before any
-/// move has happened; `Via` lets us model "I just punched through" so
-/// the next same-layer move on either axis isn't penalised as a bend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Dir {
-    Start,
-    Via,
-    Right,
-    Left,
-    Up,
-    Down,
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
-struct State {
-    p: GridPoint,
-    dir: Dir,
-}
-
 #[derive(Copy, Clone, Eq, PartialEq)]
 struct Node {
     f: u32,
     g: u32,
-    s: State,
+    p: GridPoint,
 }
 
 impl Ord for Node {
@@ -54,40 +35,44 @@ pub struct AStarResult {
     pub path: Vec<GridPoint>,
 }
 
-/// Cost added every time a same-layer move turns 90°. Tuned to be
-/// significantly larger than the per-cell move cost so the router will
-/// route around obstacles in straight lines whenever possible, but
-/// small enough that an unnecessary detour is still cheaper than a
-/// terrible-looking zigzag.
-const BEND_COST: u32 = 6;
+/// One unit cell = `SCALE` cost units. Lets us keep `u32` arithmetic
+/// while representing Euclidean distance to ~1e-3 cell precision.
+const SCALE: u32 = 1000;
+/// `sqrt(2) * SCALE`, rounded — cost of a diagonal step.
+const DIAG: u32 = 1414;
+/// Surcharge for placing a via on top of a same-net pad — fab houses
+/// charge extra for via-in-pad fill, so we'd rather offset.
+const VIA_IN_PAD_PENALTY: u32 = 40 * SCALE;
 
 // `via_safe_radius`: in cells, ceil((via_diameter/2 + clearance) / cell).
 // A via flip is rejected if any foreign-net cell sits within this radius
 // on either layer. Pass 0 to disable the check.
 //
-// `cost_map` adds per-cell extra cost for negotiated congestion: A*
-// charges `cost_map.at(next)` on top of the base step cost when crossing
-// `next`. Bias is added before the bend penalty so a costly cell makes
-// the router prefer cheaper alternatives even when no bend is involved.
+// `halo`: same value `route_pass` uses when stamping traces. Forwarded
+// into `line_of_sight` so the Theta* shortcut rejects any-angle segments
+// whose swept body would clip a foreign-net cell, not just whose centre
+// line does.
+//
+// `cost_map` adds per-cell extra bias for negotiated congestion. Raw
+// `cost_map` values are promoted into the scaled cost domain on use.
+// For an any-angle straight segment Theta* charges the sum along the
+// Bresenham line via `grid.cost_along`; for step-wise relaxation it
+// charges the destination cell only.
 //
 // Multi-source for Prim-style Steiner construction. Two kinds of
 // source, prioritised by g-penalty:
 //
 //   - Every `Trace(target_net)` cell at g=0. Those are the existing
 //     tree; later spokes branch off the closest cell to the new target.
-//   - The explicit `start` (seed pad) at g=`SEED_FALLBACK_PENALTY`.
-//     Falls back when no trace cell is within ~3 mm of being as close
-//     to the target as the seed is, e.g. when the existing trunk took
-//     a detour that doesn't help reach the next pad. Without this
-//     penalty the seed wins ties on h alone and lays copper parallel
-//     to the trunk; with it disabled entirely (seed not in queue at
-//     all), a bad trunk traps the search and the spoke fails outright.
+//   - The explicit `start` (seed pad) at g equal to the smallest h() over
+//     all trace cells, floored by `SEED_FALLBACK_PENALTY`. This keeps the
+//     best trace cell at least tied with the seed on f-score under
+//     Theta*'s Euclidean metric, so Steiner branching survives the move
+//     from Manhattan A* (the old fixed 12-cell penalty was overwhelmed by
+//     direct diagonals from the seed pad).
 //
 // First spoke (no traces yet) sees the seed at g=0 — the penalty only
 // kicks in once a tree exists.
-//
-// Other-net `NetPad` cells are NOT sources; the path must reach `target`
-// by routing, not by snapping through neighbouring pads of the same net.
 pub fn search(
     grid: &Grid,
     start: GridPoint,
@@ -95,147 +80,176 @@ pub fn search(
     via_cost: u32,
     target: GridPoint,
     via_safe_radius: i32,
+    halo: i32,
     cost_map: &CostMap,
 ) -> Option<AStarResult> {
-    /// Cells, at the default 0.25 mm pitch ≈ 3 mm of free-cell walking.
-    /// A* picks the seed over a trace cell only if the seed is more
-    /// than this many cells closer to the target — strong enough to
-    /// suppress the parallel-trunk artifact but small enough that a
-    /// trace-cell path that's much further away still loses to the seed.
-    const SEED_FALLBACK_PENALTY: u32 = 12;
+    /// Floor for the seed pad's g-penalty when at least one trace cell
+    /// exists. ~6 mm at default 0.25 mm pitch — kicks in only when every
+    /// trace cell is closer to the target than this; in practice the
+    /// max() with `best_trace_h` dominates whenever a trace cell sits
+    /// between the seed and the target.
+    const SEED_FALLBACK_PENALTY: u32 = 24 * SCALE;
+
+    let via_scaled = via_cost.saturating_mul(SCALE);
 
     let h = |p: GridPoint| -> u32 {
-        let dc = (p.col - target.col).unsigned_abs();
-        let dr = (p.row - target.row).unsigned_abs();
-        let dl = if p.layer == target.layer { 0 } else { via_cost };
-        dc + dr + dl
+        let dc = f64::from(p.col - target.col);
+        let dr = f64::from(p.row - target.row);
+        let dist = (dc * dc + dr * dr).sqrt();
+        let dl = if p.layer == target.layer { 0 } else { via_scaled };
+        (dist * f64::from(SCALE)).round() as u32 + dl
+    };
+
+    let euclid = |a: GridPoint, b: GridPoint| -> u32 {
+        let dc = f64::from(a.col - b.col);
+        let dr = f64::from(a.row - b.row);
+        ((dc * dc + dr * dr).sqrt() * f64::from(SCALE)).round() as u32
     };
 
     let mut open = BinaryHeap::new();
-    let mut g_score: HashMap<State, u32> = HashMap::new();
-    let mut came_from: HashMap<State, State> = HashMap::new();
+    let mut g_score: HashMap<GridPoint, u32> = HashMap::new();
+    let mut came_from: HashMap<GridPoint, GridPoint> = HashMap::new();
 
     let mut had_trace_source = false;
+    let mut best_trace_h: u32 = u32::MAX;
     for layer in 0..2u8 {
         for row in 0..grid.rows {
             for col in 0..grid.cols {
                 let p = GridPoint { layer, col, row };
                 if matches!(grid.get(p), Cell::Trace(n) if n == target_net) {
-                    let state = State { p, dir: Dir::Start };
-                    g_score.insert(state, 0);
-                    open.push(Node {
-                        f: h(p),
-                        g: 0,
-                        s: state,
-                    });
+                    let hp = h(p);
+                    g_score.insert(p, 0);
+                    open.push(Node { f: hp, g: 0, p });
                     had_trace_source = true;
+                    if hp < best_trace_h {
+                        best_trace_h = hp;
+                    }
                 }
             }
         }
     }
     let seed_g = if had_trace_source {
-        SEED_FALLBACK_PENALTY
+        best_trace_h.max(SEED_FALLBACK_PENALTY)
     } else {
         0
     };
-    let start_state = State {
-        p: start,
-        dir: Dir::Start,
-    };
-    g_score.insert(start_state, seed_g);
+    g_score.insert(start, seed_g);
     open.push(Node {
         f: seed_g + h(start),
         g: seed_g,
-        s: start_state,
+        p: start,
     });
 
-    while let Some(Node { s, g, .. }) = open.pop() {
-        if s.p == target && matches!(grid.get(s.p), Cell::NetPad(n) if n == target_net) {
-            // Reconstruct path of grid points.
-            let mut path = vec![s.p];
-            let mut cur = s;
+    while let Some(Node { p, g, .. }) = open.pop() {
+        if p == target
+            && matches!(grid.get(p), Cell::NetPad(n) | Cell::DrilledPad(n) if n == target_net)
+        {
+            let mut path = vec![p];
+            let mut cur = p;
             while let Some(&prev) = came_from.get(&cur) {
-                path.push(prev.p);
+                path.push(prev);
                 cur = prev;
             }
             path.reverse();
             return Some(AStarResult { path });
         }
-        if g > *g_score.get(&s).unwrap_or(&u32::MAX) {
+        if g > *g_score.get(&p).unwrap_or(&u32::MAX) {
             continue;
         }
 
-        for (next_p, move_dir) in neighbours(s.p) {
+        for (next_p, kind) in neighbours(p) {
             if !grid.in_bounds(next_p) {
                 continue;
             }
             let walkable = match grid.get(next_p) {
                 Cell::Free => true,
-                Cell::NetPad(n) | Cell::Trace(n) => n == target_net,
+                Cell::NetPad(n) | Cell::DrilledPad(n) | Cell::Trace(n) => n == target_net,
                 Cell::Obstacle => false,
             };
             if !walkable {
                 continue;
             }
-            // Vias have a finite copper diameter and need clearance to
-            // every other net's copper on *both* layers (since the via
-            // punches through). A via at the edge of our own pad's
-            // expanded clearance box can otherwise sit too close to the
-            // adjacent foreign pad. Reject via flips that would land
-            // within `via_safe_radius` of any foreign-net cell.
-            if move_dir == Dir::Via
+            let is_via = matches!(kind, Move::Via);
+            // Hard reject: a via landing inside a through-hole pad
+            // collides with the existing PTH drill. No score penalty
+            // is high enough to make that legal, so refuse outright.
+            if is_via
+                && (matches!(
+                    grid.get(GridPoint { layer: 0, col: next_p.col, row: next_p.row }),
+                    Cell::DrilledPad(_)
+                ) || matches!(
+                    grid.get(GridPoint { layer: 1, col: next_p.col, row: next_p.row }),
+                    Cell::DrilledPad(_)
+                ))
+            {
+                continue;
+            }
+            if is_via
                 && via_safe_radius > 0
                 && !via_safe(grid, next_p, target_net, via_safe_radius)
             {
                 continue;
             }
-            let mut step_cost = if move_dir == Dir::Via { via_cost } else { 1 };
-            // Negotiated-congestion bias on the destination cell.
-            step_cost = step_cost.saturating_add(cost_map.at(next_p));
-            // "Via in pad" penalty: discourage but don't forbid via
-            // flips that land on a same-net pad cell. Fab houses
-            // (JLCPCB) require a more expensive via-in-pad-fill
-            // process for those, so we'd rather offset the via by a
-            // cell when an alternative exists.
-            if move_dir == Dir::Via {
+
+            // Step-wise A* relaxation as the default proposal.
+            let base_step = match kind {
+                Move::Ortho => SCALE,
+                Move::Diag => DIAG,
+                Move::Via => via_scaled,
+            };
+            let mut best_parent = p;
+            let mut best_g = g
+                .saturating_add(base_step)
+                .saturating_add(cost_map.at(next_p).saturating_mul(SCALE));
+
+            // Theta* lazy shortcut: if our parent has line-of-sight to
+            // the neighbour on the same layer, route p_parent → next
+            // directly. Vias never shortcut (they cross layers).
+            if !is_via {
+                if let Some(&parent) = came_from.get(&p) {
+                    if parent.layer == next_p.layer
+                        && grid.line_of_sight(parent, next_p, target_net, halo)
+                    {
+                        let g_parent = *g_score.get(&parent).unwrap_or(&u32::MAX);
+                        if g_parent != u32::MAX {
+                            let shortcut = g_parent
+                                .saturating_add(euclid(parent, next_p))
+                                .saturating_add(
+                                    grid.cost_along(cost_map, parent, next_p)
+                                        .saturating_mul(SCALE),
+                                );
+                            if shortcut < best_g {
+                                best_g = shortcut;
+                                best_parent = parent;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if is_via {
+                // Soft penalty for landing on an SMD pad (legal but
+                // requires via-in-pad fill at the fab — extra cost).
+                // DrilledPad cases are already hard-rejected above.
                 let on_pad = matches!(
-                    grid.get(GridPoint {
-                        layer: 0,
-                        col: next_p.col,
-                        row: next_p.row
-                    }),
+                    grid.get(GridPoint { layer: 0, col: next_p.col, row: next_p.row }),
                     Cell::NetPad(_)
                 ) || matches!(
-                    grid.get(GridPoint {
-                        layer: 1,
-                        col: next_p.col,
-                        row: next_p.row
-                    }),
+                    grid.get(GridPoint { layer: 1, col: next_p.col, row: next_p.row }),
                     Cell::NetPad(_)
                 );
                 if on_pad {
-                    step_cost = step_cost.saturating_add(40);
+                    best_g = best_g.saturating_add(VIA_IN_PAD_PENALTY);
                 }
             }
-            // Bend penalty: same-layer turn that doesn't extend the
-            // current run. After a via or from the start node we don't
-            // count it (the next move always counts as "new" then).
-            if move_dir != Dir::Via && s.dir != Dir::Start && s.dir != Dir::Via && s.dir != move_dir
-            {
-                step_cost += BEND_COST;
-            }
-            let next = State {
-                p: next_p,
-                dir: move_dir,
-            };
-            let tentative = g + step_cost;
-            if tentative < *g_score.get(&next).unwrap_or(&u32::MAX) {
-                g_score.insert(next, tentative);
-                came_from.insert(next, s);
+
+            if best_g < *g_score.get(&next_p).unwrap_or(&u32::MAX) {
+                g_score.insert(next_p, best_g);
+                came_from.insert(next_p, best_parent);
                 open.push(Node {
-                    f: tentative + h(next_p),
-                    g: tentative,
-                    s: next,
+                    f: best_g.saturating_add(h(next_p)),
+                    g: best_g,
+                    p: next_p,
                 });
             }
         }
@@ -243,10 +257,8 @@ pub fn search(
     None
 }
 
-/// True if a via at `p` (which is on one layer) would have foreign-net
-/// copper within `radius` cells on either layer. Foreign-net = anything
-/// that is not Free, not Trace/NetPad of `target_net`. The check looks
-/// at both layers because a via punches through both.
+/// True if a via at `p` would have foreign-net copper within `radius`
+/// cells on either layer.
 fn via_safe(grid: &Grid, p: GridPoint, target_net: u32, radius: i32) -> bool {
     let r2 = radius * radius;
     for layer in 0..2u8 {
@@ -255,14 +267,14 @@ fn via_safe(grid: &Grid, p: GridPoint, target_net: u32, radius: i32) -> bool {
                 if dr * dr + dc * dc > r2 {
                     continue;
                 }
-                let np = GridPoint {
-                    layer,
-                    col: p.col + dc,
-                    row: p.row + dr,
-                };
+                let np = GridPoint { layer, col: p.col + dc, row: p.row + dr };
                 match grid.get(np) {
                     Cell::Obstacle => return false,
-                    Cell::NetPad(n) | Cell::Trace(n) if n != target_net => return false,
+                    Cell::NetPad(n) | Cell::DrilledPad(n) | Cell::Trace(n)
+                        if n != target_net =>
+                    {
+                        return false;
+                    }
                     _ => {}
                 }
             }
@@ -271,47 +283,26 @@ fn via_safe(grid: &Grid, p: GridPoint, target_net: u32, radius: i32) -> bool {
     true
 }
 
-fn neighbours(p: GridPoint) -> [(GridPoint, Dir); 5] {
+#[derive(Copy, Clone)]
+enum Move {
+    Ortho,
+    Diag,
+    Via,
+}
+
+fn neighbours(p: GridPoint) -> [(GridPoint, Move); 9] {
+    let l = p.layer;
+    let c = p.col;
+    let r = p.row;
     [
-        (
-            GridPoint {
-                layer: p.layer,
-                col: p.col + 1,
-                row: p.row,
-            },
-            Dir::Right,
-        ),
-        (
-            GridPoint {
-                layer: p.layer,
-                col: p.col - 1,
-                row: p.row,
-            },
-            Dir::Left,
-        ),
-        (
-            GridPoint {
-                layer: p.layer,
-                col: p.col,
-                row: p.row + 1,
-            },
-            Dir::Down,
-        ),
-        (
-            GridPoint {
-                layer: p.layer,
-                col: p.col,
-                row: p.row - 1,
-            },
-            Dir::Up,
-        ),
-        (
-            GridPoint {
-                layer: 1 - p.layer,
-                col: p.col,
-                row: p.row,
-            },
-            Dir::Via,
-        ),
+        (GridPoint { layer: l, col: c + 1, row: r }, Move::Ortho),
+        (GridPoint { layer: l, col: c - 1, row: r }, Move::Ortho),
+        (GridPoint { layer: l, col: c, row: r + 1 }, Move::Ortho),
+        (GridPoint { layer: l, col: c, row: r - 1 }, Move::Ortho),
+        (GridPoint { layer: l, col: c + 1, row: r + 1 }, Move::Diag),
+        (GridPoint { layer: l, col: c + 1, row: r - 1 }, Move::Diag),
+        (GridPoint { layer: l, col: c - 1, row: r + 1 }, Move::Diag),
+        (GridPoint { layer: l, col: c - 1, row: r - 1 }, Move::Diag),
+        (GridPoint { layer: 1 - l, col: c, row: r }, Move::Via),
     ]
 }

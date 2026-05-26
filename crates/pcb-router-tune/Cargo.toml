@@ -1,0 +1,28 @@
+[package]
+name = "pcb-router-tune"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Random-search hyperparameter tuner for the pcb-router."
+
+[lib]
+name = "pcb_router_tune"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pcb-router-tune"
+path = "src/main.rs"
+
+[dependencies]
+pcb-core = { path = "../pcb-core" }
+pcb-router = { path = "../pcb-router" }
+pcb-drc = { path = "../pcb-drc" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+rayon = "1"
+
+[lints]
+workspace = true

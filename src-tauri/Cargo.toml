@@ -21,8 +21,10 @@ pcb-core = { path = "../crates/pcb-core" }
 pcb-render = { path = "../crates/pcb-render" }
 pcb-script = { path = "../crates/pcb-script" }
 pcb-router = { path = "../crates/pcb-router" }
+pcb-router-tune = { path = "../crates/pcb-router-tune" }
 pcb-gerber = { path = "../crates/pcb-gerber" }
 pcb-drc = { path = "../crates/pcb-drc" }
+pcb-fab = { path = "../crates/pcb-fab" }
 tauri = { version = "2", features = ["devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

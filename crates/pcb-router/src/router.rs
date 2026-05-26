@@ -1,6 +1,6 @@
 //! Driver that ties the grid and A* together.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use pcb_core::{Board, CopperLayer, Length, Point, Rect, Trace, Via};
 
@@ -22,8 +22,10 @@ pub struct RouteOptions {
     /// the *max* clearance across all overrides + this default so a
     /// stricter net's clearance is never undersold.
     pub clearance: Length,
-    /// Cost (in cells) of punching a via vs. routing one cell on the
-    /// same layer. Higher = router prefers single-layer detours.
+    /// Cost of punching a via, expressed as a multiplier on the
+    /// per-cell base step. Higher = router prefers single-layer
+    /// detours. Internally scaled to the search's fixed-point
+    /// Euclidean cost domain.
     pub via_cost: u32,
     /// Via geometry produced when the path flips layers.
     pub via_drill: Length,
@@ -32,6 +34,12 @@ pub struct RouteOptions {
     /// from the schematic's `NetClass` definitions; the router stays
     /// schematic-agnostic and just consults this map.
     pub net_overrides: HashMap<String, NetOverride>,
+    /// If `Some`, use this exact net order as the first-pass ordering instead
+    /// of the built-in "fewest pads first" heuristic. Net names not present
+    /// in the board are silently dropped; nets in the board but missing from
+    /// the override are appended at the end in default order. The rip-up-and-
+    /// reroute loop is unaffected — it still reorders on subsequent passes.
+    pub initial_net_order: Option<Vec<String>>,
 }
 
 /// Per-net rule overrides — fields default to "use the global
@@ -56,6 +64,7 @@ impl Default for RouteOptions {
             via_drill: Length::from_mm(0.3),
             via_diameter: Length::from_mm(0.6),
             net_overrides: HashMap::new(),
+            initial_net_order: None,
         }
     }
 }
@@ -106,9 +115,11 @@ const MAX_RR_ITERATIONS: usize = 3;
 
 /// A net is "bad" — and pulled to the front of the next iteration's
 /// order — if its detour ratio exceeds this threshold or it failed
-/// outright. 1.8 means "the actual wire is ≥80 % longer than the
-/// hub-to-pads optimum"; below that, reordering rarely helps.
-const BAD_DETOUR_RATIO: f64 = 1.8;
+/// outright. The lower bound is HPWL (Manhattan), but Theta* lays
+/// Euclidean traces that can be shorter than Manhattan even on a
+/// detour; so the ratio is looser than the number suggests. 2.2 catches
+/// real failures without flagging healthy diagonal runs.
+const BAD_DETOUR_RATIO: f64 = 2.2;
 
 /// Negotiated congestion: per-cell bias added to the corridor around a
 /// failed net's pads on the next iteration. Compared to a base step
@@ -154,11 +165,33 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
         };
     }
 
-    // First-pass order: easy nets (fewest pads) first. Same heuristic
-    // as before — gets the unconstrained nets to lay copper before the
-    // hairy ones contend for space.
-    let mut order: Vec<String> = nets.keys().cloned().collect();
-    order.sort_by_key(|n| nets.get(n).map_or(0, Vec::len));
+    // First-pass order: caller override (e.g. the GA tuner) wins;
+    // otherwise easy nets (fewest pads) first. Same heuristic as before
+    // when no override is supplied — gets the unconstrained nets to lay
+    // copper before the hairy ones contend for space.
+    let mut order: Vec<String> = if let Some(custom) = opts.initial_net_order.as_ref() {
+        let valid: HashSet<&str> = nets.keys().map(String::as_str).collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<String> = Vec::with_capacity(nets.len());
+        for n in custom {
+            if valid.contains(n.as_str()) && !seen.contains(n.as_str()) {
+                seen.insert(n.clone());
+                out.push(n.clone());
+            }
+        }
+        let mut leftover: Vec<String> = nets
+            .keys()
+            .filter(|n| !seen.contains(n.as_str()))
+            .cloned()
+            .collect();
+        leftover.sort_by_key(|n| nets.get(n).map_or(0, Vec::len));
+        out.extend(leftover);
+        out
+    } else {
+        let mut o: Vec<String> = nets.keys().cloned().collect();
+        o.sort_by_key(|n| nets.get(n).map_or(0, Vec::len));
+        o
+    };
 
     // Cost map shared across iterations: starts at 0, accumulates bias
     // around the corridors of failed/inefficient nets so the next pass
@@ -549,6 +582,7 @@ fn route_pass(
                 opts.via_cost,
                 spoke_grid,
                 via_safe_radius,
+                halo_cells,
                 cost_map,
             ) else {
                 per_net.push((
@@ -728,8 +762,10 @@ fn lay_path(
     (segments, vias, length_mm)
 }
 
-/// Emit all the straight segments contained in `path` (one per turn)
-/// and return the total length, in mm, of the segments laid.
+/// Emit one straight segment per consecutive same-layer pair in `path`.
+/// Theta* hands us explicit corners (any-angle), so each window is
+/// already a straight LOS run — no need to detect direction changes.
+/// Returns total Euclidean length in mm.
 fn emit_trace(
     board: &mut Board,
     grid: &mut Grid,
@@ -745,12 +781,17 @@ fn emit_trace(
     }
     let layer = path[0].copper_layer();
     let mut total_mm = 0.0_f64;
-    let mut start_idx = 0;
-    let push_trace = |board: &mut Board, grid: &mut Grid, s: GridPoint, e: GridPoint| -> f64 {
+    for w in path.windows(2) {
+        let s = w[0];
+        let e = w[1];
+        if s == e {
+            continue;
+        }
         let start = grid.unsnap(s);
         let end = grid.unsnap(e);
-        let len_mm =
-            (start.x.to_mm() - end.x.to_mm()).abs() + (start.y.to_mm() - end.y.to_mm()).abs();
+        let dx = start.x.to_mm() - end.x.to_mm();
+        let dy = start.y.to_mm() - end.y.to_mm();
+        let len_mm = (dx * dx + dy * dy).sqrt();
         let trace = Trace {
             id: pcb_core::Id::new(),
             layer,
@@ -761,23 +802,8 @@ fn emit_trace(
         };
         grid.stamp_trace(s, e, net_id, halo_cells);
         board.add_trace(trace);
-        len_mm
-    };
-    for i in 1..path.len() {
-        let a = path[i - 1];
-        let b = path[i];
-        let s = path[start_idx];
-        let going_horizontal = a.row == b.row;
-        let started_horizontal = a.row == s.row;
-        let direction_change = i > 1 && going_horizontal != started_horizontal;
-        if direction_change {
-            total_mm += push_trace(board, grid, s, a);
-            start_idx = i - 1;
-        }
+        total_mm += len_mm;
     }
-    let s = path[start_idx];
-    let e = path[path.len() - 1];
-    total_mm += push_trace(board, grid, s, e);
     total_mm
 }
 

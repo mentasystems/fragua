@@ -2675,12 +2675,43 @@ struct RouteRunInput {
     trace_width_mm: f64,
     #[serde(default = "default_clearance")]
     clearance_mm: f64,
-    #[serde(default = "default_via_cost")]
+    // Script DSL always emits numbers as floats; accept either and
+    // round down so `via_cost=8` works whether typed as 8 or 8.0.
+    #[serde(default = "default_via_cost", deserialize_with = "de_u32_lenient")]
     via_cost: u32,
     #[serde(default = "default_via_drill")]
     via_drill_mm: f64,
     #[serde(default = "default_via_diameter")]
     via_diameter_mm: f64,
+    /// Comma-separated list of net names. When present, seeds the
+    /// router's first-pass ordering — useful for GA-driven tuning.
+    #[serde(default)]
+    order: Option<String>,
+}
+
+fn de_u32_lenient<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    match v {
+        serde_json::Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                Ok(u as u32)
+            } else if let Some(f) = n.as_f64() {
+                if f.is_finite() && f >= 0.0 {
+                    Ok(f as u32)
+                } else {
+                    Err(serde::de::Error::custom(format!("invalid via_cost: {f}")))
+                }
+            } else {
+                Err(serde::de::Error::custom("via_cost: not a number"))
+            }
+        }
+        other => Err(serde::de::Error::custom(format!(
+            "via_cost: expected number, got {other}"
+        ))),
+    }
 }
 
 fn default_cell() -> f64 {
@@ -2908,6 +2939,13 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         out
     };
 
+    let initial_net_order = input.order.as_ref().map(|s| {
+        s.split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<String>>()
+    });
+
     let opts = pcb_router::RouteOptions {
         cell: Length::from_mm(input.cell_mm),
         trace_width: Length::from_mm(input.trace_width_mm),
@@ -2916,6 +2954,7 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         via_drill: Length::from_mm(input.via_drill_mm),
         via_diameter: Length::from_mm(input.via_diameter_mm),
         net_overrides,
+        initial_net_order,
     };
 
     // Route on a clone so the lock is released quickly; then push the
@@ -3009,10 +3048,11 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         format!("\nhints:\n{}", lines.join("\n"))
     };
     Ok(text_result(format!(
-        "Routed: {} traces, {} vias, {:.1} mm wire (detour {:.2}× over {:.1} mm lower bound), {} pass(es){}; DRC: {} error(s), {} warning(s){}",
+        "Routed: {} traces, {} vias, {:.1} mm wire, {} failed (detour {:.2}× over {:.1} mm lower bound), {} pass(es){}; DRC: {} error(s), {} warning(s){}",
         report.trace_count,
         report.via_count,
         report.total_length_mm,
+        failed.len(),
         total_detour,
         report.total_lower_bound_mm,
         report.iterations,

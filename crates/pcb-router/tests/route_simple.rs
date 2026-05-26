@@ -214,3 +214,195 @@ fn three_colinear_pads_share_trunk_via_steiner() {
         "expected near-optimal Steiner on colinear pads, got detour {detour:.2}×",
     );
 }
+
+/// Regression: with Theta* under Euclidean cost the seed-pad penalty
+/// must adapt to the closest trace cell. If it doesn't, the third spoke
+/// runs a near-parallel diagonal next to the existing trunk instead of
+/// tapping into it (the visible bug Jairo flagged on the v2 board).
+/// Three colinear pads on a single layer: either at least one emitted
+/// trace must have both endpoints strictly inside (0,20) mm — i.e. a
+/// T-junction on the trunk — or the total wire length must be within
+/// 10 % of the optimal 20 mm trunk.
+#[test]
+fn theta_taps_existing_trunk_instead_of_running_parallel() {
+    let mut board = Board::new();
+    board.outline = Some(Rect::from_corners(
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+        Point::new(Length::from_mm(40.0), Length::from_mm(20.0)),
+    ));
+    board.add_footprint(footprint(
+        "R1",
+        5.0,
+        10.0,
+        vec![pad("1", 0.0, 0.0, Some("N1"))],
+    ));
+    board.add_footprint(footprint(
+        "R2",
+        15.0,
+        10.0,
+        vec![pad("1", 0.0, 0.0, Some("N1"))],
+    ));
+    board.add_footprint(footprint(
+        "R3",
+        25.0,
+        10.0,
+        vec![pad("1", 0.0, 0.0, Some("N1"))],
+    ));
+
+    let report = route(&mut board, &RouteOptions::default());
+
+    let total_length_mm: f64 = board
+        .traces
+        .iter()
+        .map(|t| {
+            let dx = t.start.x.to_mm() - t.end.x.to_mm();
+            let dy = t.start.y.to_mm() - t.end.y.to_mm();
+            (dx * dx + dy * dy).sqrt()
+        })
+        .sum();
+
+    let has_tap = board.traces.iter().any(|t| {
+        let sx = t.start.x.to_mm();
+        let ex = t.end.x.to_mm();
+        sx > 5.0 + 1e-3 && sx < 25.0 - 1e-3 && ex > 5.0 + 1e-3 && ex < 25.0 - 1e-3
+    });
+    let length_ratio = total_length_mm / 20.0;
+    assert!(
+        has_tap || length_ratio <= 1.10,
+        "expected tap-trunk Steiner; got total_length={total_length_mm:.2} mm (ratio {length_ratio:.3}), traces={:?}, report={report:?}",
+        board
+            .traces
+            .iter()
+            .map(|t| (t.start.x.to_mm(), t.start.y.to_mm(), t.end.x.to_mm(), t.end.y.to_mm()))
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// Regression: when `RouteOptions::initial_net_order` is set, the first-
+/// pass net iteration order in the report MUST follow the override (for
+/// nets that exist on the board). Default ordering picks fewest-pads /
+/// alphabetical first, so we pick nets where that disambiguates and
+/// flip them.
+#[test]
+fn initial_net_order_is_honored() {
+    fn build() -> Board {
+        let mut board = Board::new();
+        board.outline = Some(Rect::from_corners(
+            Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            Point::new(Length::from_mm(40.0), Length::from_mm(20.0)),
+        ));
+        // Net A: 2 pads. Net B: 3 pads. Default heuristic (fewest-pads
+        // first) would route A first; override flips it.
+        board.add_footprint(footprint(
+            "R1",
+            5.0,
+            10.0,
+            vec![pad("1", 0.0, 0.0, Some("A"))],
+        ));
+        board.add_footprint(footprint(
+            "R2",
+            10.0,
+            10.0,
+            vec![pad("1", 0.0, 0.0, Some("A"))],
+        ));
+        board.add_footprint(footprint(
+            "R3",
+            15.0,
+            10.0,
+            vec![pad("1", 0.0, 0.0, Some("B"))],
+        ));
+        board.add_footprint(footprint(
+            "R4",
+            20.0,
+            10.0,
+            vec![pad("1", 0.0, 0.0, Some("B"))],
+        ));
+        board.add_footprint(footprint(
+            "R5",
+            25.0,
+            10.0,
+            vec![pad("1", 0.0, 0.0, Some("B"))],
+        ));
+        board
+    }
+
+    let mut default_board = build();
+    let default_report = route(&mut default_board, &RouteOptions::default());
+    let default_first = default_report
+        .per_net
+        .first()
+        .map(|(n, _)| n.clone())
+        .unwrap();
+    assert_eq!(default_first, "A", "default heuristic routes A first");
+
+    let mut override_board = build();
+    let opts = RouteOptions {
+        initial_net_order: Some(vec!["B".into(), "A".into()]),
+        ..RouteOptions::default()
+    };
+    let override_report = route(&mut override_board, &opts);
+    let override_first = override_report
+        .per_net
+        .first()
+        .map(|(n, _)| n.clone())
+        .unwrap();
+    assert_eq!(override_first, "B", "override should route B first");
+
+    assert_ne!(default_first, override_first);
+}
+
+/// Theta* smoke test: two pads offset both horizontally and vertically
+/// with nothing in between should produce at least one diagonal trace
+/// (start.x != end.x AND start.y != end.y). With the old orthogonal A*
+/// every emitted segment had either equal x or equal y on its endpoints,
+/// so this would have failed.
+#[test]
+fn theta_star_emits_diagonal_when_obstacle_forces_detour() {
+    let mut board = Board::new();
+    board.outline = Some(Rect::from_corners(
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+        Point::new(Length::from_mm(40.0), Length::from_mm(30.0)),
+    ));
+    board.add_footprint(footprint(
+        "R1",
+        10.0,
+        10.0,
+        vec![pad("1", 0.0, 0.0, Some("DIAG"))],
+    ));
+    board.add_footprint(footprint(
+        "R2",
+        30.0,
+        20.0,
+        vec![pad("1", 0.0, 0.0, Some("DIAG"))],
+    ));
+
+    let report = route(&mut board, &RouteOptions::default());
+    assert!(
+        report
+            .per_net
+            .iter()
+            .any(|(n, o)| n == "DIAG" && matches!(o, Outcome::Ok { trace_segments, .. } if *trace_segments >= 1)),
+        "DIAG net should route, got {:?}",
+        report.per_net,
+    );
+
+    let has_diagonal = board.traces.iter().any(|t| {
+        let dx = (t.start.x.to_mm() - t.end.x.to_mm()).abs();
+        let dy = (t.start.y.to_mm() - t.end.y.to_mm()).abs();
+        dx > 1e-6 && dy > 1e-6
+    });
+    assert!(
+        has_diagonal,
+        "expected at least one diagonal trace; got {:?}",
+        board
+            .traces
+            .iter()
+            .map(|t| (
+                t.start.x.to_mm(),
+                t.start.y.to_mm(),
+                t.end.x.to_mm(),
+                t.end.y.to_mm(),
+            ))
+            .collect::<Vec<_>>(),
+    );
+}

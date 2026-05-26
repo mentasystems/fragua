@@ -89,19 +89,53 @@ html, body, #app {
 .palette-strip {
   grid-area: palette;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  gap: 0.75rem;
   padding: 6px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
   min-height: 36px;
   align-items: center;
+  justify-content: center;
 }
 .palette-strip.empty {
   color: var(--muted);
   font-size: 11px;
   font-style: italic;
 }
+.palette-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.autoroute-btn {
+  background: #d23a3a;
+  color: #fff;
+  border: none;
+  padding: 0.25rem 0.9rem;
+  font: inherit;
+  font-weight: 600;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.autoroute-btn:hover  { background: #ff4a4a; }
+.autoroute-btn:disabled,
+.autoroute-btn.running { background: #5a2a2a; cursor: progress; }
+.autoroute-status { font: inherit; color: #9aa; }
+.autoroute-status.error { color: #f66; }
+.autoroute-status.done  { color: #6c6; }
+.jlcpcb-btn {
+  background: #2a7a3a;
+  color: #fff;
+  border: none;
+  padding: 0.25rem 0.9rem;
+  font: inherit;
+  font-weight: 600;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.jlcpcb-btn:hover { background: #38a04c; }
+.jlcpcb-btn:disabled { background: #2a4a30; cursor: progress; }
 .palette-chip {
   display: inline-flex;
   align-items: baseline;

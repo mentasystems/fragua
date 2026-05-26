@@ -3,6 +3,9 @@
 //! board, exposes commands to the webview, and re-emits project events
 //! into the frontend's event bus.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use pcb_core::Project;
 use serde::Serialize;
 use tauri::{Emitter, State};
@@ -64,6 +67,13 @@ LOCAL API
 struct AppState {
     project: Project,
     api_addr: String,
+    /// Set while an `Auto Routing` GA search is running so concurrent
+    /// clicks from the UI bail out instead of stacking searches.
+    autoroute_running: Arc<AtomicBool>,
+    /// Tripped by the `stop_autoroute` command to ask the GA loop to
+    /// finish gracefully and keep the best found so far. Reset to false
+    /// at the start of every search.
+    autoroute_stop: Arc<AtomicBool>,
 }
 
 #[derive(Serialize)]
@@ -743,6 +753,234 @@ fn run_router(state: State<'_, AppState>) -> Result<String, String> {
     Ok(summary)
 }
 
+/// Payload mirroring `pcb_router_tune::GaProgress` for the
+/// `autoroute:progress` event the frontend subscribes to. snake_case is
+/// kept on the wire to match the rest of the Fragua command surface.
+#[derive(Serialize, Clone)]
+struct AutorouteProgressPayload {
+    generation: usize,
+    evaluations: usize,
+    cache_hits: usize,
+    elapsed_secs: f64,
+    best_score: f64,
+    best_drc_errors: usize,
+    best_failed_nets: usize,
+    best_length_mm: f64,
+    best_vias: usize,
+    best_cell_mm: f64,
+    best_via_cost: u32,
+    best_clearance_mm: f64,
+    best_net_order: Vec<String>,
+    improved: bool,
+}
+
+impl From<&pcb_router_tune::GaProgress> for AutorouteProgressPayload {
+    fn from(p: &pcb_router_tune::GaProgress) -> Self {
+        Self {
+            generation: p.generation,
+            evaluations: p.evaluations,
+            cache_hits: p.cache_hits,
+            elapsed_secs: p.elapsed_secs,
+            best_score: p.best_score,
+            best_drc_errors: p.best_drc_errors,
+            best_failed_nets: p.best_failed_nets,
+            best_length_mm: p.best_length_mm,
+            best_vias: p.best_vias,
+            best_cell_mm: p.best_cell_mm,
+            best_via_cost: p.best_via_cost,
+            best_clearance_mm: p.best_clearance_mm,
+            best_net_order: p.best_net_order.clone(),
+            improved: p.improved,
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
+struct AutorouteOutcomePayload {
+    generations: usize,
+    total_evaluations: usize,
+    cache_hits: usize,
+    elapsed_secs: f64,
+    best: Option<AutorouteProgressPayload>,
+}
+
+/// Spawn an in-process GA search against the live project's current
+/// board. Returns immediately; progress streams via the
+/// `autoroute:progress` event, completion via `autoroute:done` (and
+/// `autoroute:error` on failure).
+#[tauri::command]
+fn start_autoroute(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    budget_secs: u64,
+) -> Result<String, String> {
+    // Atomic CAS: only one autoroute thread at a time. The frontend
+    // also disables its button while the run is live, but we belt-and-
+    // braces here in case a script or a stray IPC triggers a second.
+    if state
+        .autoroute_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("already running".to_string());
+    }
+
+    // Clear any stale stop request from the previous run.
+    state.autoroute_stop.store(false, Ordering::SeqCst);
+
+    let board = state.project.read().board().clone();
+    let project = state.project.clone();
+    let running = state.autoroute_running.clone();
+    let stop_flag = state.autoroute_stop.clone();
+    let app_handle = app.clone();
+
+    project.log(
+        pcb_core::ActivityLevel::Info,
+        format!("autoroute.start: budget={budget_secs}s"),
+    );
+
+    // GA is CPU-bound — plain OS thread so the Tauri async runtime
+    // stays free for IPC and the HTTP server.
+    std::thread::spawn(move || {
+        let config = pcb_router_tune::GaConfig {
+            algorithm: pcb_router_tune::Algorithm::Ga,
+            budget_secs,
+            population: 16,
+            mutation_rate: 0.30,
+            patience: 8,
+            max_generations: 50,
+            trials: 0,
+            seed: 0,
+        };
+        let drc_opts = pcb_drc::DrcOptions::default();
+        let progress_app = app_handle.clone();
+        let progress_project = project.clone();
+        // Board re-renders are expensive; only commit when this trial
+        // sets a new best OR ~500 ms have passed since the last commit.
+        // Progress text always fires so the user sees evaluation count
+        // tick up between commits.
+        let mut last_commit = std::time::Instant::now();
+        let result = pcb_router_tune::run_search(&board, &config, &drc_opts, &stop_flag, |p, trial_board| {
+            let now = std::time::Instant::now();
+            if p.improved || now.duration_since(last_commit).as_millis() >= 500 {
+                progress_project.replace_routing(
+                    trial_board.traces.clone(),
+                    trial_board.vias.clone(),
+                );
+                last_commit = now;
+            }
+            let payload: AutorouteProgressPayload = p.into();
+            let _ = progress_app.emit("autoroute:progress", &payload);
+        });
+
+        match result {
+            Ok((best_board, outcome)) => {
+                project.replace_routing(best_board.traces.clone(), best_board.vias.clone());
+                let best_payload: Option<AutorouteProgressPayload> =
+                    outcome.best.as_ref().map(Into::into);
+                if let Some(best) = best_payload.as_ref() {
+                    project.log(
+                        pcb_core::ActivityLevel::Info,
+                        format!(
+                            "autoroute.done: {gens} gens, {eval} evals (+{ch} cached) in {secs:.1}s; best {len:.1}mm, {vias} vias, {err} DRC err",
+                            gens = outcome.generations,
+                            eval = outcome.total_evaluations,
+                            ch = outcome.cache_hits,
+                            secs = outcome.elapsed_secs,
+                            len = best.best_length_mm,
+                            vias = best.best_vias,
+                            err = best.best_drc_errors,
+                        ),
+                    );
+                } else {
+                    project.log(
+                        pcb_core::ActivityLevel::Warn,
+                        "autoroute.done: no trials completed".to_string(),
+                    );
+                }
+                let outcome_payload = AutorouteOutcomePayload {
+                    generations: outcome.generations,
+                    total_evaluations: outcome.total_evaluations,
+                    cache_hits: outcome.cache_hits,
+                    elapsed_secs: outcome.elapsed_secs,
+                    best: best_payload,
+                };
+                // Force an explicit save so the user doesn't depend on
+                // the 500 ms autosave debounce — if they close the window
+                // immediately the best is already on disk.
+                if let Some(target) = project.save_path() {
+                    if let Err(e) = project.save_to_path(&target) {
+                        project.log(
+                            pcb_core::ActivityLevel::Error,
+                            format!("autoroute.save: {e}"),
+                        );
+                    }
+                }
+                let _ = app_handle.emit("autoroute:done", &outcome_payload);
+            }
+            Err(e) => {
+                project.log(
+                    pcb_core::ActivityLevel::Error,
+                    format!("autoroute.error: {e}"),
+                );
+                let _ = app_handle.emit("autoroute:error", &e);
+            }
+        }
+        running.store(false, Ordering::SeqCst);
+    });
+
+    Ok("started".to_string())
+}
+
+/// Run the full JLCPCB fab pack: ERC + DRC + manufacturing-DRC,
+/// generates Gerbers/drill/BOM/CPL, zips it, and drops the file in
+/// `~/Downloads/`. Returns the zip path plus a short summary so the
+/// UI can show "ready / NOT READY" + the path.
+#[tauri::command]
+fn export_jlcpcb_pack(state: State<'_, AppState>) -> Result<JlcpcbPackResult, String> {
+    let out_dir = std::env::var_os("HOME").map_or_else(
+        || std::path::PathBuf::from("/tmp"),
+        |h| std::path::PathBuf::from(h).join("Downloads"),
+    );
+    let report = pcb_fab::pack(&state.project, pcb_fab::Provider::Jlcpcb, &out_dir)
+        .map_err(|e| format!("pack: {e}"))?;
+    let zip_path = report.zip_path.to_string_lossy().into_owned();
+    state.project.log(
+        pcb_core::ActivityLevel::Info,
+        format!(
+            "fab.pack: jlcpcb → {} ({} blocking)",
+            zip_path,
+            report.blocking_reasons.len()
+        ),
+    );
+    Ok(JlcpcbPackResult {
+        ready: !report.blocking,
+        zip_path,
+        file_count: report.files.len(),
+        blocking_reasons: report.blocking_reasons,
+    })
+}
+
+#[derive(Serialize)]
+struct JlcpcbPackResult {
+    ready: bool,
+    zip_path: String,
+    file_count: usize,
+    blocking_reasons: Vec<String>,
+}
+
+/// Ask the running autoroute search to finish on the next trial
+/// boundary and commit the best genome found so far. No-op if no
+/// search is running.
+#[tauri::command]
+fn stop_autoroute(state: State<'_, AppState>) -> Result<String, String> {
+    if !state.autoroute_running.load(Ordering::SeqCst) {
+        return Ok("not running".to_string());
+    }
+    state.autoroute_stop.store(true, Ordering::SeqCst);
+    Ok("stop requested".to_string())
+}
+
 /// Write the full fab pack (Gerbers + Excellon + BOM + pos.csv) into
 /// `~/Downloads/pcb-{name}-{timestamp}/` and return the directory.
 #[tauri::command]
@@ -846,6 +1084,8 @@ pub fn run() {
     let state = AppState {
         project: project.clone(),
         api_addr: api_addr.clone(),
+        autoroute_running: Arc::new(AtomicBool::new(false)),
+        autoroute_stop: Arc::new(AtomicBool::new(false)),
     };
 
     tauri::Builder::default()
@@ -868,6 +1108,9 @@ pub fn run() {
             move_footprint,
             rotate_footprint,
             run_router,
+            start_autoroute,
+            stop_autoroute,
+            export_jlcpcb_pack,
             run_drc,
             export_fab_pack,
             library_state,
