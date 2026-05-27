@@ -648,6 +648,12 @@ html, body, #app {
   border-color: var(--accent);
   background: rgba(214, 144, 91, 0.08);
 }
+.cell-controls button.active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(214, 144, 91, 0.22);
+  font-weight: 600;
+}
 .review-margins {
   display: flex;
   align-items: center;

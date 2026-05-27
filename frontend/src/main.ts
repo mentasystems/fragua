@@ -964,6 +964,27 @@ async function paintReview() {
       fpSvg.style.transform = css;
       fpSvg.style.transformOrigin = "center";
     }
+    // Reflect the current transform state on the control buttons so the
+    // user can tell at a glance which knobs are on. rot button shows the
+    // current angle, flip-h / flip-v light up when active.
+    for (const ctrl of Array.from(
+      card.querySelectorAll(".cell-controls"),
+    ) as HTMLElement[]) {
+      const target = ctrl.dataset.target as "photo" | "footprint";
+      const t = target === "photo" ? s.photoT : s.fpT;
+      for (const btn of Array.from(ctrl.querySelectorAll("button")) as HTMLButtonElement[]) {
+        const act = btn.dataset.act;
+        if (act === "rotate") {
+          const r = ((t.rotation_deg % 360) + 360) % 360;
+          btn.textContent = r === 0 ? "rot 0" : `rot ${r}`;
+          btn.classList.toggle("active", r !== 0);
+        } else if (act === "flip-h") {
+          btn.classList.toggle("active", t.flip_h);
+        } else if (act === "flip-v") {
+          btn.classList.toggle("active", t.flip_v);
+        }
+      }
+    }
   }
 
   // Wire up control bars (photo + footprint).
