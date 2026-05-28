@@ -228,10 +228,11 @@ fn write_copper_inner_layer(
     write_header(w, label)?;
     // Pre-collect what we need.
     let mut table = Table::default();
-    // Pads on this layer.
+    // Pads on this layer. PTH pads (drill.is_some) have a copper ring
+    // on every copper layer, so `occupies_layer` folds that in.
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
-            if pad.layer != target_layer {
+            if !pad.occupies_layer(target_layer) {
                 continue;
             }
             let (pw, ph) = fp.pad_world_size(pad);
@@ -258,7 +259,7 @@ fn write_copper_inner_layer(
     // Pads.
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
-            if pad.layer != target_layer {
+            if !pad.occupies_layer(target_layer) {
                 continue;
             }
             let (pw, ph) = fp.pad_world_size(pad);
@@ -328,7 +329,7 @@ pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result
             .collect();
         for fp in board.footprints_in_order() {
             for pad in &fp.pads {
-                if pad.layer != layer {
+                if !pad.occupies_layer(layer) {
                     continue;
                 }
                 let pad_net = pad.net.as_deref();
@@ -434,7 +435,7 @@ pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result
     let mut draws: Vec<(u32, Point, Point)> = Vec::new();
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
-            if pad.layer != layer {
+            if !pad.occupies_layer(layer) {
                 continue;
             }
             let center = fp.pad_world_center(pad);
@@ -538,7 +539,7 @@ pub fn write_mask(board: &Board, side: Side, w: &mut impl Write) -> io::Result<(
     let layer = side.copper_layer();
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
-            if pad.layer != layer {
+            if !pad.occupies_layer(layer) {
                 continue;
             }
             let center = fp.pad_world_center(pad);

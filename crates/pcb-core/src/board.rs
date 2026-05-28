@@ -302,10 +302,21 @@ pub enum FootprintSilk {
     },
 }
 
-/// A pad on a footprint. Rectangular copper. Optionally perforated:
-/// `drill = Some(d)` turns the pad into a hybrid SMD+through-hole
-/// landing — useful when you want the freedom to populate either the
-/// SMD or the through-hole variant of a part on the same footprint.
+/// A pad on a footprint. Rectangular copper.
+///
+/// `layer` is the **mount side** — the layer the component body sits
+/// on, where pick-and-place expects the part, and where the silkscreen
+/// outline / reference designator are drawn. For SMD pads (`drill =
+/// None`) it is also the only copper layer the pad occupies.
+///
+/// `drill = Some(d)` turns the pad into a plated through-hole landing:
+/// the copper ring appears on **every** copper layer in the stackup,
+/// connected by the centred PTH — matching the via convention ("a
+/// plated hole connects all layers"). The pad is then a hybrid
+/// SMD+through-hole landing, so the same footprint can be populated
+/// with either the SMD or the through-hole variant of a part. Use
+/// [`Pad::occupies_layer`] anywhere you'd otherwise compare
+/// `pad.layer == target` — it folds the PTH rule in one place.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pad {
     /// Footprint-local pad number (e.g. "1", "2", "GND").
@@ -319,15 +330,34 @@ pub struct Pad {
     /// Position relative to the footprint origin.
     pub offset: Point,
     pub size: (Length, Length),
+    /// Mount side of the pad. For SMD this is the only copper layer
+    /// the pad occupies; for PTH (`drill.is_some()`) the copper ring
+    /// is replicated on every copper layer (see [`Pad::occupies_layer`]).
     pub layer: CopperLayer,
     /// Net this pad belongs to. `None` until the netlist is synced.
     pub net: Option<String>,
     /// Optional plated through-hole drill diameter. `None` = pure SMD
-    /// pad. `Some(d)` = perforated pad: copper rectangle on top with a
-    /// centred PTH of diameter `d`. The Excellon writer emits these as
-    /// PTH drills; the renderer draws the hole over the pad fill.
+    /// pad. `Some(d)` = perforated pad: a copper ring is emitted on
+    /// every copper layer of the stackup and the Excellon writer emits
+    /// the centred PTH; the renderer draws the hole over the pad fill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drill: Option<Length>,
+}
+
+impl Pad {
+    /// True iff this pad has copper on `target`. SMD pads only occupy
+    /// their assigned [`Pad::layer`]; PTH pads (`drill.is_some()`)
+    /// occupy every copper layer in the stackup — a plated hole
+    /// connects all layers, same convention as vias.
+    ///
+    /// Prefer this over `pad.layer == target` in any output path
+    /// (gerber/ODB/render copper or mask layers, pour clearance, DRC
+    /// trace-pad / pad-pad checks); use the bare `pad.layer` only when
+    /// you really mean the mount side (pick-and-place, silk, BOM).
+    #[must_use]
+    pub fn occupies_layer(&self, target: Layer) -> bool {
+        self.drill.is_some() || self.layer == target
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1075,17 +1105,19 @@ impl Board {
         &mut self,
         id: Id,
     ) -> Option<(Footprint, usize, usize, Vec<String>)> {
-        // Snapshot the pads (world coords + net) BEFORE removal so we
-        // can match trace/via endpoints against them.
+        // Snapshot the pads (world coords + net + PTH flag) BEFORE
+        // removal so we can match trace/via endpoints against them.
+        // PTH pads have copper on every layer, so a trace landing on
+        // their bottom-side ring must also count as "touching".
         let fp = self.footprints.get(&id)?.clone();
-        let pad_hits: Vec<(CopperLayer, String, Point, Length, Length)> = fp
+        let pad_hits: Vec<(CopperLayer, bool, String, Point, Length, Length)> = fp
             .pads
             .iter()
             .filter_map(|pad| {
                 pad.net.as_ref().map(|net| {
                     let center = fp.pad_world_center(pad);
                     let (w, h) = fp.pad_world_size(pad);
-                    (pad.layer, net.clone(), center, w, h)
+                    (pad.layer, pad.drill.is_some(), net.clone(), center, w, h)
                 })
             })
             .collect();
@@ -1094,8 +1126,8 @@ impl Board {
         // any of the doomed footprint's pads? Same tolerance shape used
         // by `orphan_trace_ids` so a router-grid snap counts as a hit.
         let touches_pad = |layer: CopperLayer, net: &str, x: f64, y: f64, tol: f64| -> bool {
-            for (pad_layer, pad_net, center, pw, ph) in &pad_hits {
-                if *pad_layer != layer {
+            for (pad_layer, pad_is_pth, pad_net, center, pw, ph) in &pad_hits {
+                if !(*pad_is_pth || *pad_layer == layer) {
                     continue;
                 }
                 if pad_net.as_str() != net {
@@ -1380,7 +1412,7 @@ impl Board {
                 let tol = trace.width.to_mm() / 2.0 + 1e-3;
                 for fp in self.footprints_in_order() {
                     for pad in &fp.pads {
-                        if pad.layer != trace.layer {
+                        if !pad.occupies_layer(trace.layer) {
                             continue;
                         }
                         if pad.net.as_deref() != Some(trace.net.as_str()) {

@@ -1360,7 +1360,7 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
 
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
-            if pad.layer != pour.layer {
+            if !pad.occupies_layer(pour.layer) {
                 continue;
             }
             let c = fp.pad_world_center(pad);
@@ -1501,7 +1501,7 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
     let mut protect = vec![false; cols * rows];
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
-            if pad.layer != pour.layer {
+            if !pad.occupies_layer(pour.layer) {
                 continue;
             }
             if pad.net.as_deref() != Some(pour.net.as_str()) {

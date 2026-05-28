@@ -720,7 +720,15 @@ fn check_body_off_board(
 struct PadGeom<'a> {
     fp_reference: &'a str,
     pad_number: &'a str,
+    /// Mount side. SMD pads only have copper here; PTH pads
+    /// (`is_through_hole`) have a copper ring on every copper layer
+    /// — use [`PadGeom::occupies_layer`] / [`PadGeom::shares_layer_with`]
+    /// instead of comparing `layer` directly.
     layer: CopperLayer,
+    /// `Pad::drill.is_some()` — copy carried so the clearance checks
+    /// can ask "does this pad have copper on layer L?" without having
+    /// to walk back to the original `Pad`.
+    is_through_hole: bool,
     rect: Rect,
     net: Option<&'a str>,
     /// Mirrors `Footprint::edge_mounted`. The edge-clearance check
@@ -733,6 +741,18 @@ impl PadGeom<'_> {
     fn label(&self) -> String {
         format!("{}.{}", self.fp_reference, self.pad_number)
     }
+
+    /// True iff this pad has copper on `target`. Mirrors
+    /// [`pcb_core::Pad::occupies_layer`].
+    fn occupies_layer(&self, target: CopperLayer) -> bool {
+        self.is_through_hole || self.layer == target
+    }
+
+    /// True iff `self` and `other` share at least one copper layer —
+    /// the prerequisite for any pad-pad clearance / connectivity check.
+    fn shares_layer_with(&self, other: &PadGeom) -> bool {
+        self.is_through_hole || other.is_through_hole || self.layer == other.layer
+    }
 }
 
 fn collect_pad_geometry(board: &Board) -> Vec<PadGeom<'_>> {
@@ -743,6 +763,7 @@ fn collect_pad_geometry(board: &Board) -> Vec<PadGeom<'_>> {
                 fp_reference: fp.reference.as_str(),
                 pad_number: pad.number.as_str(),
                 layer: pad.layer,
+                is_through_hole: pad.drill.is_some(),
                 rect: pad_world_rect(fp, pad),
                 net: pad.net.as_deref(),
                 edge_mounted: fp.edge_mounted,
@@ -763,7 +784,7 @@ fn check_pad_pad(pads: &[PadGeom], opts: &DrcOptions, report: &mut DrcReport) {
         for j in (i + 1)..pads.len() {
             let a = &pads[i];
             let b = &pads[j];
-            if a.layer != b.layer {
+            if !a.shares_layer_with(b) {
                 continue;
             }
             // Same net or both unassigned: not a clearance violation.
@@ -842,7 +863,7 @@ fn check_trace_pad(board: &Board, pads: &[PadGeom], opts: &DrcOptions, report: &
     for trace in &board.traces {
         let half = trace.width.to_mm() / 2.0;
         for pad in pads {
-            if pad.layer != trace.layer {
+            if !pad.occupies_layer(trace.layer) {
                 continue;
             }
             if pad.net == Some(trace.net.as_str()) {
@@ -1053,7 +1074,7 @@ fn pad_has_same_net_neighbour(pads: &[PadGeom], pad: &PadGeom) -> bool {
         if std::ptr::eq(other, pad) {
             continue;
         }
-        if other.layer != pad.layer {
+        if !other.shares_layer_with(pad) {
             continue;
         }
         if other.net != Some(net) {
@@ -1068,7 +1089,7 @@ fn pad_has_same_net_neighbour(pads: &[PadGeom], pad: &PadGeom) -> bool {
 
 fn trace_touches_pad(board: &Board, pad: &PadGeom, net: &str) -> bool {
     for trace in &board.traces {
-        if trace.layer != pad.layer || trace.net != net {
+        if !pad.occupies_layer(trace.layer) || trace.net != net {
             continue;
         }
         let d = segment_aabb_distance(
@@ -1084,11 +1105,14 @@ fn trace_touches_pad(board: &Board, pad: &PadGeom, net: &str) -> bool {
     false
 }
 
-/// A pour with `net` filling `pad.layer` is treated as electrical
-/// ground for any pad on that net + layer. Cross-layer pads need a
-/// via to reach the pour — that case is handled by `via_touches_pad`.
+/// A pour with `net` filling any layer the pad has copper on is
+/// treated as electrical contact for any pad on that net. For SMD
+/// pads that's just their mount-side layer; for PTH pads the copper
+/// ring exists on every copper layer, so a same-net pour on any
+/// signal layer counts. Cross-layer SMD pads still need a via to
+/// reach the pour — that case is handled by `via_touches_pad`.
 fn pour_covers_pad(pours: &[Pour], pad: &PadGeom, net: &str) -> bool {
-    pours.iter().any(|p| p.net == net && p.layer == pad.layer)
+    pours.iter().any(|p| p.net == net && pad.occupies_layer(p.layer))
 }
 
 fn via_touches_pad(board: &Board, pad: &PadGeom, net: &str) -> bool {

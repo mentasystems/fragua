@@ -83,6 +83,56 @@ fn gerber_emits_one_file_per_layer() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// A PTH pad (`drill = Some`) must export a copper flash on **every**
+/// copper layer plus a solder-mask opening on **both** outer sides —
+/// otherwise the fabricated board only has the top annular ring and
+/// the through-hole connection is broken. Regression test for the bug
+/// where `Pad::layer` was treated as the sole copper layer instead of
+/// the mount side.
+#[test]
+fn pth_pad_emits_copper_and_mask_on_every_layer() {
+    let mut board = Board::new();
+    board.outline = Some(Rect::from_corners(
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+        Point::new(Length::from_mm(40.0), Length::from_mm(30.0)),
+    ));
+    // 4 copper layers so we cover top + bottom + inner.
+    board.stackup = LayerStackup::fr4(4);
+
+    // A footprint mounted on top with a single PTH pad (drill = 0.8 mm
+    // through a 1.6 × 1.6 mm landing) and no other pads. The pad is
+    // assigned to Top — that's the mount side — but its copper ring
+    // must still appear on every copper layer.
+    let mut fp = footprint("U1", 20.0, 15.0);
+    fp.pads[0].size = (Length::from_mm(1.6), Length::from_mm(1.6));
+    fp.pads[0].drill = Some(Length::from_mm(0.8));
+    board.add_footprint(fp);
+
+    let dir = tempdir();
+    let _ = pcb_gerber::write_fab_pack(&board, "pth", &dir).unwrap();
+
+    // Every copper gerber (top, both inners, bottom) must contain at
+    // least one pad flash (`D03*`).
+    for name in ["pth-F_Cu.gbr", "pth-In1_Cu.gbr", "pth-In2_Cu.gbr", "pth-B_Cu.gbr"] {
+        let body = fs::read_to_string(dir.join(name)).unwrap();
+        assert!(
+            body.contains("D03*"),
+            "{name}: PTH pad has no copper flash — only the mount side got copper"
+        );
+    }
+
+    // Both solder masks must have an opening for the PTH pad.
+    for name in ["pth-F_Mask.gbr", "pth-B_Mask.gbr"] {
+        let body = fs::read_to_string(dir.join(name)).unwrap();
+        assert!(
+            body.contains("D03*"),
+            "{name}: PTH pad has no mask opening — fab would cover the bottom ring"
+        );
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn legacy_two_layer_pack_keeps_historical_filenames() {
     // 2-layer board still produces the exact pre-Phase-4 stems:

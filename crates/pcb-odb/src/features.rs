@@ -58,7 +58,7 @@ fn emit_copper_layer(out: &mut String, board: &Board, layer: CopperLayer) {
     let mut pad_idx = 0_usize;
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
-            if pad.layer != layer {
+            if !pad.occupies_layer(layer) {
                 continue;
             }
             let (cx, cy) = pad_world_center(fp, pad);
@@ -164,7 +164,7 @@ fn emit_outline_layer(out: &mut String, board: &Board) {
 fn emit_mask_layer(out: &mut String, board: &Board, layer: CopperLayer) {
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
-            if pad.layer != layer {
+            if !pad.occupies_layer(layer) {
                 continue;
             }
             let (cx, cy) = pad_world_center(fp, pad);
