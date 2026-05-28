@@ -2,7 +2,7 @@
 # Install the latest fragua release.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/kidandcat/fragua/master/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/mentasystems/fragua/master/scripts/install.sh | sh
 #
 # Env vars:
 #   FRAGUA_VERSION  Specific tag to install (default: latest)
@@ -10,7 +10,7 @@
 
 set -eu
 
-REPO="kidandcat/fragua"
+REPO="mentasystems/fragua"
 VERSION="${FRAGUA_VERSION:-latest}"
 PREFIX="${FRAGUA_PREFIX:-}"
 

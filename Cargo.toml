@@ -19,7 +19,7 @@ members = [
 version = "0.0.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/kidandcat/fragua"
+repository = "https://github.com/mentasystems/fragua"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
