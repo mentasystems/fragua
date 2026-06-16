@@ -1358,6 +1358,11 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
     };
     let use_spokes = spoke_w_mm > 0.0 && gap_mm > 0.0;
 
+    // Dangling stubs carry no real copper; the spoke-collision test
+    // skips them just like the exporters do.
+    let orphan_traces = board.orphan_trace_ids();
+    let orphan_vias = board.orphan_via_ids();
+
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
             if !pad.occupies_layer(pour.layer) {
@@ -1392,56 +1397,101 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
                 // pour copper.
                 let half_spoke = spoke_w_mm / 2.0;
                 let bridge_len = gap_mm + 0.1; // overshoot for safety
-                // Horizontal (east + west) bridges, centred on cy.
-                punch_rect(
-                    &mut void,
-                    cx - half_w - bridge_len,
-                    cy - half_spoke,
-                    bridge_len,
-                    spoke_w_mm,
-                    cell,
-                    cols,
-                    rows,
-                    x0,
-                    y0,
-                );
-                punch_rect(
-                    &mut void,
-                    cx + half_w,
-                    cy - half_spoke,
-                    bridge_len,
-                    spoke_w_mm,
-                    cell,
-                    cols,
-                    rows,
-                    x0,
-                    y0,
-                );
-                // Vertical (north + south) bridges.
-                punch_rect(
-                    &mut void,
-                    cx - half_spoke,
-                    cy - half_h - bridge_len,
-                    spoke_w_mm,
-                    bridge_len,
-                    cell,
-                    cols,
-                    rows,
-                    x0,
-                    y0,
-                );
-                punch_rect(
-                    &mut void,
-                    cx - half_spoke,
-                    cy + half_h,
-                    spoke_w_mm,
-                    bridge_len,
-                    cell,
-                    cols,
-                    rows,
-                    x0,
-                    y0,
-                );
+                // Each spoke is punched back to copper only if its
+                // centre-line (pad edge → pour) stays clear of every
+                // foreign net by the fab clearance — the same test the
+                // Gerber writer runs. This keeps the rendered pour in
+                // lock-step with the manufactured copper: a spoke that
+                // would bridge GND ↔ a signal net is dropped here too.
+                let half_w_l = pw / 2;
+                let half_h_l = ph / 2;
+                let bridge_l = pcb_core::Length::from_mm(bridge_len);
+                let spoke_half_l = pcb_core::Length::from_mm(spoke_w_mm) / 2;
+                let clears = |a: pcb_core::Point, b: pcb_core::Point| {
+                    pcb_core::thermal::spoke_clear(
+                        a,
+                        b,
+                        spoke_half_l,
+                        pcb_core::thermal::POUR_CLEARANCE,
+                        pour.net.as_str(),
+                        pour.layer,
+                        board,
+                        &orphan_traces,
+                        &orphan_vias,
+                    )
+                };
+                // West.
+                if clears(
+                    pcb_core::Point::new(c.x - half_w_l - bridge_l, c.y),
+                    pcb_core::Point::new(c.x - half_w_l, c.y),
+                ) {
+                    punch_rect(
+                        &mut void,
+                        cx - half_w - bridge_len,
+                        cy - half_spoke,
+                        bridge_len,
+                        spoke_w_mm,
+                        cell,
+                        cols,
+                        rows,
+                        x0,
+                        y0,
+                    );
+                }
+                // East.
+                if clears(
+                    pcb_core::Point::new(c.x + half_w_l, c.y),
+                    pcb_core::Point::new(c.x + half_w_l + bridge_l, c.y),
+                ) {
+                    punch_rect(
+                        &mut void,
+                        cx + half_w,
+                        cy - half_spoke,
+                        bridge_len,
+                        spoke_w_mm,
+                        cell,
+                        cols,
+                        rows,
+                        x0,
+                        y0,
+                    );
+                }
+                // South.
+                if clears(
+                    pcb_core::Point::new(c.x, c.y - half_h_l - bridge_l),
+                    pcb_core::Point::new(c.x, c.y - half_h_l),
+                ) {
+                    punch_rect(
+                        &mut void,
+                        cx - half_spoke,
+                        cy - half_h - bridge_len,
+                        spoke_w_mm,
+                        bridge_len,
+                        cell,
+                        cols,
+                        rows,
+                        x0,
+                        y0,
+                    );
+                }
+                // North.
+                if clears(
+                    pcb_core::Point::new(c.x, c.y + half_h_l),
+                    pcb_core::Point::new(c.x, c.y + half_h_l + bridge_l),
+                ) {
+                    punch_rect(
+                        &mut void,
+                        cx - half_spoke,
+                        cy + half_h,
+                        spoke_w_mm,
+                        bridge_len,
+                        cell,
+                        cols,
+                        rows,
+                        x0,
+                        y0,
+                    );
+                }
                 continue;
             }
             mark_rect(

@@ -24,7 +24,7 @@ const EDGE_STROKE: Length = Length(50_000); // 0.05 mm
 /// Per-side clearance the pour leaves around foreign-net pads, traces,
 /// and vias. Matches the DRC's `min_clearance` so a clean route + a
 /// pour produce a fab-correct file.
-const POUR_CLEARANCE: Length = Length(200_000); // 0.2 mm
+const POUR_CLEARANCE: Length = pcb_core::thermal::POUR_CLEARANCE; // 0.2 mm
 
 /// Inset of the pour polygon from the board outline. Matches the
 /// DRC's `edge_clearance` so the fab does not slot into the pour.
@@ -359,31 +359,51 @@ pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result
                         let spoke_id = table.intern(Aperture::Round {
                             d: Length::from_mm(spoke_width_mm),
                         });
+                        // Same-net pour implies the pad carries a net.
+                        let Some(net) = pad_net else { continue };
+                        let spoke_half = Length::from_mm(spoke_width_mm) / 2;
                         let half_w = pw.0 / 2;
                         let half_h = ph.0 / 2;
                         let len = gap.0 + 100_000; // gap + 0.1 mm overshoot
-                        // East / west
-                        spoke_draws.push((
-                            spoke_id,
-                            Point::new(Length(center.x.0 - half_w - len), center.y),
-                            Point::new(Length(center.x.0 - half_w + 50_000), center.y),
-                        ));
-                        spoke_draws.push((
-                            spoke_id,
-                            Point::new(Length(center.x.0 + half_w - 50_000), center.y),
-                            Point::new(Length(center.x.0 + half_w + len), center.y),
-                        ));
-                        // North / south
-                        spoke_draws.push((
-                            spoke_id,
-                            Point::new(center.x, Length(center.y.0 - half_h - len)),
-                            Point::new(center.x, Length(center.y.0 - half_h + 50_000)),
-                        ));
-                        spoke_draws.push((
-                            spoke_id,
-                            Point::new(center.x, Length(center.y.0 + half_h - 50_000)),
-                            Point::new(center.x, Length(center.y.0 + half_h + len)),
-                        ));
+                        // Candidate spokes: west, east, south, north. A
+                        // spoke is a *dark* copper bar emitted after the
+                        // clearance-void pass, so one that crosses a
+                        // foreign net's void would re-deposit copper over
+                        // it and short pad/pour ↔ that net. Keep only the
+                        // spokes that stay clear of all foreign copper.
+                        let candidates = [
+                            (
+                                Point::new(Length(center.x.0 - half_w - len), center.y),
+                                Point::new(Length(center.x.0 - half_w + 50_000), center.y),
+                            ),
+                            (
+                                Point::new(Length(center.x.0 + half_w - 50_000), center.y),
+                                Point::new(Length(center.x.0 + half_w + len), center.y),
+                            ),
+                            (
+                                Point::new(center.x, Length(center.y.0 - half_h - len)),
+                                Point::new(center.x, Length(center.y.0 - half_h + 50_000)),
+                            ),
+                            (
+                                Point::new(center.x, Length(center.y.0 + half_h - 50_000)),
+                                Point::new(center.x, Length(center.y.0 + half_h + len)),
+                            ),
+                        ];
+                        for (sa, sb) in candidates {
+                            if pcb_core::thermal::spoke_clear(
+                                sa,
+                                sb,
+                                spoke_half,
+                                POUR_CLEARANCE,
+                                net,
+                                layer,
+                                board,
+                                &orphan_traces,
+                                &orphan_vias,
+                            ) {
+                                spoke_draws.push((spoke_id, sa, sb));
+                            }
+                        }
                     }
                     // Solid (or non-Spokes4): no void, no spoke — pad
                     // melts into the pour, legacy behaviour.
@@ -894,7 +914,7 @@ fn footprint_body_local(fp: &pcb_core::Footprint) -> Option<(Length, Length)> {
 #[cfg(test)]
 mod thermal_relief_tests {
     use super::*;
-    use pcb_core::{Board, CopperLayer, Footprint, Id, Pad, Pour, Rect, ThermalRelief};
+    use pcb_core::{Board, CopperLayer, Footprint, Id, Pad, Pour, Rect, ThermalRelief, Trace};
 
     fn board_with_pour(relief: ThermalRelief) -> Board {
         let mut b = Board::new();
@@ -975,6 +995,83 @@ mod thermal_relief_tests {
         assert_eq!(
             d01_count, 0,
             "solid relief should not emit any D01 line draws after LPD, got {d01_count}\n{tail}"
+        );
+    }
+
+    /// Build the standard GND-pour board (pad at world 10,10) plus a
+    /// foreign-net "VCC" pad+trace so we can probe spoke collisions.
+    fn board_with_foreign_trace(start: Point, end: Point, vcc_pad: Point) -> Board {
+        let mut b = board_with_pour(ThermalRelief::Spokes4 {
+            spoke_width_mm: 0.4,
+            gap_mm: 0.4,
+        });
+        b.add_footprint(Footprint {
+            id: Id::new(),
+            reference: "R2".into(),
+            value: String::new(),
+            library: "test".into(),
+            position: vcc_pad,
+            rotation: 0.0,
+            layer: CopperLayer::Top,
+            pads: vec![Pad {
+                number: "1".into(),
+                name: String::new(),
+                offset: Point::new(Length::ZERO, Length::ZERO),
+                size: (Length::from_mm(1.5), Length::from_mm(1.5)),
+                layer: CopperLayer::Top,
+                net: Some("VCC".into()),
+                drill: None,
+            }],
+            key: String::new(),
+            description: String::new(),
+            edge_mounted: false,
+            silk: Vec::new(),
+        });
+        b.add_trace(Trace {
+            id: Id::new(),
+            layer: CopperLayer::Top,
+            start,
+            end,
+            width: Length::from_mm(0.4),
+            net: "VCC".into(),
+        });
+        b
+    }
+
+    fn d01_after_last_lpd(b: &Board) -> usize {
+        let mut out = Vec::new();
+        write_copper(b, Side::Top, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let lpd_idx = text.rfind("%LPD*%").expect("missing LPD section");
+        text[lpd_idx..].matches("D01*").count()
+    }
+
+    #[test]
+    fn foreign_net_trace_drops_colliding_spoke() {
+        // Baseline: VCC pad + trace tucked far from the GND pad, so all
+        // four GND thermal spokes survive. D01 count = 4 spokes + 1
+        // foreign-trace dark draw.
+        let far = board_with_foreign_trace(
+            Point::new(Length::from_mm(3.0), Length::from_mm(3.0)),
+            Point::new(Length::from_mm(5.0), Length::from_mm(3.0)),
+            Point::new(Length::from_mm(3.0), Length::from_mm(3.0)),
+        );
+        // Collision: the VCC trace runs under the GND pad (y=9), ending
+        // on the pad's south spoke axis (x=10). Without the guard the
+        // dark south-spoke bar would bridge GND ↔ VCC across the
+        // clearance void — exactly the short seen on the real board.
+        // That one spoke must be dropped; the other three stay.
+        let near = board_with_foreign_trace(
+            Point::new(Length::from_mm(3.0), Length::from_mm(9.0)),
+            Point::new(Length::from_mm(10.0), Length::from_mm(9.0)),
+            Point::new(Length::from_mm(3.0), Length::from_mm(9.0)),
+        );
+        let far_n = d01_after_last_lpd(&far);
+        let near_n = d01_after_last_lpd(&near);
+        assert_eq!(
+            near_n,
+            far_n - 1,
+            "expected exactly one spoke dropped when a foreign trace crosses it (far={far_n}, near={near_n})"
         );
     }
 }
