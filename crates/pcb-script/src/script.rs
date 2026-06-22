@@ -1050,6 +1050,15 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 args,
             })
         }
+        "stitch-isolated-pads" | "stitch" => {
+            // stitch-isolated-pads — tie every floating plane pad to its
+            // pour with an auto-placed via (no args).
+            Ok(Cmd {
+                line,
+                tool: "route.stitch_isolated_pads".into(),
+                args: json!({}),
+            })
+        }
         "delete-trace" => {
             need_args(line, tokens, 1, "delete-trace ID")?;
             Ok(Cmd {

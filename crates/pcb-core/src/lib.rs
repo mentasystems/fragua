@@ -15,6 +15,7 @@ pub mod library;
 pub mod project;
 pub mod schematic;
 pub mod silk_clip;
+pub mod stitch;
 pub mod thermal;
 pub mod units;
 

@@ -389,6 +389,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "route.delete_via" => tool_route_delete_via(project, args),
         "route.add_trace" => tool_route_add_trace(project, args),
         "route.add_via" => tool_route_add_via(project, args),
+        "route.stitch_isolated_pads" => tool_route_stitch_isolated_pads(project),
         "route.clear" => tool_route_clear(project),
         "placement.auto" => tool_placement_auto(project, args),
         "route.run" => tool_route_run(project, args),
@@ -2563,6 +2564,38 @@ fn tool_route_add_via(project: &Project, args: &Value) -> Result<Value, ToolErro
     });
     Ok(text_result(format!("via {} ({})", id.0, input.net))
         .with_data(json!({"id": id.0.to_string()})))
+}
+
+/// Auto-stitch every isolated plane pad: drop a same-net via (beside the
+/// pad with a stub, or via-in-pad when fully boxed) that ties the pad to
+/// the pour on another copper layer. Pads no via can reach are reported
+/// as needing a manual reroute.
+fn tool_route_stitch_isolated_pads(project: &Project) -> Result<Value, ToolError> {
+    let plan = {
+        let snap = project.read();
+        pcb_core::stitch::plan_stitches(snap.board(), pcb_core::stitch::StitchParams::default())
+    };
+    let added = plan.proposals.len();
+    for s in &plan.proposals {
+        project.add_via(s.via.clone());
+        if let Some(stub) = &s.stub {
+            project.add_trace(stub.clone());
+        }
+    }
+    let msg = if plan.unreachable.is_empty() {
+        format!("stitched {added} isolated pad(s)")
+    } else {
+        format!(
+            "stitched {added} isolated pad(s); {} still unreachable (reroute needed): {}",
+            plan.unreachable.len(),
+            plan.unreachable.join(", ")
+        )
+    };
+    project.log(ActivityLevel::Info, &msg);
+    Ok(text_result(msg).with_data(json!({
+        "stitched": added,
+        "unreachable": plan.unreachable,
+    })))
 }
 
 fn tool_route_clear(project: &Project) -> Result<Value, ToolError> {

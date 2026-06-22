@@ -13,3 +13,6 @@ Cargo.lock.bak
 
 .DS_Store
 .claude/
+
+# Browser-automation (Playwright MCP) scratch output — page snapshots/screenshots
+.playwright-mcp/

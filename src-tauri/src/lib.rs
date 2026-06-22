@@ -1095,6 +1095,26 @@ fn add_demo_resistor(state: State<'_, AppState>) {
     state.project.add_footprint(footprint);
 }
 
+/// Auto-stitch every isolated plane pad: drop a same-net via (beside the
+/// pad with a stub, or via-in-pad when fully boxed) that ties it to the
+/// pour on another copper layer. Returns how many were stitched and which
+/// pads remain unreachable (a manual reroute is required for those).
+#[tauri::command]
+fn stitch_isolated_pads(state: State<'_, AppState>) -> serde_json::Value {
+    let plan = {
+        let snap = state.project.read();
+        pcb_core::stitch::plan_stitches(snap.board(), pcb_core::stitch::StitchParams::default())
+    };
+    let stitched = plan.proposals.len();
+    for s in &plan.proposals {
+        state.project.add_via(s.via.clone());
+        if let Some(stub) = &s.stub {
+            state.project.add_trace(stub.clone());
+        }
+    }
+    serde_json::json!({ "stitched": stitched, "unreachable": plan.unreachable })
+}
+
 /// Entry point used by the binary in `main.rs`.
 pub fn run() {
     // First thing on launch — print the usage AND the full script
@@ -1143,6 +1163,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             project_state,
             add_demo_resistor,
+            stitch_isolated_pads,
             reset_project,
             reset_placement,
             reset_route,

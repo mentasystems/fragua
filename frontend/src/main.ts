@@ -155,6 +155,7 @@ root.innerHTML = `
   </div>
   <div class="palette-strip" id="palette-strip">
     <button id="autoroute-btn" class="autoroute-btn">Auto Routing</button>
+    <button id="stitch-btn" class="autoroute-btn" title="tie floating plane pads to their pour with vias">Stitch GND</button>
     <button id="jlcpcb-btn" class="jlcpcb-btn">JLCPCB</button>
     <button id="odb-btn" class="odb-btn">ODB++</button>
     <span id="autoroute-status" class="autoroute-status"></span>
@@ -196,6 +197,7 @@ const els = {
   palette: document.getElementById("palette-strip")!,
   paletteChips: document.getElementById("palette-chips")!,
   autorouteBtn: document.getElementById("autoroute-btn") as HTMLButtonElement,
+  stitchBtn: document.getElementById("stitch-btn") as HTMLButtonElement,
   autorouteStatus: document.getElementById("autoroute-status")!,
   jlcpcbBtn: document.getElementById("jlcpcb-btn") as HTMLButtonElement,
   odbBtn: document.getElementById("odb-btn") as HTMLButtonElement,
@@ -1372,6 +1374,33 @@ els.odbBtn.addEventListener("click", async () => {
     els.autorouteStatus.textContent = `ODB++ error: ${e}`;
   } finally {
     els.odbBtn.disabled = false;
+  }
+});
+
+els.stitchBtn.addEventListener("click", async () => {
+  els.stitchBtn.disabled = true;
+  els.autorouteStatus.className = "autoroute-status";
+  els.autorouteStatus.textContent = "stitching isolated GND pads…";
+  try {
+    const res = await invoke<{ stitched: number; unreachable: string[] }>(
+      "stitch_isolated_pads",
+    );
+    if (res.unreachable.length > 0) {
+      els.autorouteStatus.classList.add("error");
+      els.autorouteStatus.textContent =
+        `stitched ${res.stitched}; ${res.unreachable.length} still need a reroute: ${res.unreachable.join(", ")}`;
+    } else {
+      els.autorouteStatus.classList.add("done");
+      els.autorouteStatus.textContent =
+        res.stitched > 0
+          ? `stitched ${res.stitched} isolated pad(s)`
+          : "no isolated pads";
+    }
+  } catch (e) {
+    els.autorouteStatus.classList.add("error");
+    els.autorouteStatus.textContent = `stitch error: ${e}`;
+  } finally {
+    els.stitchBtn.disabled = false;
   }
 });
 

@@ -187,3 +187,216 @@ pub fn spoke_clear<S: std::hash::BuildHasher>(
     }
     true
 }
+
+/// A bite of copper restored just inside the pad edge so a spoke
+/// segment overlaps the pad and reads as electrically bonded to it.
+const SPOKE_OVERLAP: i64 = 50_000; // 0.05 mm
+
+/// The four orthogonal N/S/E/W spoke candidates for a rectangular pad.
+/// Each segment runs from `SPOKE_OVERLAP` inside the pad edge to `reach`
+/// beyond it, so it bridges the pad copper to the surrounding pour.
+fn orthogonal_candidates(center: Point, half_w: i64, half_h: i64, reach: i64) -> [(Point, Point); 4] {
+    let cx = center.x.0;
+    let cy = center.y.0;
+    [
+        // West.
+        (
+            Point::new(Length(cx - half_w - reach), center.y),
+            Point::new(Length(cx - half_w + SPOKE_OVERLAP), center.y),
+        ),
+        // East.
+        (
+            Point::new(Length(cx + half_w - SPOKE_OVERLAP), center.y),
+            Point::new(Length(cx + half_w + reach), center.y),
+        ),
+        // South.
+        (
+            Point::new(center.x, Length(cy - half_h - reach)),
+            Point::new(center.x, Length(cy - half_h + SPOKE_OVERLAP)),
+        ),
+        // North.
+        (
+            Point::new(center.x, Length(cy + half_h - SPOKE_OVERLAP)),
+            Point::new(center.x, Length(cy + half_h + reach)),
+        ),
+    ]
+}
+
+/// The four 45° diagonal spoke candidates, one per pad corner, used as a
+/// fallback when every orthogonal spoke is boxed in by foreign copper. A
+/// diagonal frequently threads between traffic that crowds the axes, so
+/// the pad still bonds to its plane instead of floating. Each segment
+/// starts `SPOKE_OVERLAP` inside the corner and extends `reach` outward
+/// on both axes (a 45° ray).
+fn diagonal_candidates(center: Point, half_w: i64, half_h: i64, reach: i64) -> [(Point, Point); 4] {
+    let cx = center.x.0;
+    let cy = center.y.0;
+    let o = SPOKE_OVERLAP;
+    [
+        // South-west.
+        (
+            Point::new(Length(cx - half_w + o), Length(cy - half_h + o)),
+            Point::new(Length(cx - half_w - reach), Length(cy - half_h - reach)),
+        ),
+        // South-east.
+        (
+            Point::new(Length(cx + half_w - o), Length(cy - half_h + o)),
+            Point::new(Length(cx + half_w + reach), Length(cy - half_h - reach)),
+        ),
+        // North-west.
+        (
+            Point::new(Length(cx - half_w + o), Length(cy + half_h - o)),
+            Point::new(Length(cx - half_w - reach), Length(cy + half_h + reach)),
+        ),
+        // North-east.
+        (
+            Point::new(Length(cx + half_w - o), Length(cy + half_h - o)),
+            Point::new(Length(cx + half_w + reach), Length(cy + half_h + reach)),
+        ),
+    ]
+}
+
+/// One candidate spoke fired from the pad boundary at `angle` (radians).
+/// The segment starts `SPOKE_OVERLAP` inside the boundary and runs
+/// `reach` beyond it. The boundary exit point is where the ray from the
+/// pad centre meets the pad's bounding box, so the bite into the pad is
+/// correct for any direction, not just the cardinals.
+fn angled_candidate(
+    center: Point,
+    half_w: i64,
+    half_h: i64,
+    reach: i64,
+    angle: f64,
+) -> (Point, Point) {
+    let (dx, dy) = (angle.cos(), angle.sin());
+    // Distance from centre to the bounding-box edge along this ray.
+    let tx = if dx.abs() > 1e-9 {
+        half_w as f64 / dx.abs()
+    } else {
+        f64::INFINITY
+    };
+    let ty = if dy.abs() > 1e-9 {
+        half_h as f64 / dy.abs()
+    } else {
+        f64::INFINITY
+    };
+    let te = tx.min(ty);
+    let o = SPOKE_OVERLAP as f64;
+    let r = reach as f64;
+    let ax = center.x.0 as f64 + dx * (te - o);
+    let ay = center.y.0 as f64 + dy * (te - o);
+    let bx = center.x.0 as f64 + dx * (te + r);
+    let by = center.y.0 as f64 + dy * (te + r);
+    (
+        Point::new(Length(ax.round() as i64), Length(ay.round() as i64)),
+        Point::new(Length(bx.round() as i64), Length(by.round() as i64)),
+    )
+}
+
+/// Pick the thermal-relief spokes to emit for a same-net pad, never
+/// leaving the pad isolated when a clear direction exists.
+///
+/// Resolution order, cheapest/cleanest first:
+/// 1. Orthogonal N/S/E/W spokes — returned whenever at least one clears
+///    every foreign net (the overwhelmingly common case).
+/// 2. 45° diagonal spokes from the pad corners — tried when all four
+///    axes are boxed in; a diagonal often slips between crowding traffic.
+/// 3. A fine angular sweep — when even the diagonals fail, scan every
+///    direction and fire a single spoke down the centre of the *widest*
+///    clear arc. This rescues a pad hemmed in by traffic whose only gap
+///    sits at an odd angle (e.g. a GND pad a foreign trace wraps around),
+///    so it still bonds to its plane through the one safe opening.
+///
+/// The returned segments are exactly the ones the Gerber writer draws
+/// and the renderer punches, so screen and fab agree. An empty result
+/// means the pad genuinely cannot connect at this `clearance` without a
+/// short — the caller should surface that (reroute needed) rather than
+/// fabricate a short.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn select_spokes<S: std::hash::BuildHasher>(
+    center: Point,
+    pad_w: Length,
+    pad_h: Length,
+    spoke_half: Length,
+    clearance: Length,
+    reach: Length,
+    pad_net: &str,
+    layer: Layer,
+    board: &Board,
+    orphan_traces: &HashSet<Id, S>,
+    orphan_vias: &HashSet<Id, S>,
+) -> Vec<(Point, Point)> {
+    // Angular resolution of the last-resort sweep (every 2°).
+    const STEPS: usize = 180;
+    let half_w = pad_w.0 / 2;
+    let half_h = pad_h.0 / 2;
+    let r = reach.0;
+    let clears = |&(a, b): &(Point, Point)| {
+        spoke_clear(
+            a,
+            b,
+            spoke_half,
+            clearance,
+            pad_net,
+            layer,
+            board,
+            orphan_traces,
+            orphan_vias,
+        )
+    };
+
+    let ortho: Vec<(Point, Point)> = orthogonal_candidates(center, half_w, half_h, r)
+        .into_iter()
+        .filter(|c| clears(c))
+        .collect();
+    if !ortho.is_empty() {
+        return ortho;
+    }
+
+    let diag: Vec<(Point, Point)> = diagonal_candidates(center, half_w, half_h, r)
+        .into_iter()
+        .filter(|c| clears(c))
+        .collect();
+    if !diag.is_empty() {
+        return diag;
+    }
+
+    // Fine sweep: probe every 2° and find the widest run of consecutive
+    // clear directions, then fire one spoke down its middle.
+    let mut clear_at = [false; STEPS];
+    for (i, slot) in clear_at.iter_mut().enumerate() {
+        let angle = std::f64::consts::TAU * i as f64 / STEPS as f64;
+        *slot = clears(&angled_candidate(center, half_w, half_h, r, angle));
+    }
+    if !clear_at.iter().any(|&c| c) {
+        return Vec::new();
+    }
+    // Longest circular run of `true`, then take its midpoint index.
+    let (mut best_start, mut best_len) = (0usize, 0usize);
+    let mut i = 0usize;
+    while i < STEPS {
+        if !clear_at[i] {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut len = 0usize;
+        while len < STEPS && clear_at[(start + len) % STEPS] {
+            len += 1;
+        }
+        if len > best_len {
+            best_len = len;
+            best_start = start;
+        }
+        i = start + len.max(1);
+    }
+    let mid = (best_start + best_len / 2) % STEPS;
+    let angle = std::f64::consts::TAU * mid as f64 / STEPS as f64;
+    let cand = angled_candidate(center, half_w, half_h, r, angle);
+    if clears(&cand) {
+        vec![cand]
+    } else {
+        Vec::new()
+    }
+}

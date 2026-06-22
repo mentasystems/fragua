@@ -362,47 +362,29 @@ pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result
                         // Same-net pour implies the pad carries a net.
                         let Some(net) = pad_net else { continue };
                         let spoke_half = Length::from_mm(spoke_width_mm) / 2;
-                        let half_w = pw.0 / 2;
-                        let half_h = ph.0 / 2;
-                        let len = gap.0 + 100_000; // gap + 0.1 mm overshoot
-                        // Candidate spokes: west, east, south, north. A
-                        // spoke is a *dark* copper bar emitted after the
+                        let reach = Length(gap.0 + 100_000); // gap + 0.1 mm overshoot
+                        // Spokes are *dark* copper bars emitted after the
                         // clearance-void pass, so one that crosses a
                         // foreign net's void would re-deposit copper over
-                        // it and short pad/pour ↔ that net. Keep only the
-                        // spokes that stay clear of all foreign copper.
-                        let candidates = [
-                            (
-                                Point::new(Length(center.x.0 - half_w - len), center.y),
-                                Point::new(Length(center.x.0 - half_w + 50_000), center.y),
-                            ),
-                            (
-                                Point::new(Length(center.x.0 + half_w - 50_000), center.y),
-                                Point::new(Length(center.x.0 + half_w + len), center.y),
-                            ),
-                            (
-                                Point::new(center.x, Length(center.y.0 - half_h - len)),
-                                Point::new(center.x, Length(center.y.0 - half_h + 50_000)),
-                            ),
-                            (
-                                Point::new(center.x, Length(center.y.0 + half_h - 50_000)),
-                                Point::new(center.x, Length(center.y.0 + half_h + len)),
-                            ),
-                        ];
-                        for (sa, sb) in candidates {
-                            if pcb_core::thermal::spoke_clear(
-                                sa,
-                                sb,
-                                spoke_half,
-                                POUR_CLEARANCE,
-                                net,
-                                layer,
-                                board,
-                                &orphan_traces,
-                                &orphan_vias,
-                            ) {
-                                spoke_draws.push((spoke_id, sa, sb));
-                            }
+                        // it and short pad/pour ↔ that net. `select_spokes`
+                        // keeps only the spokes that stay clear of all
+                        // foreign copper, and falls back to 45° diagonals
+                        // so a pad boxed in on all four axes still bonds
+                        // to its plane instead of floating.
+                        for (sa, sb) in pcb_core::thermal::select_spokes(
+                            center,
+                            pw,
+                            ph,
+                            spoke_half,
+                            POUR_CLEARANCE,
+                            reach,
+                            net,
+                            layer,
+                            board,
+                            &orphan_traces,
+                            &orphan_vias,
+                        ) {
+                            spoke_draws.push((spoke_id, sa, sb));
                         }
                     }
                     // Solid (or non-Spokes4): no void, no spoke — pad

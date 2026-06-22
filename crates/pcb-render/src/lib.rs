@@ -1226,33 +1226,6 @@ fn write_substrate_fill(svg: &mut String, outline: Rect, corner_radius_mm: f64) 
 /// pixels hide it. So the mask starts as a fully-white rect (pour
 /// visible everywhere) and we paint BLACK shapes for every
 /// clearance region.
-/// Inverse of `mark_rect` — clear cells in the rectangle (turn void
-/// back into pour copper). Used by the thermal-relief implementation
-/// to draw the four spoke bridges through the annular gap ring.
-#[allow(clippy::too_many_arguments)]
-fn punch_rect(
-    grid: &mut [bool],
-    rx: f64,
-    ry: f64,
-    rw: f64,
-    rh: f64,
-    cell: f64,
-    cols: usize,
-    rows: usize,
-    x0: f64,
-    y0: f64,
-) {
-    let i0 = (((rx - x0) / cell).floor() as i64).max(0) as usize;
-    let i1 = (((rx + rw - x0) / cell).ceil() as i64).max(0) as usize;
-    let j0 = (((ry - y0) / cell).floor() as i64).max(0) as usize;
-    let j1 = (((ry + rh - y0) / cell).ceil() as i64).max(0) as usize;
-    for j in j0..j1.min(rows) {
-        for i in i0..i1.min(cols) {
-            grid[j * cols + i] = false;
-        }
-    }
-}
-
 fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, outline: Rect) {
     let inset = POUR_EDGE_CLEARANCE_MM;
     let x0 = outline.min.x.to_mm() + inset;
@@ -1345,6 +1318,43 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
         }
     };
 
+    // Inverse of `mark_segment`: restore pour copper along a capsule of
+    // half-width `half`. Used to punch thermal-relief spokes (orthogonal
+    // or diagonal) back into the void. Rounded ends match the Gerber
+    // writer's round spoke aperture.
+    let punch_segment = |grid: &mut [bool], sx: f64, sy: f64, ex: f64, ey: f64, half: f64| {
+        let xmin = sx.min(ex) - half;
+        let xmax = sx.max(ex) + half;
+        let ymin = sy.min(ey) - half;
+        let ymax = sy.max(ey) + half;
+        let i0 = (((xmin - x0) / cell).floor() as i64).max(0) as usize;
+        let i1 = (((xmax - x0) / cell).ceil() as i64).max(0) as usize;
+        let j0 = (((ymin - y0) / cell).floor() as i64).max(0) as usize;
+        let j1 = (((ymax - y0) / cell).ceil() as i64).max(0) as usize;
+        let dxs = ex - sx;
+        let dys = ey - sy;
+        let len2 = dxs * dxs + dys * dys;
+        let half2 = half * half;
+        for j in j0..j1.min(rows) {
+            for i in i0..i1.min(cols) {
+                let px = cell_x(i);
+                let py = cell_y(j);
+                let t = if len2 > 1e-9 {
+                    (((px - sx) * dxs + (py - sy) * dys) / len2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let qx = sx + t * dxs;
+                let qy = sy + t * dys;
+                let dx = px - qx;
+                let dy = py - qy;
+                if dx * dx + dy * dy <= half2 {
+                    grid[j * cols + i] = false;
+                }
+            }
+        }
+    };
+
     // Resolve the thermal relief from the pour. `Solid` keeps the
     // legacy flood — same-net pads merge into the pour without any
     // cutout. `Spokes4` punches a thermal ring around each same-net
@@ -1362,6 +1372,11 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
     // skips them just like the exporters do.
     let orphan_traces = board.orphan_trace_ids();
     let orphan_vias = board.orphan_via_ids();
+
+    // Thermal-relief spoke segments (mm) collected during the same-net
+    // pass and punched back into copper as the very last step, so no
+    // foreign void or morphological pass can erase a real spoke.
+    let mut spoke_segments: Vec<(f64, f64, f64, f64)> = Vec::new();
 
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
@@ -1390,110 +1405,50 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
                     pw.to_mm() + gap_mm * 2.0,
                     ph.to_mm() + gap_mm * 2.0,
                 );
-                // Punch back copper for the 4 spokes — narrow
-                // rectangles that bridge the pad to the surrounding
-                // pour. The bridge has to clear the pad edge and reach
-                // beyond `gap_mm` so the spoke actually touches the
-                // pour copper.
-                let half_spoke = spoke_w_mm / 2.0;
+                // Collect the thermal-relief spokes. `select_spokes`
+                // returns exactly the bars the Gerber writer draws
+                // (orthogonal where clear, 45° diagonals, then a fine
+                // angular sweep as a last resort so a boxed-in pad still
+                // bonds to its plane). We punch them in a FINAL pass —
+                // after the foreign keepouts, the morphological close and
+                // the island prune — so a real spoke is never erased by a
+                // foreign void or eaten as a "thin sliver", keeping the
+                // displayed pour in lock-step with the manufactured
+                // copper (render == fab).
                 let bridge_len = gap_mm + 0.1; // overshoot for safety
-                // Each spoke is punched back to copper only if its
-                // centre-line (pad edge → pour) stays clear of every
-                // foreign net by the fab clearance — the same test the
-                // Gerber writer runs. This keeps the rendered pour in
-                // lock-step with the manufactured copper: a spoke that
-                // would bridge GND ↔ a signal net is dropped here too.
-                let half_w_l = pw / 2;
-                let half_h_l = ph / 2;
-                let bridge_l = pcb_core::Length::from_mm(bridge_len);
+                let reach = pcb_core::Length::from_mm(bridge_len);
                 let spoke_half_l = pcb_core::Length::from_mm(spoke_w_mm) / 2;
-                let clears = |a: pcb_core::Point, b: pcb_core::Point| {
-                    pcb_core::thermal::spoke_clear(
-                        a,
-                        b,
-                        spoke_half_l,
-                        pcb_core::thermal::POUR_CLEARANCE,
-                        pour.net.as_str(),
-                        pour.layer,
-                        board,
-                        &orphan_traces,
-                        &orphan_vias,
-                    )
-                };
-                // West.
-                if clears(
-                    pcb_core::Point::new(c.x - half_w_l - bridge_l, c.y),
-                    pcb_core::Point::new(c.x - half_w_l, c.y),
+                for (a, b) in pcb_core::thermal::select_spokes(
+                    c,
+                    pw,
+                    ph,
+                    spoke_half_l,
+                    pcb_core::thermal::POUR_CLEARANCE,
+                    reach,
+                    pour.net.as_str(),
+                    pour.layer,
+                    board,
+                    &orphan_traces,
+                    &orphan_vias,
                 ) {
-                    punch_rect(
-                        &mut void,
-                        cx - half_w - bridge_len,
-                        cy - half_spoke,
-                        bridge_len,
-                        spoke_w_mm,
-                        cell,
-                        cols,
-                        rows,
-                        x0,
-                        y0,
-                    );
+                    spoke_segments.push((a.x.to_mm(), a.y.to_mm(), b.x.to_mm(), b.y.to_mm()));
                 }
-                // East.
-                if clears(
-                    pcb_core::Point::new(c.x + half_w_l, c.y),
-                    pcb_core::Point::new(c.x + half_w_l + bridge_l, c.y),
-                ) {
-                    punch_rect(
-                        &mut void,
-                        cx + half_w,
-                        cy - half_spoke,
-                        bridge_len,
-                        spoke_w_mm,
-                        cell,
-                        cols,
-                        rows,
-                        x0,
-                        y0,
-                    );
-                }
-                // South.
-                if clears(
-                    pcb_core::Point::new(c.x, c.y - half_h_l - bridge_l),
-                    pcb_core::Point::new(c.x, c.y - half_h_l),
-                ) {
-                    punch_rect(
-                        &mut void,
-                        cx - half_spoke,
-                        cy - half_h - bridge_len,
-                        spoke_w_mm,
-                        bridge_len,
-                        cell,
-                        cols,
-                        rows,
-                        x0,
-                        y0,
-                    );
-                }
-                // North.
-                if clears(
-                    pcb_core::Point::new(c.x, c.y + half_h_l),
-                    pcb_core::Point::new(c.x, c.y + half_h_l + bridge_l),
-                ) {
-                    punch_rect(
-                        &mut void,
-                        cx - half_spoke,
-                        cy + half_h,
-                        spoke_w_mm,
-                        bridge_len,
-                        cell,
-                        cols,
-                        rows,
-                        x0,
-                        y0,
-                    );
-                }
+                // Foreign-net pads fall through; they're voided in the
+                // second pass below.
+            }
+        }
+    }
+    // Second pass: void every foreign-net pad.
+    for fp in board.footprints_in_order() {
+        for pad in &fp.pads {
+            if !pad.occupies_layer(pour.layer) {
                 continue;
             }
+            if pad.net.as_deref() == Some(pour.net.as_str()) {
+                continue;
+            }
+            let c = fp.pad_world_center(pad);
+            let (pw, ph) = fp.pad_world_size(pad);
             mark_rect(
                 &mut void,
                 c.x.to_mm() - pw.to_mm() / 2.0 - cl,
@@ -1571,6 +1526,20 @@ fn write_pour_polygon(svg: &mut String, board: &Board, pour: &pcb_core::Pour, ou
 
     let min_cells = (POUR_MIN_ISLAND_MM2 / (cell * cell)).round() as usize;
     prune_pour_islands(&mut void, &protect, cols, rows, min_cells);
+
+    // 2c. Punch the thermal-relief spokes back into copper as the final
+    //     step. Doing this AFTER the foreign keepouts, the morphological
+    //     close and the island prune guarantees a real spoke is always
+    //     shown — it can't be erased by a foreign void it threads past
+    //     (the bond is genuine copper in fab) nor swallowed as a thin
+    //     pour sliver. This is what bonds a boxed-in pad to its plane on
+    //     screen exactly as it will be manufactured.
+    if use_spokes {
+        let spoke_half = spoke_w_mm / 2.0;
+        for (ax, ay, bx, by) in &spoke_segments {
+            punch_segment(&mut void, *ax, *ay, *bx, *by, spoke_half);
+        }
+    }
 
     // 3. Open the SVG mask. Its pixel space is the pour rect.
     //    White = pour visible; black = pour hidden (void).
