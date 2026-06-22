@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "identifier": "dev.kidandcat.fragua",
   "build": {
-    "beforeBuildCommand": "npm --prefix ../frontend run build",
+    "beforeBuildCommand": "npm --prefix frontend run build",
     "frontendDist": "../frontend/dist"
   },
   "app": {
