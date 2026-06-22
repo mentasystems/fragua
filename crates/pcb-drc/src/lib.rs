@@ -266,6 +266,24 @@ pub enum ViolationKind {
     /// `SmallDrill` so the agent can see which limit fired — the
     /// project's own DRC defaults or the fab profile.
     FabProfileMin,
+    /// A net's pads do not all reside on one continuous copper island —
+    /// the routed copper splits the net into two or more electrically
+    /// isolated groups (an *open*). This is the exhaustive form of the
+    /// multimeter "these two points should read 0 Ω but read open"
+    /// test: `UnconnectedPad` only catches a pad with *no* same-net
+    /// copper at all, whereas a net can be fully routed pad-by-pad yet
+    /// still fall into disconnected sub-trees that never join. Carries
+    /// the net name and a representative pad from each isolated island.
+    NetSplit,
+    /// Copper belonging to two *different* declared nets physically
+    /// touches (gap ≤ 0) on a shared layer — a *short*. The two nets
+    /// are now one electrical node. This is the exhaustive form of the
+    /// multimeter "these two nets should read open but read 0 Ω" test.
+    /// Distinct from the clearance kinds: those fire when different-net
+    /// copper is merely *closer than allowed* (a spacing risk); this
+    /// fires only when it actually meets (a definite wiring error).
+    /// Carries the two net names and the contact location.
+    NetShort,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -310,6 +328,7 @@ pub fn run(board: &Board, opts: &DrcOptions) -> DrcReport {
     }
     check_unconnected_pads(board, &pads, &mut report);
     check_small_component_dangling(board, &pads, &mut report);
+    check_net_continuity(board, &pads, &mut report);
     check_narrow_traces(board, opts, &mut report);
     check_small_drills(board, opts, &mut report);
     check_routing_inefficient(board, opts, &mut report);
@@ -1371,6 +1390,302 @@ fn segment_aabb_distance(a: (f64, f64), b: (f64, f64), rect: Rect) -> f64 {
     best
 }
 
+// ---------------------------------------------------------------------------
+// Net continuity — the exhaustive multimeter.
+//
+// The clearance/`UnconnectedPad` checks above answer "is the geometry legal"
+// and "does each pad touch *some* copper of its net". They do NOT answer the
+// two questions a bench multimeter answers in seconds and that account for the
+// most embarrassing fabbed-board failures:
+//
+//   * NetSplit (open): two pads that the schematic says are one node end up on
+//     two disconnected copper islands. Each pad may be locally routed, so
+//     `UnconnectedPad` stays silent, yet the net is physically broken.
+//   * NetShort: copper of two different nets actually meets. The clearance
+//     checks flag "too close"; they do not single out the gap == 0 case as the
+//     definite wiring error it is, nor phrase it as "net A == net B".
+//
+// Both fall out of one union-find over the board's copper. O(n²) touch tests —
+// fine for the element counts of a hand-designed board; revisit with a grid
+// index if a generated board ever pushes this into the thousands.
+// ---------------------------------------------------------------------------
+
+/// Touch tolerance (mm). Copper meant to connect overlaps (gap ≈ 0); we treat
+/// anything within this of contact as touching. Mirrors the `1e-6` slack the
+/// surrounding geometry checks already use.
+const TOUCH_TOL_MM: f64 = 1e-6;
+
+/// One piece of copper, flattened into the connectivity graph.
+enum CopperShape {
+    Pad(Rect),
+    Trace { a: (f64, f64), b: (f64, f64), half: f64 },
+    Via { c: (f64, f64), r: f64 },
+    /// A pour fills its whole layer for its net — the model carries no
+    /// polygon yet (see [`pcb_core::Pour`]), so it has no geometry of its
+    /// own and instead binds every same-net item that shares its layer.
+    Pour,
+}
+
+struct CopperElem {
+    net: String,
+    /// `None` ⇒ present on every copper layer (vias, PTH pads). `Some(l)` ⇒
+    /// only layer `l` (SMD pads, traces, pours).
+    layer: Option<CopperLayer>,
+    shape: CopperShape,
+    is_pad: bool,
+    /// Label for messages — pad `ref.num`, or `"trace"`/`"via"`/`"pour"`.
+    label: String,
+    /// Representative point for the violation marker (unused for pours).
+    center: (f64, f64),
+}
+
+/// Disjoint-set with path halving + union by rank.
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<u8>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        Self { parent: (0..n).collect(), rank: vec![0; n] }
+    }
+
+    fn find(&mut self, mut x: usize) -> usize {
+        while self.parent[x] != x {
+            self.parent[x] = self.parent[self.parent[x]];
+            x = self.parent[x];
+        }
+        x
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra == rb {
+            return;
+        }
+        match self.rank[ra].cmp(&self.rank[rb]) {
+            std::cmp::Ordering::Less => self.parent[ra] = rb,
+            std::cmp::Ordering::Greater => self.parent[rb] = ra,
+            std::cmp::Ordering::Equal => {
+                self.parent[rb] = ra;
+                self.rank[ra] += 1;
+            }
+        }
+    }
+}
+
+/// Two layers overlap if either spans all layers (`None`) or they are equal.
+fn layers_overlap(a: Option<CopperLayer>, b: Option<CopperLayer>) -> bool {
+    matches!((a, b), (None, _) | (_, None)) || a == b
+}
+
+/// Distance (mm) from a point to an axis-aligned rect (0 if inside).
+fn point_rect_distance(p: (f64, f64), rect: Rect) -> f64 {
+    let dx = (rect.min.x.to_mm() - p.0).max(p.0 - rect.max.x.to_mm()).max(0.0);
+    let dy = (rect.min.y.to_mm() - p.1).max(p.1 - rect.max.y.to_mm()).max(0.0);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// True iff two copper elements physically meet on a shared layer.
+fn elems_touch(a: &CopperElem, b: &CopperElem) -> bool {
+    use CopperShape::{Pad, Pour, Trace, Via};
+    if !layers_overlap(a.layer, b.layer) {
+        return false;
+    }
+    match (&a.shape, &b.shape) {
+        // A pour binds anything sharing its layer (geometry-less by model).
+        (Pour, _) | (_, Pour) => true,
+        (Pad(ra), Pad(rb)) => aabb_gap_mm(*ra, *rb) <= TOUCH_TOL_MM,
+        (Pad(rect), Trace { a, b, half }) | (Trace { a, b, half }, Pad(rect)) => {
+            segment_aabb_distance(*a, *b, *rect) - *half <= TOUCH_TOL_MM
+        }
+        (Pad(rect), Via { c, r }) | (Via { c, r }, Pad(rect)) => {
+            point_rect_distance(*c, *rect) - *r <= TOUCH_TOL_MM
+        }
+        (Trace { a: a0, b: a1, half: h0 }, Trace { a: b0, b: b1, half: h1 }) => {
+            segment_segment_distance(*a0, *a1, *b0, *b1) - (*h0 + *h1) <= TOUCH_TOL_MM
+        }
+        (Trace { a, b, half }, Via { c, r }) | (Via { c, r }, Trace { a, b, half }) => {
+            point_segment_distance(*c, *a, *b) - (*half + *r) <= TOUCH_TOL_MM
+        }
+        (Via { c: c0, r: r0 }, Via { c: c1, r: r1 }) => {
+            let (dx, dy) = (c0.0 - c1.0, c0.1 - c1.1);
+            (dx * dx + dy * dy).sqrt() - (*r0 + *r1) <= TOUCH_TOL_MM
+        }
+    }
+}
+
+/// Flatten every net-bearing copper item on the board into graph nodes.
+fn build_copper_elems(board: &Board, pads: &[PadGeom]) -> Vec<CopperElem> {
+    let mut elems = Vec::new();
+    for p in pads {
+        let Some(net) = p.net else { continue };
+        elems.push(CopperElem {
+            net: net.to_string(),
+            layer: if p.is_through_hole { None } else { Some(p.layer) },
+            shape: CopperShape::Pad(p.rect),
+            is_pad: true,
+            label: p.label(),
+            center: pad_center(p.rect),
+        });
+    }
+    for t in &board.traces {
+        let a = (t.start.x.to_mm(), t.start.y.to_mm());
+        let b = (t.end.x.to_mm(), t.end.y.to_mm());
+        elems.push(CopperElem {
+            net: t.net.clone(),
+            layer: Some(t.layer),
+            shape: CopperShape::Trace { a, b, half: t.width.to_mm() / 2.0 },
+            is_pad: false,
+            label: "trace".into(),
+            center: (f64::midpoint(a.0, b.0), f64::midpoint(a.1, b.1)),
+        });
+    }
+    for v in &board.vias {
+        let c = (v.position.x.to_mm(), v.position.y.to_mm());
+        elems.push(CopperElem {
+            net: v.net.clone(),
+            layer: None,
+            shape: CopperShape::Via { c, r: v.diameter.to_mm() / 2.0 },
+            is_pad: false,
+            label: "via".into(),
+            center: c,
+        });
+    }
+    for pr in &board.pours {
+        elems.push(CopperElem {
+            net: pr.net.clone(),
+            layer: Some(pr.layer),
+            shape: CopperShape::Pour,
+            is_pad: false,
+            label: "pour".into(),
+            center: (0.0, 0.0),
+        });
+    }
+    elems
+}
+
+fn check_net_continuity(board: &Board, pads: &[PadGeom], report: &mut DrcReport) {
+    let elems = build_copper_elems(board, pads);
+    let n = elems.len();
+    if n == 0 {
+        return;
+    }
+
+    let mut by_net: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, e) in elems.iter().enumerate() {
+        by_net.entry(e.net.as_str()).or_default().push(i);
+    }
+
+    // --- Pass A: intra-net islands (opens). ---
+    for (net, idxs) in &by_net {
+        let net = *net;
+        // A net needs ≥2 pads before "they must be common" can be violated.
+        let pad_idxs: Vec<usize> = idxs.iter().copied().filter(|&i| elems[i].is_pad).collect();
+        if pad_idxs.len() < 2 {
+            continue;
+        }
+
+        let mut uf = UnionFind::new(n);
+        // Track which pads got joined to *something* same-net; a pad joined to
+        // nothing is `UnconnectedPad`'s job, not a split.
+        let mut touched = vec![false; n];
+        for a in 0..idxs.len() {
+            for b in (a + 1)..idxs.len() {
+                let (ia, ib) = (idxs[a], idxs[b]);
+                if elems_touch(&elems[ia], &elems[ib]) {
+                    uf.union(ia, ib);
+                    touched[ia] = true;
+                    touched[ib] = true;
+                }
+            }
+        }
+
+        let mut islands: HashMap<usize, Vec<usize>> = HashMap::new();
+        for &pi in &pad_idxs {
+            if !touched[pi] {
+                continue;
+            }
+            let root = uf.find(pi);
+            islands.entry(root).or_default().push(pi);
+        }
+        if islands.len() < 2 {
+            continue;
+        }
+
+        let mut groups: Vec<Vec<usize>> = islands.into_values().collect();
+        // Smallest island first — the likely culprit, and where we drop the marker.
+        groups.sort_by_key(Vec::len);
+        let group_strs: Vec<String> = groups
+            .iter()
+            .map(|g| {
+                let mut names: Vec<&str> = g.iter().map(|&i| elems[i].label.as_str()).collect();
+                names.sort_unstable();
+                format!("{{{}}}", names.join(", "))
+            })
+            .collect();
+        let marker = elems[groups[0][0]].center;
+        let mut involved: Vec<String> =
+            pad_idxs.iter().map(|&i| elems[i].label.clone()).collect();
+        involved.sort();
+        report.push(Violation {
+            kind: ViolationKind::NetSplit,
+            severity: Severity::Error,
+            message: format!(
+                "net \"{net}\" is split into {} isolated copper islands: {}",
+                groups.len(),
+                group_strs.join(" | "),
+            ),
+            x_mm: marker.0,
+            y_mm: marker.1,
+            involved,
+        });
+    }
+
+    // --- Pass B: inter-net shorts. ---
+    // Pours are excluded: the model floods the whole layer with no polygon
+    // clipping, so a pour overlaps every other net on its layer — a model
+    // artefact, not a real short. Different-net spacing stays the clearance
+    // checks' job; this fires only on actual contact.
+    let mut shorted: HashSet<(&str, &str)> = HashSet::new();
+    for i in 0..n {
+        if matches!(elems[i].shape, CopperShape::Pour) {
+            continue;
+        }
+        for j in (i + 1)..n {
+            if matches!(elems[j].shape, CopperShape::Pour) || elems[i].net == elems[j].net {
+                continue;
+            }
+            if !elems_touch(&elems[i], &elems[j]) {
+                continue;
+            }
+            let (a, b) = if elems[i].net <= elems[j].net {
+                (elems[i].net.as_str(), elems[j].net.as_str())
+            } else {
+                (elems[j].net.as_str(), elems[i].net.as_str())
+            };
+            if !shorted.insert((a, b)) {
+                continue;
+            }
+            let marker = (
+                f64::midpoint(elems[i].center.0, elems[j].center.0),
+                f64::midpoint(elems[i].center.1, elems[j].center.1),
+            );
+            report.push(Violation {
+                kind: ViolationKind::NetShort,
+                severity: Severity::Error,
+                message: format!(
+                    "nets \"{a}\" and \"{b}\" are shorted — {} and {} copper touch",
+                    elems[i].label, elems[j].label,
+                ),
+                x_mm: marker.0,
+                y_mm: marker.1,
+                involved: vec![a.to_string(), b.to_string()],
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod feature3_tests {
     use super::*;
@@ -1580,6 +1895,126 @@ mod feature3_tests {
         assert!(
             !without.violations.iter().any(|v| v.kind == ViolationKind::FabProfileMin),
             "clearing the profile should drop FabProfileMin violations",
+        );
+    }
+
+    // --- Net continuity (the multimeter) ---------------------------------
+
+    /// One single-pad footprint of `net` centred at (`x_mm`, `y_mm`),
+    /// 1×1 mm pad on Top.
+    fn pad_fp_at(reference: &str, net: &str, x_mm: f64, y_mm: f64) -> Footprint {
+        Footprint {
+            id: Id::new(),
+            reference: reference.into(),
+            value: String::new(),
+            library: "lib".into(),
+            position: Point::new(
+                pcb_core::Length::from_mm(x_mm),
+                pcb_core::Length::from_mm(y_mm),
+            ),
+            rotation: 0.0,
+            layer: pcb_core::CopperLayer::Top,
+            pads: vec![Pad {
+                number: "1".into(),
+                name: String::new(),
+                offset: Point::ORIGIN,
+                size: (pcb_core::Length::from_mm(1.0), pcb_core::Length::from_mm(1.0)),
+                layer: pcb_core::CopperLayer::Top,
+                net: Some(net.into()),
+                drill: None,
+            }],
+            key: String::new(),
+            description: String::new(),
+            edge_mounted: false,
+            silk: vec![],
+        }
+    }
+
+    fn trace(net: &str, x0: f64, y0: f64, x1: f64, y1: f64) -> Trace {
+        Trace {
+            id: Id::new(),
+            layer: pcb_core::CopperLayer::Top,
+            start: Point::new(pcb_core::Length::from_mm(x0), pcb_core::Length::from_mm(y0)),
+            end: Point::new(pcb_core::Length::from_mm(x1), pcb_core::Length::from_mm(y1)),
+            width: pcb_core::Length::from_mm(0.25),
+            net: net.into(),
+        }
+    }
+
+    #[test]
+    fn net_split_into_two_islands_flags_open() {
+        // Two GND pads 10 mm apart, each locally routed by its own stub, but
+        // the two stubs never meet — a classic "reads open on the multimeter"
+        // bug that pad-by-pad routing hides.
+        let mut board = Board::new();
+        board.add_footprint(pad_fp_at("R1", "GND", 0.0, 0.0));
+        board.add_footprint(pad_fp_at("R2", "GND", 10.0, 0.0));
+        board.add_trace(trace("GND", 0.0, 0.0, 4.0, 0.0)); // touches R1 only
+        board.add_trace(trace("GND", 6.0, 0.0, 10.0, 0.0)); // touches R2 only
+
+        let report = run(&board, &DrcOptions::default());
+        assert!(
+            report.violations.iter().any(|v| v.kind == ViolationKind::NetSplit),
+            "expected NetSplit, got {:?}",
+            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
+        );
+        // Both pads are locally connected, so this is NOT an UnconnectedPad.
+        assert!(
+            !report.violations.iter().any(|v| v.kind == ViolationKind::UnconnectedPad),
+            "split with local copper must not double-report as UnconnectedPad",
+        );
+    }
+
+    #[test]
+    fn fully_routed_net_has_no_split() {
+        // Same two pads, one trace spanning both → one island.
+        let mut board = Board::new();
+        board.add_footprint(pad_fp_at("R1", "GND", 0.0, 0.0));
+        board.add_footprint(pad_fp_at("R2", "GND", 10.0, 0.0));
+        board.add_trace(trace("GND", 0.0, 0.0, 10.0, 0.0));
+
+        let report = run(&board, &DrcOptions::default());
+        assert!(
+            !report.violations.iter().any(|v| v.kind == ViolationKind::NetSplit),
+            "a continuously routed net must not flag NetSplit, got {:?}",
+            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn crossing_nets_flag_short() {
+        // VCC runs horizontally, GND vertically; they cross at (2.5, 0).
+        let mut board = Board::new();
+        board.add_footprint(pad_fp_at("U1", "VCC", -5.0, 0.0));
+        board.add_footprint(pad_fp_at("U2", "GND", 2.5, -5.0));
+        board.add_trace(trace("VCC", 0.0, 0.0, 5.0, 0.0));
+        board.add_trace(trace("GND", 2.5, -2.0, 2.5, 2.0));
+
+        let report = run(&board, &DrcOptions::default());
+        let short = report.violations.iter().find(|v| v.kind == ViolationKind::NetShort);
+        let short = short.expect("expected a NetShort for crossing VCC/GND traces");
+        assert!(
+            short.involved.contains(&"VCC".to_string())
+                && short.involved.contains(&"GND".to_string()),
+            "short should name both nets, got {:?}",
+            short.involved,
+        );
+    }
+
+    #[test]
+    fn parallel_clear_nets_have_no_short() {
+        // Same two nets, 3 mm apart, never touching.
+        let mut board = Board::new();
+        board.add_footprint(pad_fp_at("U1", "VCC", -5.0, 0.0));
+        board.add_footprint(pad_fp_at("U2", "GND", -5.0, 3.0));
+        board.add_trace(trace("VCC", 0.0, 0.0, 5.0, 0.0));
+        board.add_trace(trace("GND", 0.0, 3.0, 5.0, 3.0));
+
+        let report = run(&board, &DrcOptions::default());
+        assert!(
+            !report.violations.iter().any(|v| v.kind == ViolationKind::NetShort),
+            "well-separated nets must not flag NetShort, got {:?}",
+            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
         );
     }
 }
