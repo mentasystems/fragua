@@ -321,6 +321,26 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
         o
     };
 
+    // Fine-pitch escape nets first. A net with a fanned-out pad has to
+    // thread the congested escape channel of a fine-pitch part (USB-C row,
+    // QFN edge); if the easy 2-pin nets route first they claim the channel
+    // lanes and box the escapes out. Pull every net that owns a fanned pad
+    // to the front (preserving relative order) so the hard escapes get a
+    // clear channel before the easy nets fill in around them.
+    if !fanout.through_pads.is_empty() {
+        let fanned_nets: HashSet<String> = nets
+            .iter()
+            .filter(|(_, pads)| pads.iter().any(|p| fanout.through_pads.contains(&p.pad_ref)))
+            .map(|(n, _)| n.clone())
+            .collect();
+        if !fanned_nets.is_empty() {
+            let (mut hard, easy): (Vec<String>, Vec<String>) =
+                order.into_iter().partition(|n| fanned_nets.contains(n));
+            hard.extend(easy);
+            order = hard;
+        }
+    }
+
     // Diff-pair adjacency: any net whose class declares `diff_pair_with = X`
     // must route immediately AFTER X so the "follow" mode can read X's
     // already-laid geometry. Stable in the rest of the ordering.
@@ -611,18 +631,21 @@ fn route_pass(
     // box fine-pitch pins in). No-net pads stamp the FOREIGN_NET sentinel
     // (see `stamp_pads`) so they still demand clearance.
     grid.stamp_pads(board, &net_id_lookup, Length(0));
-    // Fanned-out pads become through-hole landing zones: their via-in-pad
-    // ties every layer together, so re-stamp them (plus the clearance
-    // ring) as DrilledPad on all layers. The router can then reach them
-    // from an inner layer where there's room, instead of being trapped on
-    // the congested surface between fine-pitch neighbours.
+    // Fanned-out pads become through-hole landing zones at their VIA: the
+    // via-in-pad ties every layer together, so stamp a DrilledPad disk
+    // (the via barrel's footprint) on all layers at the via position. The
+    // router can then reach it from an inner layer where there's room,
+    // instead of being trapped on the congested surface between fine-pitch
+    // neighbours. Crucially we stamp only the via disk, NOT the whole SMD
+    // pad rect on every layer: on the inner layers the SMD pad does not
+    // exist (only the barrel does), so walling off the full rect there
+    // would block the very approach lanes the inner-layer escape needs.
     if !fanout.through_pads.is_empty() {
-        // Stamp the BARE pad rectangle (no clearance inflation): on a
-        // 0.5 mm-pitch part the inflated rings would overlap and a
-        // neighbour's DrilledPad would clobber this pad's own landing
-        // cells, making it unreachable. Edge-to-edge clearance between
-        // adjacent landing zones is handled the normal way — by each
-        // routed trace's own halo as it's laid.
+        // The fanout via is the JLCPCB-minimum 0.30 mm; its copper radius
+        // in cells, floored at one cell so the landing is always at least
+        // a single reachable DrilledPad cell.
+        let fanout_via_copper_cells =
+            ceil_cells(Length::from_mm(0.15).0, opts.cell.0).max(1);
         for fp in board.footprints_in_order() {
             for pad in &fp.pads {
                 let key = format!("{}.{}", fp.reference, pad.number);
@@ -632,9 +655,12 @@ fn route_pass(
                 let Some(id) = pad.net.as_deref().and_then(&net_id_lookup) else {
                     continue;
                 };
-                let c = fp.pad_world_center(pad);
-                let (w, h) = fp.pad_world_size(pad);
-                grid.stamp_through_pad(c, Length(w.0 / 2), Length(h.0 / 2), id);
+                let via_pos = fanout
+                    .via_positions
+                    .get(&key)
+                    .copied()
+                    .unwrap_or_else(|| fp.pad_world_center(pad));
+                grid.stamp_drilled_disk(via_pos, fanout_via_copper_cells, id);
             }
         }
     }
@@ -782,7 +808,17 @@ fn route_pass(
             })
             .unwrap_or(&0);
         let seed = pad_points[seed_idx].clone();
-        let seed_grid = grid.snap(seed.center, seed.layer);
+        // For a fanned-out pad, aim at the via-in-pad, not the pad centre:
+        // the via (possibly slid along the pad) is the only point where the
+        // inner-layer copper exists, so it is where the search must land.
+        let route_point = |p: &NetPadInfo| -> Point {
+            fanout
+                .via_positions
+                .get(&p.pad_ref)
+                .copied()
+                .unwrap_or(p.center)
+        };
+        let seed_grid = grid.snap(route_point(&seed), seed.layer);
         let seed_is_fanout = fanout.through_pads.contains(&seed.pad_ref);
 
         // Resolve this net's trace width and clearance: schematic class
@@ -819,7 +855,7 @@ fn route_pass(
                 + (seed.center.y.0 - q.center.y.0).unsigned_abs()
         });
         for spoke in spokes_sorted {
-            let spoke_grid = grid.snap(spoke.center, spoke.layer);
+            let spoke_grid = grid.snap(route_point(&spoke), spoke.layer);
             // Neck a spoke down to the default (signal) width when either
             // end is a fanned-out fine-pitch pad. A 0.5 mm power trace
             // can't physically enter a 0.30 mm connector pin without
@@ -875,7 +911,7 @@ fn route_pass(
                 copper_cells,
                 via_copper_cells,
                 spoke_width,
-                Some(spoke.center),
+                Some(route_point(&spoke)),
             );
             net_segments += segs;
             net_vias += vias;

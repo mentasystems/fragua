@@ -15,7 +15,7 @@
 //! own layer — ordinary 2-pin passives keep routing on the surface and
 //! never grow a needless via.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use pcb_core::{Board, Id, Length, Point, Via};
 
@@ -26,6 +26,12 @@ use crate::router::RouteOptions;
 /// neighbour by the default 0.20 mm.
 const FANOUT_VIA_DIAMETER_MM: f64 = 0.30;
 const FANOUT_VIA_DRILL_MM: f64 = 0.15;
+
+/// Board-edge copper clearance enforced by the DRC (`EdgeClearance`),
+/// stricter than inter-copper clearance. A staggered via must respect it
+/// or the slid-out position trips the edge rule even though it clears
+/// every pad.
+const EDGE_CLEARANCE_MM: f64 = 0.30;
 
 /// How far (mm) a trace must be able to run away from a pad edge, in some
 /// direction, for the pad to count as "able to escape on the surface".
@@ -50,6 +56,11 @@ pub struct FanoutPlan {
     /// the search can land on them from any layer (the via already ties
     /// the surface pad to the inner copper).
     pub through_pads: HashSet<String>,
+    /// `"ref.num"` → the via-in-pad world position. The via may be slid
+    /// along the pad's long axis away from the pad centre (staggering),
+    /// so the router must aim the inner-layer pickup at the VIA, not the
+    /// pad centre — that's the only point where the inner copper exists.
+    pub via_positions: HashMap<String, Point>,
 }
 
 /// Axis-aligned pad rectangle in world mm.
@@ -172,17 +183,104 @@ fn fanout_via_fits(
             return false;
         }
     }
-    // Keep the via inside the board, clear of the edge.
+    // Keep the via inside the board, clear of the edge. Use the DRC's
+    // board-edge clearance (0.30 mm), not the inter-copper `clearance`:
+    // the EdgeClearance rule is stricter than copper-to-copper, and a via
+    // slid toward a pad end can otherwise pass the copper check yet still
+    // fail edge clearance.
     if let Some(o) = board.outline {
         let edge = (cx - o.min.x.to_mm())
             .min(o.max.x.to_mm() - cx)
             .min(cy - o.min.y.to_mm())
             .min(o.max.y.to_mm() - cy);
-        if edge < via_r + clearance {
+        if edge < via_r + EDGE_CLEARANCE_MM {
             return false;
         }
     }
     true
+}
+
+/// Choose where inside a pad to drop its fanout via. Slides the via along
+/// the pad's LONG axis and returns the candidate world position that (a)
+/// geometrically fits (`fanout_via_fits`) and (b) is the most isolated from
+/// the fanout vias already placed — staggering adjacent fine-pitch pins to
+/// opposite pad ends so their through-barrels stop blocking each other's
+/// escape lanes. Returns `None` when no offset fits at all.
+#[allow(clippy::too_many_arguments)]
+fn pick_via_position(
+    cx: f64,
+    cy: f64,
+    hw: f64,
+    hh: f64,
+    fp_cx: f64,
+    fp_cy: f64,
+    net: &str,
+    via_r: f64,
+    clearance: f64,
+    foreign: &[&PadRect],
+    work: &Board,
+) -> Option<(f64, f64)> {
+    // Long axis + how far the via centre may slide while staying fully
+    // inside the pad copper (a via-in-pad must sit on its own pad).
+    let (dx, dy, half_len) = if hw >= hh { (1.0, 0.0, hw) } else { (0.0, 1.0, hh) };
+    let max_off = (half_len - via_r).max(0.0);
+    // Slide along the long axis, biased toward the footprint INTERIOR (its
+    // central channel) but allowed toward the outer end too. A row of N
+    // consecutive fine-pitch escapes needs N distinct long-axis offsets to
+    // keep every pin's approach lane clear (a neighbour barrel at the same
+    // offset boxes the pin on every layer, since the barrel shorts them
+    // all); two offsets aren't enough for 3+ in a row. The interior
+    // direction is the sign of (fp_centre − pad) along the long axis; we
+    // try interior offsets first (so the bias wins ties) then the outer
+    // ones. `fanout_via_fits` rejects any position that nears the board
+    // edge or a shield pad, so the outer candidates are self-policing.
+    let along = dx * (fp_cx - cx) + dy * (fp_cy - cy);
+    let inner = if along >= 0.0 { 1.0 } else { -1.0 };
+    let candidate_offsets = [
+        0.0,
+        inner * max_off,
+        inner * 0.5 * max_off,
+        -inner * max_off,
+        inner * 0.75 * max_off,
+        -inner * 0.5 * max_off,
+        inner * 0.25 * max_off,
+    ];
+    // Existing fanout vias (the 0.30 mm ones this pass places) — score
+    // isolation against these so a row of pins spreads out.
+    let fanout_via_centers: Vec<(f64, f64)> = work
+        .vias
+        .iter()
+        .filter(|v| (v.diameter.to_mm() - FANOUT_VIA_DIAMETER_MM).abs() < 1e-6)
+        .map(|v| (v.position.x.to_mm(), v.position.y.to_mm()))
+        .collect();
+
+    let mut best: Option<(f64, f64, f64, f64)> = None; // (score, |off|, vx, vy)
+    for off in candidate_offsets {
+        if off.abs() > max_off + 1e-9 {
+            continue;
+        }
+        let vx = cx + dx * off;
+        let vy = cy + dy * off;
+        if !fanout_via_fits(vx, vy, net, via_r, clearance, foreign, work) {
+            continue;
+        }
+        let score = fanout_via_centers
+            .iter()
+            .map(|(ox, oy)| ((vx - ox).powi(2) + (vy - oy).powi(2)).sqrt())
+            .fold(f64::INFINITY, f64::min);
+        // Prefer the most isolated spot; tie-break toward the pad centre
+        // (smaller |offset|) so isolated pads stay centred.
+        let take = match best {
+            None => true,
+            Some((bscore, boff, _, _)) => {
+                score > bscore + 1e-9 || (score >= bscore - 1e-9 && off.abs() < boff - 1e-9)
+            }
+        };
+        if take {
+            best = Some((score, off.abs(), vx, vy));
+        }
+    }
+    best.map(|(_, _, vx, vy)| (vx, vy))
 }
 
 /// Plan the fanout: for every pad that can't escape on the surface, drop
@@ -204,6 +302,21 @@ pub fn plan_fanout(board: &Board, opts: &RouteOptions) -> FanoutPlan {
     let mut work = board.clone();
 
     for fp in board.footprints_in_order() {
+        // Footprint centre (pad centroid) — the interior reference the via
+        // staggering slides toward, so escapes head into the part's central
+        // channel rather than out toward the board edge / shield pads.
+        let (mut sum_x, mut sum_y, mut n) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for pad in &fp.pads {
+            let c = fp.pad_world_center(pad);
+            sum_x += c.x.to_mm();
+            sum_y += c.y.to_mm();
+            n += 1.0;
+        }
+        let (fp_cx, fp_cy) = if n > 0.0 {
+            (sum_x / n, sum_y / n)
+        } else {
+            (0.0, 0.0)
+        };
         for pad in &fp.pads {
             let Some(net) = pad.net.as_deref() else {
                 continue;
@@ -228,23 +341,36 @@ pub fn plan_fanout(board: &Board, opts: &RouteOptions) -> FanoutPlan {
             if !in_cluster && can_escape_surface(cx, cy, hw, hh, net, &foreign, tw, clearance) {
                 continue;
             }
-            if !fanout_via_fits(cx, cy, net, via_r, clearance, &foreign, &work) {
-                // Too tight even for the minimum via — leave it for the
-                // router to attempt on the surface (it will likely fail,
-                // and the report will flag it).
+            // Pick the via-in-pad position. A via-in-pad may sit anywhere
+            // inside the pad copper, so on a LONG fine-pitch pad we slide it
+            // along the pad's long axis to the spot that is most ISOLATED
+            // from the via-in-pads already placed on neighbouring pins.
+            // Centring every connector via leaves them all at one x (0.5 mm
+            // apart in y) — their through-barrels then block every layer, so
+            // the coarse router has no lane to approach any of them and the
+            // pins fail to land. Staggering adjacent pins to opposite ends of
+            // their pads opens a clear approach lane down the pad's long axis.
+            let Some((vx, vy)) = pick_via_position(
+                cx, cy, hw, hh, fp_cx, fp_cy, net, via_r, clearance, &foreign, &work,
+            ) else {
+                // Too tight even for the minimum via at any offset — leave it
+                // for the router to attempt on the surface (it will likely
+                // fail, and the report will flag it).
                 continue;
-            }
+            };
+            let via_pos = Point::new(Length::from_mm(vx), Length::from_mm(vy));
             let via = Via {
                 id: Id::new(),
-                position: Point::new(c.x, c.y),
+                position: via_pos,
                 drill: Length::from_mm(FANOUT_VIA_DRILL_MM),
                 diameter: Length::from_mm(FANOUT_VIA_DIAMETER_MM),
                 net: net.to_string(),
             };
             work.vias.push(via.clone());
             plan.vias.push(via);
-            plan.through_pads
-                .insert(format!("{}.{}", fp.reference, pad.number));
+            let key = format!("{}.{}", fp.reference, pad.number);
+            plan.through_pads.insert(key.clone());
+            plan.via_positions.insert(key, via_pos);
         }
     }
     plan

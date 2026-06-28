@@ -453,22 +453,27 @@ impl Grid {
         }
     }
 
-    /// Stamp a pad's copper rectangle (centre + half extents in mm) as a
-    /// `DrilledPad` of `net` on *every* copper layer. Used after a fanout
-    /// via-in-pad has been placed: the via ties the surface pad to the
-    /// inner copper, so the router may land on this pad from any layer —
-    /// exactly the through-hole-pad contract the search already handles.
-    pub fn stamp_through_pad(&mut self, center: Point, half_w: Length, half_h: Length, net: u32) {
-        let min = center.translate(-half_w, -half_h);
-        let max = center.translate(half_w, half_h);
-        let cmin = self.snap(min, CopperLayer::Top);
-        let cmax = self.snap(max, CopperLayer::Top);
+    /// Stamp a fanout via's landing as `DrilledPad(net)` — a disk of
+    /// radius `copper` cells centred on the via, on EVERY copper layer.
+    /// Stamps only the via barrel's footprint, NOT the whole SMD pad rect:
+    /// on the inner layers the SMD pad does not physically exist, only the
+    /// via copper does. Stamping just the via keeps the inner layers'
+    /// approach lanes open between neighbouring fine-pitch pins, which a
+    /// full-rect stamp would wall off. Overwrites any cell (the via barrel
+    /// shorts whatever shares its column/row).
+    pub fn stamp_drilled_disk(&mut self, center: Point, copper: i32, net: u32) {
+        let gp = self.snap(center, CopperLayer::Top);
+        let copper = copper.max(0);
+        let r2 = copper * copper;
         for layer in 0..self.layer_count {
-            for r in cmin.row..=cmax.row {
-                for c in cmin.col..=cmax.col {
-                    let gp = GridPoint { layer, col: c, row: r };
-                    if self.in_bounds(gp) {
-                        self.set(gp, Cell::DrilledPad(net));
+            for dr in -copper..=copper {
+                for dc in -copper..=copper {
+                    if dc * dc + dr * dr > r2 {
+                        continue;
+                    }
+                    let p = GridPoint { layer, col: gp.col + dc, row: gp.row + dr };
+                    if self.in_bounds(p) {
+                        self.set(p, Cell::DrilledPad(net));
                     }
                 }
             }
