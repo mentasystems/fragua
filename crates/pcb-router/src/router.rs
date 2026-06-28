@@ -81,36 +81,84 @@ impl Default for RouteOptions {
     }
 }
 
+/// Minimum trace width (mm) the router lays on a *power* net when the
+/// net has no explicit class/override width. Power distribution carries
+/// real current and wants low impedance, so a backbone thinner than this
+/// is almost never what the designer intends. A net that explicitly sets
+/// a narrower width via a class still wins — this is only a floor for the
+/// "router picked the default" case.
+const POWER_MIN_TRACE_WIDTH_MM: f64 = 0.50;
+
+/// Classify a net as power/ground by name. Keyed on the conventional
+/// rail names so the router can widen them automatically without the
+/// designer having to declare a `class power` for every board. Matches
+/// the exact rail or a name that starts with it (e.g. `+3V3`, `3V3_MCU`,
+/// `VBUS_IN`, `VCC_IO`).
+pub fn is_power_net(net: &str) -> bool {
+    let u = net.to_ascii_uppercase();
+    const RAILS: &[&str] = &[
+        "GND", "VBUS", "+3V3", "3V3", "+5V", "5V", "+1V", "1V", "VCC", "VDD", "VDDA", "VIN", "VSYS",
+        "VBAT", "PWR", "+12V", "12V",
+    ];
+    RAILS.iter().any(|p| u == *p || u.starts_with(p))
+}
+
 /// Helper: resolve `(trace_width, clearance)` for `net` honouring
 /// `opts.schematic` first, then `opts.net_overrides`, then the global
 /// defaults on `opts`. Centralises the precedence so the grid stamp,
 /// per-net layout, and `compute_region` stay in sync.
+///
+/// Power nets get a width *floor* (`POWER_MIN_TRACE_WIDTH_MM`) applied
+/// last: a power rail that resolved to the bare global default is widened
+/// to the floor, while a net that explicitly asked for a specific width
+/// (via a class or override) keeps it.
 fn effective_net_rules(opts: &RouteOptions, net: &str) -> (Length, Length) {
-    if let Some(sch) = opts.schematic.as_ref() {
-        // Only consult the schematic when the net actually has a class —
-        // otherwise we'd shadow the override map below for every net.
-        if sch.class_for_net(net).is_some() {
-            let res = sch.resolved_for_net(
-                net,
-                opts.trace_width,
-                opts.clearance,
-                opts.via_diameter,
-                opts.via_drill,
-            );
-            return (res.trace_width, res.clearance);
+    // `explicit` tracks whether the width came from a real class/override
+    // (respect it) or fell through to the global default (floor it).
+    let (mut w, c, explicit_width) = {
+        if let Some(sch) = opts.schematic.as_ref() {
+            // Only consult the schematic when the net actually has a class —
+            // otherwise we'd shadow the override map below for every net.
+            if sch.class_for_net(net).is_some() {
+                let res = sch.resolved_for_net(
+                    net,
+                    opts.trace_width,
+                    opts.clearance,
+                    opts.via_diameter,
+                    opts.via_drill,
+                );
+                // A class whose width differs from the default is an
+                // explicit choice; one that equals the default is just
+                // inheriting it.
+                let explicit = res.trace_width.0 != opts.trace_width.0;
+                (res.trace_width, res.clearance, explicit)
+            } else {
+                resolve_from_overrides(opts, net)
+            }
+        } else {
+            resolve_from_overrides(opts, net)
+        }
+    };
+
+    if !explicit_width && is_power_net(net) {
+        let floor = Length::from_mm(POWER_MIN_TRACE_WIDTH_MM);
+        if floor.0 > w.0 {
+            w = floor;
         }
     }
-    let w = opts
-        .net_overrides
-        .get(net)
-        .and_then(|o| o.trace_width)
-        .unwrap_or(opts.trace_width);
-    let c = opts
-        .net_overrides
-        .get(net)
+    (w, c)
+}
+
+/// `(trace_width, clearance, explicit_width)` from the per-net override
+/// map, falling back to the global defaults.
+fn resolve_from_overrides(opts: &RouteOptions, net: &str) -> (Length, Length, bool) {
+    let ov = opts.net_overrides.get(net);
+    let w = ov.and_then(|o| o.trace_width);
+    let explicit = w.is_some();
+    let c = ov
         .and_then(|o| o.clearance)
         .unwrap_or(opts.clearance);
-    (w, c)
+    (w.unwrap_or(opts.trace_width), c, explicit)
 }
 
 #[derive(Debug, Clone)]
@@ -196,6 +244,10 @@ const CONGESTION_MAX: u32 = 32;
 /// the first wins and the board is laid back to its first-pass state.
 pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     let nets = collect_nets(board);
+    // Fanout pre-pass: drop a via-in-pad on any fine-pitch pad that can't
+    // escape on its own layer, so the router can reach it from an inner
+    // layer. No-op on 2-layer boards (nowhere to fan out to).
+    let fanout = crate::fanout::plan_fanout(board, opts);
     if nets.is_empty() {
         board.clear_routing();
         return RouteReport {
@@ -265,7 +317,7 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
 
         let mut work = board.clone();
         work.clear_routing();
-        let report = route_pass(&mut work, &nets, &order, opts, &cost_map);
+        let report = route_pass(&mut work, &nets, &order, opts, &cost_map, &fanout);
 
         let take_it = match &best {
             None => true,
@@ -342,6 +394,11 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     }
     for via in best_work.vias {
         board.add_via(via);
+    }
+    // Fanout vias are fixed geometry, not part of the rip-up/reroute
+    // search, so they're added once to the final board.
+    for via in &fanout.vias {
+        board.add_via(via.clone());
     }
     // Post-passes: auto-stitching vias for pours with a Grid policy,
     // then length matching for nets that ask for it. Length matching
@@ -498,6 +555,7 @@ fn route_pass(
     order: &[String],
     opts: &RouteOptions,
     cost_map: &CostMap,
+    fanout: &crate::fanout::FanoutPlan,
 ) -> RouteReport {
     let net_id_of: HashMap<String, u32> = order
         .iter()
@@ -533,26 +591,86 @@ fn route_pass(
         }
         c
     };
+    // Widest trace any net will lay. The grid models a trace as a
+    // single centre cell, so clearances computed from the centreline
+    // must add the trace's half-width or the copper body silently
+    // overruns into pads/other traces (DRC `TracePadClearance` /
+    // `TraceTraceClearance`). We stamp conservatively at the widest
+    // half-width across every net so no net is ever underserved.
+    let max_trace_w: Length = {
+        let mut w = opts.trace_width;
+        for net_name in nets.keys() {
+            let (nw, _) = effective_net_rules(opts, net_name);
+            if nw.0 > w.0 {
+                w = nw;
+            }
+        }
+        w
+    };
+    let max_half: Length = Length(max_trace_w.0 / 2);
+
     let net_id_lookup = |n: &str| net_id_of.get(n).copied();
     // Layered stamping, broad-to-narrow: bodies block the area each
     // footprint occupies, keepouts block any user-marked region, pads
     // overwrite the cells they actually own so they stay reachable.
     grid.stamp_bodies(board);
     grid.stamp_keepouts(board);
-    grid.stamp_pads(board, &net_id_lookup, max_clearance);
-    // Halo around freshly-laid traces, in cells: max_clearance / cell.
-    // Round up so 0.20 mm clearance on a 0.25 mm grid still gives one
-    // cell of breathing room.
+    // Pad obstacle ring = clearance + the *default* (signal) trace
+    // half-width. Using the widest (power) half-width here would inflate
+    // every pad's keep-out by the power half even when the escaping net
+    // is a thin signal — on fine-pitch parts (QFN, USB-C) that merges
+    // adjacent pads' rings and boxes the pin in, so it can't escape at
+    // all. Signals are the overwhelming majority of pad escapes, so we
+    // size the ring for them; a wide power trace approaching a foreign
+    // pad is rare and still keeps `clearance` (just not the extra power
+    // half). Trace-to-trace clearance still uses the full width-aware
+    // halo below.
+    let pad_half = Length(opts.trace_width.0 / 2);
+    grid.stamp_pads(board, &net_id_lookup, Length(max_clearance.0 + pad_half.0));
+    // Fanned-out pads become through-hole landing zones: their via-in-pad
+    // ties every layer together, so re-stamp them (plus the clearance
+    // ring) as DrilledPad on all layers. The router can then reach them
+    // from an inner layer where there's room, instead of being trapped on
+    // the congested surface between fine-pitch neighbours.
+    if !fanout.through_pads.is_empty() {
+        // Stamp the BARE pad rectangle (no clearance inflation): on a
+        // 0.5 mm-pitch part the inflated rings would overlap and a
+        // neighbour's DrilledPad would clobber this pad's own landing
+        // cells, making it unreachable. Edge-to-edge clearance between
+        // adjacent landing zones is handled the normal way — by each
+        // routed trace's own halo as it's laid.
+        for fp in board.footprints_in_order() {
+            for pad in &fp.pads {
+                let key = format!("{}.{}", fp.reference, pad.number);
+                if !fanout.through_pads.contains(&key) {
+                    continue;
+                }
+                let Some(id) = pad.net.as_deref().and_then(&net_id_lookup) else {
+                    continue;
+                };
+                let c = fp.pad_world_center(pad);
+                let (w, h) = fp.pad_world_size(pad);
+                grid.stamp_through_pad(c, Length(w.0 / 2), Length(h.0 / 2), id);
+            }
+        }
+    }
+    // Halo around freshly-laid traces, in cells:
+    // ceil((clearance + maxWidth) / cell). Two traces separated so
+    // their centrelines are `halo` cells apart keep
+    // `clearance + w_a/2 + w_b/2 <= clearance + maxWidth` between
+    // edges. Round up so the discrete grid never undersells clearance.
     let halo_cells = {
-        let raw = (max_clearance.0 + opts.cell.0 - 1) / opts.cell.0;
+        let needed = max_clearance.0 + max_trace_w.0;
+        let raw = (needed + opts.cell.0 - 1) / opts.cell.0;
         i32::try_from(raw).unwrap_or(1).max(1)
     };
     // Via-safety radius: a via's copper extends `via_diameter/2` from
     // its centre and must keep `clearance` to every other net's copper
-    // on both layers. The A* check rejects via flips landing inside
-    // this radius of foreign cells.
+    // on both layers — plus the foreign trace's half-width, same
+    // centreline argument as above.
     let via_safe_radius = {
-        let raw = (opts.via_diameter.0 / 2 + max_clearance.0 + opts.cell.0 - 1) / opts.cell.0;
+        let raw =
+            (opts.via_diameter.0 / 2 + max_clearance.0 + max_half.0 + opts.cell.0 - 1) / opts.cell.0;
         i32::try_from(raw).unwrap_or(1).max(1)
     };
 
@@ -667,8 +785,23 @@ fn route_pass(
         // A* the hub is no longer mandatory — any same-net cell is a
         // search source — but the spoke ordering "closest to seed
         // first" still helps build a tight Prim-style tree.
-        let seed_idx = (0..pad_points.len())
-            .min_by_key(|&i| {
+        // Prefer a NON-fanned-out pad as the seed when one exists: the
+        // seed anchors the trunk, and a wide trunk emanating from a
+        // fine-pitch fanout pad would short its neighbours. Among the
+        // eligible pads pick the geographically central one.
+        let eligible: Vec<usize> = {
+            let non_fanout: Vec<usize> = (0..pad_points.len())
+                .filter(|&i| !fanout.through_pads.contains(&pad_points[i].pad_ref))
+                .collect();
+            if non_fanout.is_empty() {
+                (0..pad_points.len()).collect()
+            } else {
+                non_fanout
+            }
+        };
+        let seed_idx = *eligible
+            .iter()
+            .min_by_key(|&&i| {
                 pad_points
                     .iter()
                     .enumerate()
@@ -680,9 +813,10 @@ fn route_pass(
                     })
                     .sum::<u64>()
             })
-            .unwrap_or(0);
+            .unwrap_or(&0);
         let seed = pad_points[seed_idx].clone();
         let seed_grid = grid.snap(seed.center, seed.layer);
+        let seed_is_fanout = fanout.through_pads.contains(&seed.pad_ref);
 
         // Resolve this net's trace width: schematic class first, then
         // per-net override, then the global default.
@@ -692,6 +826,10 @@ fn route_pass(
         let mut net_vias = 0usize;
         let mut net_length_mm = 0.0_f64;
         let mut failed = false;
+        // The net's already-laid trace cells, accumulated as each spoke
+        // is routed. Seeds the multi-source search (Prim/Steiner growth)
+        // without rescanning the whole grid — the key to fine-grid speed.
+        let mut net_trace_cells: Vec<GridPoint> = Vec::new();
         // Spokes ordered by distance to seed (closest first). After
         // each spoke is laid, multi-source A* will pick whichever
         // existing same-net cell is closest to the next spoke — so the
@@ -708,6 +846,18 @@ fn route_pass(
         });
         for spoke in spokes_sorted {
             let spoke_grid = grid.snap(spoke.center, spoke.layer);
+            // Neck a spoke down to the default (signal) width when either
+            // end is a fanned-out fine-pitch pad. A 0.5 mm power trace
+            // can't physically enter a 0.30 mm connector pin without
+            // shorting the 0.5 mm-pitch neighbour, so the entry necks —
+            // exactly what a hand layout does. The trunk between regular
+            // pads keeps the full power width.
+            let spoke_is_fanout = fanout.through_pads.contains(&spoke.pad_ref);
+            let spoke_width = if seed_is_fanout || spoke_is_fanout {
+                Length(net_trace_width.0.min(opts.trace_width.0))
+            } else {
+                net_trace_width
+            };
             let Some(result) = search(
                 &grid,
                 seed_grid,
@@ -717,6 +867,7 @@ fn route_pass(
                 via_safe_radius,
                 halo_cells,
                 cost_map,
+                &net_trace_cells,
             ) else {
                 per_net.push((
                     net_name.clone(),
@@ -740,12 +891,21 @@ fn route_pass(
                 net_id,
                 opts,
                 halo_cells,
-                net_trace_width,
+                spoke_width,
                 Some(spoke.center),
             );
             net_segments += segs;
             net_vias += vias;
             net_length_mm += length_mm;
+            // Record this spoke's path cells as future search sources so
+            // the next spoke branches off the nearest point of the tree.
+            for w in result.path.windows(2) {
+                if w[0].layer == w[1].layer {
+                    net_trace_cells.extend(grid.line_cells(w[0], w[1]));
+                }
+            }
+            // The spoke's own pad cell joins the tree too.
+            net_trace_cells.push(spoke_grid);
         }
         if !failed {
             total_traces += net_segments;
@@ -1285,6 +1445,17 @@ fn try_diff_pair_follow(
                 }
             }
         }
+        // Multi-source set = every cell of net_b's already-emitted
+        // traces, so the search branches off the partner-parallel run
+        // just as it did when it rescanned the grid for Trace cells.
+        let mut db_sources: Vec<GridPoint> = Vec::new();
+        for t in &emitted {
+            let a = grid.snap(t.start, t.layer);
+            let b = grid.snap(t.end, t.layer);
+            if a.layer == b.layer {
+                db_sources.extend(grid.line_cells(a, b));
+            }
+        }
         let Some(result) = search(
             grid,
             best_seed,
@@ -1294,6 +1465,7 @@ fn try_diff_pair_follow(
             via_safe_radius,
             halo_cells,
             cost_map,
+            &db_sources,
         ) else {
             return Err(format!("no end-cap to pad {}", pad.pad_ref));
         };

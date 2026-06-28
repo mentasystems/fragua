@@ -73,6 +73,7 @@ const VIA_IN_PAD_PENALTY: u32 = 40 * SCALE;
 //
 // First spoke (no traces yet) sees the seed at g=0 — the penalty only
 // kicks in once a tree exists.
+#[allow(clippy::too_many_arguments)]
 pub fn search(
     grid: &Grid,
     start: GridPoint,
@@ -82,6 +83,12 @@ pub fn search(
     via_safe_radius: i32,
     halo: i32,
     cost_map: &CostMap,
+    // Existing trace cells of `target_net` laid so far (the partial
+    // tree). Seeded at g=0 so a later spoke branches off the closest
+    // one — Prim/Steiner growth. Empty for the first spoke. Passing
+    // this in (instead of rescanning the whole grid for `Trace(net)`
+    // cells every call) is what makes fine grids tractable.
+    sources: &[GridPoint],
 ) -> Option<AStarResult> {
     /// Floor for the seed pad's g-penalty when at least one trace cell
     /// exists. ~6 mm at default 0.25 mm pitch — kicks in only when every
@@ -91,6 +98,34 @@ pub fn search(
     const SEED_FALLBACK_PENALTY: u32 = 24 * SCALE;
 
     let via_scaled = via_cost.saturating_mul(SCALE);
+
+    // Bound the search to the bounding box of {sources, start, target}
+    // inflated by a generous margin. A purely local connection (e.g.
+    // fine-pitch fanout) then explores a few hundred cells instead of
+    // the whole board, the dominant cost at fine pitch. The margin is
+    // wide enough that any reasonable detour around an obstacle stays
+    // inside the window; a connection genuinely needing more is rare and
+    // simply fails this attempt (RR&R will retry with a clearer board).
+    const SEARCH_MARGIN_CELLS: i32 = 120;
+    let (mut min_c, mut min_r, mut max_c, mut max_r) = (
+        start.col.min(target.col),
+        start.row.min(target.row),
+        start.col.max(target.col),
+        start.row.max(target.row),
+    );
+    for s in sources {
+        min_c = min_c.min(s.col);
+        min_r = min_r.min(s.row);
+        max_c = max_c.max(s.col);
+        max_r = max_r.max(s.row);
+    }
+    let bound_min_c = min_c - SEARCH_MARGIN_CELLS;
+    let bound_min_r = min_r - SEARCH_MARGIN_CELLS;
+    let bound_max_c = max_c + SEARCH_MARGIN_CELLS;
+    let bound_max_r = max_r + SEARCH_MARGIN_CELLS;
+    let in_window = |p: GridPoint| -> bool {
+        p.col >= bound_min_c && p.col <= bound_max_c && p.row >= bound_min_r && p.row <= bound_max_r
+    };
 
     // A drilled (through-hole) target accepts any copper layer for
     // free: the existing PTH already connects every copper layer it
@@ -127,19 +162,24 @@ pub fn search(
 
     let mut had_trace_source = false;
     let mut best_trace_h: u32 = u32::MAX;
-    for layer in 0..grid.layer_count {
-        for row in 0..grid.rows {
-            for col in 0..grid.cols {
-                let p = GridPoint { layer, col, row };
-                if matches!(grid.get(p), Cell::Trace(n) if n == target_net) {
-                    let hp = h(p);
-                    g_score.insert(p, 0);
-                    open.push(Node { f: hp, g: 0, p });
-                    had_trace_source = true;
-                    if hp < best_trace_h {
-                        best_trace_h = hp;
-                    }
-                }
+    for &p in sources {
+        // Seed only from actual TRACE cells of this net — exactly the
+        // set the old full-grid scan produced. Pad (`NetPad`) cells are
+        // deliberately excluded: seeding them at g=0 lets the lazy-Theta*
+        // shortcut weave a `came_from` cycle (pad cells sit adjacent to
+        // many tied-cost cells), which corrupts path reconstruction.
+        // The caller's `sources` list may contain pad cells (path
+        // endpoints); we filter them here so the search stays acyclic
+        // while still avoiding the whole-grid rescan.
+        if matches!(grid.get(p), Cell::Trace(n) if n == target_net) {
+            let hp = h(p);
+            if !g_score.contains_key(&p) {
+                g_score.insert(p, 0);
+                open.push(Node { f: hp, g: 0, p });
+            }
+            had_trace_source = true;
+            if hp < best_trace_h {
+                best_trace_h = hp;
             }
         }
     }
@@ -148,14 +188,30 @@ pub fn search(
     } else {
         0
     };
-    g_score.insert(start, seed_g);
-    open.push(Node {
-        f: seed_g + h(start),
-        g: seed_g,
-        p: start,
-    });
+    // Seed the start. If the start pad is through-hole (a real PTH pad or
+    // a fanned-out SMD pad with a via-in-pad), its barrel shorts every
+    // layer at this (col,row), so the search may begin on any of them —
+    // crucial for a fanned-out seed, whose whole point is to route on an
+    // inner layer rather than escape on the congested surface. For an
+    // ordinary SMD pad only its own layer is walkable, so this seeds just
+    // `start`, exactly as before.
+    for layer in 0..grid.layer_count {
+        let p = GridPoint { layer, col: start.col, row: start.row };
+        let walkable = p == start
+            || matches!(grid.get(p), Cell::NetPad(n) | Cell::DrilledPad(n) | Cell::Trace(n) if n == target_net);
+        if walkable && !g_score.contains_key(&p) {
+            g_score.insert(p, seed_g);
+            open.push(Node { f: seed_g + h(p), g: seed_g, p });
+        }
+    }
 
+    let mut _pop_guard: u64 = 0;
     while let Some(Node { p, g, .. }) = open.pop() {
+        _pop_guard += 1;
+        if _pop_guard > 50_000_000 {
+            eprintln!("ASTAR_GUARD: 50M pops, bailing (sources={})", sources.len());
+            return None;
+        }
         // Termination: same column/row as target, AND either same
         // layer OR the cell is a DrilledPad of the target net (the
         // TH connects both layers, so entering from either side
@@ -173,9 +229,15 @@ pub fn search(
         {
             let mut path = vec![p];
             let mut cur = p;
+            let mut recon_guard = 0u64;
             while let Some(&prev) = came_from.get(&cur) {
                 path.push(prev);
                 cur = prev;
+                recon_guard += 1;
+                if recon_guard > 10_000_000 {
+                    eprintln!("ASTAR_GUARD: reconstruction cycle detected");
+                    return None;
+                }
             }
             path.reverse();
             return Some(AStarResult { path });
@@ -185,7 +247,7 @@ pub fn search(
         }
 
         for (next_p, kind) in neighbours(p, grid.layer_count) {
-            if !grid.in_bounds(next_p) {
+            if !grid.in_bounds(next_p) || !in_window(next_p) {
                 continue;
             }
             let walkable = match grid.get(next_p) {
@@ -315,36 +377,31 @@ enum Move {
     Via,
 }
 
-fn neighbours(p: GridPoint, layer_count: u8) -> [(GridPoint, Move); 9] {
+fn neighbours(p: GridPoint, layer_count: u8) -> Vec<(GridPoint, Move)> {
     let l = p.layer;
     let c = p.col;
     let r = p.row;
-    // Via flip: until blind/buried vias land, every via punches
-    // top↔bottom. On layer 0 the via flips to N-1; on layer N-1 it
-    // flips to 0; on inner layers (Phase 4 has signal layers too) we
-    // still flip to the opposite outer layer — the inner layer pad
-    // sits on the via shaft. This is a conservative model that lets
-    // the search at least reach inner cells; once we add per-via
-    // layer spans the neighbours will become richer.
-    let bottom = layer_count.saturating_sub(1);
-    let via_target = if l == 0 {
-        bottom
-    } else if l == bottom {
-        0
-    } else if l < bottom / 2 {
-        bottom
-    } else {
-        0
-    };
-    [
-        (GridPoint { layer: l, col: c + 1, row: r }, Move::Ortho),
-        (GridPoint { layer: l, col: c - 1, row: r }, Move::Ortho),
-        (GridPoint { layer: l, col: c, row: r + 1 }, Move::Ortho),
-        (GridPoint { layer: l, col: c, row: r - 1 }, Move::Ortho),
-        (GridPoint { layer: l, col: c + 1, row: r + 1 }, Move::Diag),
-        (GridPoint { layer: l, col: c + 1, row: r - 1 }, Move::Diag),
-        (GridPoint { layer: l, col: c - 1, row: r + 1 }, Move::Diag),
-        (GridPoint { layer: l, col: c - 1, row: r - 1 }, Move::Diag),
-        (GridPoint { layer: via_target, col: c, row: r }, Move::Via),
-    ]
+    // 8 in-plane moves plus one via move to *every other* copper
+    // layer. A through-hole via's drilled barrel shorts every copper
+    // layer it passes through, so from any layer a single via punch
+    // reaches any other layer at the same (col,row). Modelling each
+    // reachable layer as its own Move::Via lets the router treat inner
+    // layers as first-class routing space (top↔inner↔bottom), not just
+    // the two outer layers it used pre-Phase-4. On a 2-layer board this
+    // degenerates to the old single top↔bottom flip.
+    let mut out = Vec::with_capacity(8 + layer_count.saturating_sub(1) as usize);
+    out.push((GridPoint { layer: l, col: c + 1, row: r }, Move::Ortho));
+    out.push((GridPoint { layer: l, col: c - 1, row: r }, Move::Ortho));
+    out.push((GridPoint { layer: l, col: c, row: r + 1 }, Move::Ortho));
+    out.push((GridPoint { layer: l, col: c, row: r - 1 }, Move::Ortho));
+    out.push((GridPoint { layer: l, col: c + 1, row: r + 1 }, Move::Diag));
+    out.push((GridPoint { layer: l, col: c + 1, row: r - 1 }, Move::Diag));
+    out.push((GridPoint { layer: l, col: c - 1, row: r + 1 }, Move::Diag));
+    out.push((GridPoint { layer: l, col: c - 1, row: r - 1 }, Move::Diag));
+    for tl in 0..layer_count {
+        if tl != l {
+            out.push((GridPoint { layer: tl, col: c, row: r }, Move::Via));
+        }
+    }
+    out
 }

@@ -17,6 +17,7 @@ path = "src/main.rs"
 pcb-core = { path = "../pcb-core" }
 pcb-router = { path = "../pcb-router" }
 pcb-drc = { path = "../pcb-drc" }
+pcb-placer = { path = "../pcb-placer" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.8"

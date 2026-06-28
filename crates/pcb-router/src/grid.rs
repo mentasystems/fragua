@@ -373,6 +373,41 @@ impl Grid {
         }
     }
 
+    /// Stamp a pad's copper rectangle (centre + half extents in mm) as a
+    /// `DrilledPad` of `net` on *every* copper layer. Used after a fanout
+    /// via-in-pad has been placed: the via ties the surface pad to the
+    /// inner copper, so the router may land on this pad from any layer —
+    /// exactly the through-hole-pad contract the search already handles.
+    pub fn stamp_through_pad(&mut self, center: Point, half_w: Length, half_h: Length, net: u32) {
+        let min = center.translate(-half_w, -half_h);
+        let max = center.translate(half_w, half_h);
+        let cmin = self.snap(min, CopperLayer::Top);
+        let cmax = self.snap(max, CopperLayer::Top);
+        for layer in 0..self.layer_count {
+            for r in cmin.row..=cmax.row {
+                for c in cmin.col..=cmax.col {
+                    let gp = GridPoint { layer, col: c, row: r };
+                    if self.in_bounds(gp) {
+                        self.set(gp, Cell::DrilledPad(net));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The grid cells a straight segment `a..b` (same layer) rasterises
+    /// to, via the shared Bresenham line. Used by the router to track a
+    /// net's already-laid trace cells incrementally — so the multi-source
+    /// search can seed from them without rescanning the whole grid.
+    pub fn line_cells(&self, a: GridPoint, b: GridPoint) -> Vec<GridPoint> {
+        debug_assert_eq!(a.layer, b.layer);
+        let layer = a.layer;
+        bresenham(a.col, a.row, b.col, b.row)
+            .into_iter()
+            .map(|(c, r)| GridPoint { layer, col: c, row: r })
+            .collect()
+    }
+
     /// Mark the path of an existing trace as `Trace(net)`, plus a
     /// `halo` of cells around it on the same layer so foreign nets
     /// can't run flush against this one. Works for arbitrary
