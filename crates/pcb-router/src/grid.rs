@@ -367,12 +367,15 @@ impl Grid {
                     // still keeps traces off it, while nobody may enter it.
                     (None, _) => Cell::NetPad(FOREIGN_NET),
                 };
-                // TH pads punch every copper layer — stamp the copper
-                // region on the outer two (vias still only go
-                // top↔bottom in this iteration; inner-layer landing
-                // pads are unmodelled) so the via-safe check sees the
-                // drilled cells from either side of a layer flip.
-                let layers: Vec<u8> = if is_th { vec![0, bottom] } else { vec![primary_layer] };
+                // TH pads punch EVERY copper layer — their drilled barrel
+                // is real copper on all of them, so stamp the copper region
+                // on every layer (not just the outer two). Inner-layer
+                // routing must keep clearance to a through-hole pad exactly
+                // like the outer layers do, or it grazes the barrel and the
+                // DRC flags it. (On a 2-layer board `0..layer_count` is just
+                // `[0, bottom]`, so this is unchanged there.)
+                let layers: Vec<u8> =
+                    if is_th { (0..self.layer_count).collect() } else { vec![primary_layer] };
                 for &layer in &layers {
                     for r in cmin.row..=cmax.row {
                         for c in cmin.col..=cmax.col {

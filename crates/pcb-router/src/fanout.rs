@@ -24,14 +24,14 @@ use crate::router::RouteOptions;
 /// JLCPCB minimum via — 0.30 mm pad, 0.15 mm drill. Small enough to sit
 /// centred in a 0.30 mm-wide, 0.5 mm-pitch pad and still clear the
 /// neighbour by the default 0.20 mm.
-const FANOUT_VIA_DIAMETER_MM: f64 = 0.30;
-const FANOUT_VIA_DRILL_MM: f64 = 0.15;
+pub(crate) const FANOUT_VIA_DIAMETER_MM: f64 = 0.30;
+pub(crate) const FANOUT_VIA_DRILL_MM: f64 = 0.15;
 
 /// Board-edge copper clearance enforced by the DRC (`EdgeClearance`),
 /// stricter than inter-copper clearance. A staggered via must respect it
 /// or the slid-out position trips the edge rule even though it clears
 /// every pad.
-const EDGE_CLEARANCE_MM: f64 = 0.30;
+pub(crate) const EDGE_CLEARANCE_MM: f64 = 0.30;
 
 /// How far (mm) a trace must be able to run away from a pad edge, in some
 /// direction, for the pad to count as "able to escape on the surface".
@@ -43,8 +43,8 @@ const ESCAPE_LEN_MM: f64 = 0.9;
 /// Even though *one* trace can slip out along its long axis, the whole
 /// row can't escape in parallel at sub-0.65 mm pitch, so every clustered
 /// pad gets a fanout via and routes on an inner layer instead.
-const CLUSTER_NEIGHBOURS: usize = 2;
-const CLUSTER_DIST_MM: f64 = 0.55;
+pub(crate) const CLUSTER_NEIGHBOURS: usize = 2;
+pub(crate) const CLUSTER_DIST_MM: f64 = 0.55;
 
 /// Result of the fanout pass.
 #[derive(Debug, Default, Clone)]
@@ -64,15 +64,15 @@ pub struct FanoutPlan {
 }
 
 /// Axis-aligned pad rectangle in world mm.
-struct PadRect {
-    cx: f64,
-    cy: f64,
-    hw: f64,
-    hh: f64,
-    net: Option<String>,
+pub(crate) struct PadRect {
+    pub cx: f64,
+    pub cy: f64,
+    pub hw: f64,
+    pub hh: f64,
+    pub net: Option<String>,
 }
 
-fn pad_rects(board: &Board) -> Vec<PadRect> {
+pub(crate) fn pad_rects(board: &Board) -> Vec<PadRect> {
     let mut out = Vec::new();
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
@@ -91,7 +91,7 @@ fn pad_rects(board: &Board) -> Vec<PadRect> {
 }
 
 /// Distance (mm) from point to an axis-aligned rectangle (0 inside).
-fn point_rect_dist(px: f64, py: f64, r: &PadRect) -> f64 {
+pub(crate) fn point_rect_dist(px: f64, py: f64, r: &PadRect) -> f64 {
     let dx = (px - r.cx).abs() - r.hw;
     let dy = (py - r.cy).abs() - r.hh;
     let dx = dx.max(0.0);
@@ -103,7 +103,7 @@ fn point_rect_dist(px: f64, py: f64, r: &PadRect) -> f64 {
 /// direction without coming within `clearance` of a foreign-net pad for
 /// `ESCAPE_LEN_MM`? We probe the four cardinal and four diagonal
 /// directions from the pad centre.
-fn can_escape_surface(
+pub(crate) fn can_escape_surface(
     cx: f64,
     cy: f64,
     hw: f64,
@@ -157,7 +157,7 @@ fn can_escape_surface(
 /// Would a fanout via at `(cx,cy)` on `net` keep `clearance` to every
 /// foreign-net pad and to every existing via? (Same-net pad is the pad
 /// we sit in — that's the point.)
-fn fanout_via_fits(
+pub(crate) fn fanout_via_fits(
     cx: f64,
     cy: f64,
     net: &str,
@@ -207,7 +207,7 @@ fn fanout_via_fits(
 /// opposite pad ends so their through-barrels stop blocking each other's
 /// escape lanes. Returns `None` when no offset fits at all.
 #[allow(clippy::too_many_arguments)]
-fn pick_via_position(
+pub(crate) fn pick_via_position(
     cx: f64,
     cy: f64,
     hw: f64,

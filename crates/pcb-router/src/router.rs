@@ -62,6 +62,12 @@ pub struct RouteOptions {
     /// small detour for the big speed win. Orthogonal to clearance
     /// stamping, so it never changes the DRC/CLEAN outcome, only latency.
     pub heuristic_weight: f64,
+    /// Opt-in localized fine-grid escape (Level 2). When `true`, fine-pitch
+    /// pads escape via a short surface stub to a fanned-out breakout via
+    /// (`escape::plan_escapes`) instead of a plain via-in-pad
+    /// (`fanout::plan_fanout`). Default `false` so existing callers/tests
+    /// stay byte-identical; the bench turns it on.
+    pub fine_escape: bool,
 }
 
 /// Per-net rule overrides — fields default to "use the global
@@ -89,6 +95,7 @@ impl Default for RouteOptions {
             schematic: None,
             initial_net_order: None,
             heuristic_weight: 1.0,
+            fine_escape: false,
         }
     }
 }
@@ -276,10 +283,17 @@ const CONGESTION_MAX: u32 = 32;
 /// the first wins and the board is laid back to its first-pass state.
 pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     let nets = collect_nets(board);
-    // Fanout pre-pass: drop a via-in-pad on any fine-pitch pad that can't
-    // escape on its own layer, so the router can reach it from an inner
-    // layer. No-op on 2-layer boards (nowhere to fan out to).
-    let fanout = crate::fanout::plan_fanout(board, opts);
+    // Fanout / escape pre-pass: get fine-pitch pads off the congested
+    // surface so the coarse router can reach them. Default is the plain
+    // via-in-pad fanout; `fine_escape` swaps in the localized fine-grid
+    // escape (short surface stub → fanned-out breakout via) for rows the
+    // via-in-pad can't unbox. No-op on 2-layer boards.
+    let (fanout, escape_stubs) = if opts.fine_escape {
+        let plan = crate::escape::plan_escapes(board, opts);
+        (plan.fanout, plan.stubs)
+    } else {
+        (crate::fanout::plan_fanout(board, opts), Vec::new())
+    };
     if nets.is_empty() {
         board.clear_routing();
         return RouteReport {
@@ -369,7 +383,7 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
 
         let mut work = board.clone();
         work.clear_routing();
-        let report = route_pass(&mut work, &nets, &order, opts, &cost_map, &fanout);
+        let report = route_pass(&mut work, &nets, &order, opts, &cost_map, &fanout, &escape_stubs);
 
         let take_it = match &best {
             None => true,
@@ -451,6 +465,10 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     // search, so they're added once to the final board.
     for via in &fanout.vias {
         board.add_via(via.clone());
+    }
+    // Pre-laid escape stubs (fine-escape mode) are fixed copper too.
+    for stub in &escape_stubs {
+        board.add_trace(stub.clone());
     }
     // Post-passes: auto-stitching vias for pours with a Grid policy,
     // then length matching for nets that ask for it. Length matching
@@ -608,6 +626,7 @@ fn route_pass(
     opts: &RouteOptions,
     cost_map: &CostMap,
     fanout: &crate::fanout::FanoutPlan,
+    escape_stubs: &[Trace],
 ) -> RouteReport {
     let net_id_of: HashMap<String, u32> = order
         .iter()
@@ -662,6 +681,18 @@ fn route_pass(
                     .unwrap_or_else(|| fp.pad_world_center(pad));
                 grid.stamp_drilled_disk(via_pos, fanout_via_copper_cells, id);
             }
+        }
+    }
+    // Pre-laid escape stubs (fine-escape mode): stamp them as their net's
+    // bare trace copper so foreign nets keep clearance and the escaped net
+    // can branch off them. They connect each fine-pitch pad to its breakout
+    // via, which is the DrilledPad landing stamped above.
+    for stub in escape_stubs {
+        if let Some(id) = net_id_lookup(&stub.net) {
+            let a = grid.snap(stub.start, stub.layer);
+            let b = grid.snap(stub.end, stub.layer);
+            let copper = ceil_cells(stub.width.0 / 2, opts.cell.0).max(0);
+            grid.stamp_trace(a, b, id, copper);
         }
     }
     // Via copper radius (in cells): the via's own half-diameter, stamped

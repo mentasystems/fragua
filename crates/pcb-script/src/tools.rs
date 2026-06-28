@@ -3206,6 +3206,9 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         // re-expand, and weighted detours trip the RR&R inefficiency
         // threshold). The knob exists for future open-board experiments.
         heuristic_weight: 1.0,
+        // Localized fine-grid escape stays opt-in; the default fanout path
+        // is unchanged for the interactive tool.
+        fine_escape: false,
     };
 
     // Route on a clone so the lock is released quickly; then push the

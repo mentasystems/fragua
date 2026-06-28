@@ -12,6 +12,7 @@
 //! here is ours. `KiCad` and `FreeRouting` are reference material only.
 
 mod astar;
+mod escape;
 mod fanout;
 mod grid;
 mod length_match;
