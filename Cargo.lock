@@ -2642,6 +2642,7 @@ dependencies = [
  "clap",
  "pcb-core",
  "pcb-drc",
+ "pcb-placer",
  "pcb-router",
  "rand 0.8.6",
  "rayon",

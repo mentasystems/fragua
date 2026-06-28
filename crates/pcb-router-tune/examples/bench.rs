@@ -90,6 +90,10 @@ fn main() {
     let sch = Arc::new(pf.schematic);
 
     eprintln!("(cell={cell_mm}mm via_cost={via_cost} layers={layers})");
+    eprintln!(
+        "(astar_weight={})",
+        std::env::var("ASTAR_WEIGHT").unwrap_or_else(|_| "1.0".into())
+    );
     let _ = Layer::TOP;
     // Same defaults as tool_route_run.
     let opts = RouteOptions {
@@ -106,6 +110,19 @@ fn main() {
         net_overrides: Default::default(),
         schematic: Some(sch.clone()),
         initial_net_order: None,
+        // Greedy-search weight, knob for A/B benchmarking. Default 1.0
+        // (admissible/optimal A*). NOTE: on this multi-source Steiner
+        // router, W>1 REGRESSES wall-time — the power nets seed the whole
+        // partial tree, so an inflated (inconsistent) heuristic re-expands
+        // heavily AND the weighted detours trip the RR&R inefficiency
+        // threshold, forcing extra full passes. Measured: W=1.375 >5×
+        // slower, W=1.15 ~2× slower vs W=1.0 at cell 0.20/4L. Kept as an
+        // opt-in (ASTAR_WEIGHT=…) for open boards with few long nets where
+        // it can help; default OFF.
+        heuristic_weight: std::env::var("ASTAR_WEIGHT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1.0),
     };
 
     let t0 = std::time::Instant::now();

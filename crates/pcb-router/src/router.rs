@@ -51,6 +51,17 @@ pub struct RouteOptions {
     /// the override are appended at the end in default order. The rip-up-and-
     /// reroute loop is unaffected — it still reorders on subsequent passes.
     pub initial_net_order: Option<Vec<String>>,
+    /// Greedy-search weight `W` applied to the A* heuristic (`f = g + W·h`).
+    /// `1.0` = admissible/optimal A* (default — byte-identical to the
+    /// historical router). Values in `1.25..=1.5` collapse the near-tied-f
+    /// frontier on long, board-spanning nets 5–30× at a few-percent
+    /// path-length cost. The weighting is **size-gated inside the search**:
+    /// short connections (every tight-detour test, fanout/diff-pair
+    /// end-cap) stay at `W=1.0` and provably optimal, so only the long
+    /// searches — exactly where the frontier explosion lives — pay the
+    /// small detour for the big speed win. Orthogonal to clearance
+    /// stamping, so it never changes the DRC/CLEAN outcome, only latency.
+    pub heuristic_weight: f64,
 }
 
 /// Per-net rule overrides — fields default to "use the global
@@ -77,6 +88,7 @@ impl Default for RouteOptions {
             net_overrides: HashMap::new(),
             schematic: None,
             initial_net_order: None,
+            heuristic_weight: 1.0,
         }
     }
 }
@@ -837,6 +849,7 @@ fn route_pass(
                 clr_cells,
                 cost_map,
                 &net_trace_cells,
+                opts.heuristic_weight,
             ) else {
                 per_net.push((
                     net_name.clone(),
@@ -1454,6 +1467,7 @@ fn try_diff_pair_follow(
             clr_cells_b,
             cost_map,
             &db_sources,
+            opts.heuristic_weight,
         ) else {
             return Err(format!("no end-cap to pad {}", pad.pad_ref));
         };

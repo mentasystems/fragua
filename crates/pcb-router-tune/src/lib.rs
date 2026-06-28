@@ -130,6 +130,7 @@ impl Genome {
             net_overrides: HashMap::<String, NetOverride>::new(),
             schematic: baseline.schematic.clone(),
             initial_net_order: Some(self.net_order.clone()),
+            heuristic_weight: baseline.heuristic_weight,
         }
     }
 
@@ -581,6 +582,7 @@ fn hill_climb_rotations(
             Some(net_order.clone())
         },
         schematic: baseline_opts.schematic.clone(),
+        heuristic_weight: baseline_opts.heuristic_weight,
     };
 
     let mut current_board = start_board.clone();

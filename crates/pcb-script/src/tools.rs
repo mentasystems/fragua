@@ -3200,6 +3200,12 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         net_overrides,
         schematic: Some(schematic_arc),
         initial_net_order,
+        // Greedy-search weight. 1.0 = admissible/optimal A*. Left at 1.0
+        // because W>1 regresses wall-time on this multi-source Steiner
+        // router (the partial-tree seeding makes an inflated heuristic
+        // re-expand, and weighted detours trip the RR&R inefficiency
+        // threshold). The knob exists for future open-board experiments.
+        heuristic_weight: 1.0,
     };
 
     // Route on a clone so the lock is released quickly; then push the
