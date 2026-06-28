@@ -149,6 +149,26 @@ fn effective_net_rules(opts: &RouteOptions, net: &str) -> (Length, Length) {
     (w, c)
 }
 
+/// Quantization guard (in cells) folded into every search-time clearance
+/// radius. A Theta* any-angle segment can pass up to ~0.5 cell off its
+/// Bresenham raster, and a bare pad/trace cell represents copper up to
+/// ~0.5 cell from the cell point, so the true edge-to-edge distance can
+/// fall up to ~1 cell short of the disk-measured distance. Adding one
+/// cell to the clearance radius absorbs that, keeping the DRC's true-
+/// geometry clearance honest at a coarse grid. (Costs ~1 cell of extra
+/// separation — at cell 0.20 that's 0.20 mm — traded for zero collisions.)
+const CLEARANCE_GUARD_CELLS: i32 = 1;
+
+/// Ceil-divide `num_nm` by `cell_nm` on the underlying nm integers,
+/// returning a cell count. Used to size per-net clearance / copper /
+/// via radii so the discrete grid never undersells a distance (always
+/// rounds the radius up). Callers apply `.max(1)` (clearance / via-safe)
+/// or `.max(0)` (copper) as appropriate.
+fn ceil_cells(num_nm: i64, cell_nm: i64) -> i32 {
+    let raw = (num_nm + cell_nm.max(1) - 1) / cell_nm.max(1);
+    i32::try_from(raw).unwrap_or(1)
+}
+
 /// `(trace_width, clearance, explicit_width)` from the per-net override
 /// map, falling back to the global defaults.
 fn resolve_from_overrides(opts: &RouteOptions, net: &str) -> (Length, Length, bool) {
@@ -565,49 +585,6 @@ fn route_pass(
 
     let region = compute_region(board, opts);
     let mut grid = Grid::with_layers(region, opts.cell, board.stackup.layer_count());
-    // Effective clearance for grid setup = max across the global
-    // default and every per-net override. The grid is built once, so
-    // we have to be conservative — using the strictest clearance
-    // means a class with 0.30 mm clearance never gets less halo than
-    // a default of 0.20 mm.
-    let max_clearance: Length = {
-        let mut c = opts.clearance;
-        for o in opts.net_overrides.values() {
-            if let Some(over) = o.clearance {
-                if over.0 > c.0 {
-                    c = over;
-                }
-            }
-        }
-        if let Some(sch) = opts.schematic.as_ref() {
-            for class in sch.net_classes.values() {
-                if let Some(mm) = class.clearance_mm {
-                    let cand = Length::from_mm(mm);
-                    if cand.0 > c.0 {
-                        c = cand;
-                    }
-                }
-            }
-        }
-        c
-    };
-    // Widest trace any net will lay. The grid models a trace as a
-    // single centre cell, so clearances computed from the centreline
-    // must add the trace's half-width or the copper body silently
-    // overruns into pads/other traces (DRC `TracePadClearance` /
-    // `TraceTraceClearance`). We stamp conservatively at the widest
-    // half-width across every net so no net is ever underserved.
-    let max_trace_w: Length = {
-        let mut w = opts.trace_width;
-        for net_name in nets.keys() {
-            let (nw, _) = effective_net_rules(opts, net_name);
-            if nw.0 > w.0 {
-                w = nw;
-            }
-        }
-        w
-    };
-    let max_half: Length = Length(max_trace_w.0 / 2);
 
     let net_id_lookup = |n: &str| net_id_of.get(n).copied();
     // Layered stamping, broad-to-narrow: bodies block the area each
@@ -615,18 +592,13 @@ fn route_pass(
     // overwrite the cells they actually own so they stay reachable.
     grid.stamp_bodies(board);
     grid.stamp_keepouts(board);
-    // Pad obstacle ring = clearance + the *default* (signal) trace
-    // half-width. Using the widest (power) half-width here would inflate
-    // every pad's keep-out by the power half even when the escaping net
-    // is a thin signal — on fine-pitch parts (QFN, USB-C) that merges
-    // adjacent pads' rings and boxes the pin in, so it can't escape at
-    // all. Signals are the overwhelming majority of pad escapes, so we
-    // size the ring for them; a wide power trace approaching a foreign
-    // pad is rare and still keeps `clearance` (just not the extra power
-    // half). Trace-to-trace clearance still uses the full width-aware
-    // halo below.
-    let pad_half = Length(opts.trace_width.0 / 2);
-    grid.stamp_pads(board, &net_id_lookup, Length(max_clearance.0 + pad_half.0));
+    // Stamp pads BARE (no clearance inflation): a pad cell holds its true
+    // copper extent only. Edge-to-edge clearance to a pad is enforced at
+    // search time by each net's own clearance disk — exact at any grid
+    // pitch and never over-inflating thin signals (which is what used to
+    // box fine-pitch pins in). No-net pads stamp the FOREIGN_NET sentinel
+    // (see `stamp_pads`) so they still demand clearance.
+    grid.stamp_pads(board, &net_id_lookup, Length(0));
     // Fanned-out pads become through-hole landing zones: their via-in-pad
     // ties every layer together, so re-stamp them (plus the clearance
     // ring) as DrilledPad on all layers. The router can then reach them
@@ -654,25 +626,9 @@ fn route_pass(
             }
         }
     }
-    // Halo around freshly-laid traces, in cells:
-    // ceil((clearance + maxWidth) / cell). Two traces separated so
-    // their centrelines are `halo` cells apart keep
-    // `clearance + w_a/2 + w_b/2 <= clearance + maxWidth` between
-    // edges. Round up so the discrete grid never undersells clearance.
-    let halo_cells = {
-        let needed = max_clearance.0 + max_trace_w.0;
-        let raw = (needed + opts.cell.0 - 1) / opts.cell.0;
-        i32::try_from(raw).unwrap_or(1).max(1)
-    };
-    // Via-safety radius: a via's copper extends `via_diameter/2` from
-    // its centre and must keep `clearance` to every other net's copper
-    // on both layers — plus the foreign trace's half-width, same
-    // centreline argument as above.
-    let via_safe_radius = {
-        let raw =
-            (opts.via_diameter.0 / 2 + max_clearance.0 + max_half.0 + opts.cell.0 - 1) / opts.cell.0;
-        i32::try_from(raw).unwrap_or(1).max(1)
-    };
+    // Via copper radius (in cells): the via's own half-diameter, stamped
+    // bare on every layer. Independent of trace width, so computed once.
+    let via_copper_cells = ceil_cells(opts.via_diameter.0 / 2, opts.cell.0).max(0);
 
     let mut per_net = Vec::with_capacity(nets.len());
     let mut total_traces = 0;
@@ -745,8 +701,7 @@ fn route_pass(
                     net_trace_width_early,
                     gap_mm,
                     opts,
-                    halo_cells,
-                    via_safe_radius,
+                    via_copper_cells,
                     cost_map,
                 ) {
                     Ok((segs, vias, length_mm)) => {
@@ -818,9 +773,16 @@ fn route_pass(
         let seed_grid = grid.snap(seed.center, seed.layer);
         let seed_is_fanout = fanout.through_pads.contains(&seed.pad_ref);
 
-        // Resolve this net's trace width: schematic class first, then
-        // per-net override, then the global default.
-        let (net_trace_width, _) = effective_net_rules(opts, net_name);
+        // Resolve this net's trace width and clearance: schematic class
+        // first, then per-net override, then the global default.
+        let (net_trace_width, net_clearance) = effective_net_rules(opts, net_name);
+        // Via-safety radius is per net (via geometry is fixed; only the
+        // net's clearance varies). A via's copper extends `via_diameter/2`
+        // and must keep `clearance` to foreign copper — whose own
+        // half-width is already baked into its bare stamp, so no extra
+        // term is needed here.
+        let via_safe_radius =
+            ceil_cells(opts.via_diameter.0 / 2 + net_clearance.0, opts.cell.0).max(1);
 
         let mut net_segments = 0usize;
         let mut net_vias = 0usize;
@@ -858,6 +820,13 @@ fn route_pass(
             } else {
                 net_trace_width
             };
+            // Per-trace clearance + copper radii, from this spoke's
+            // (possibly necked) width. `clr_cells` drives the search-time
+            // clearance disk; `copper_cells` the bare-copper stamp.
+            let clr_cells = (ceil_cells(net_clearance.0 + spoke_width.0 / 2, opts.cell.0)
+                + CLEARANCE_GUARD_CELLS)
+                .max(1);
+            let copper_cells = ceil_cells(spoke_width.0 / 2, opts.cell.0).max(0);
             let Some(result) = search(
                 &grid,
                 seed_grid,
@@ -865,7 +834,7 @@ fn route_pass(
                 opts.via_cost,
                 spoke_grid,
                 via_safe_radius,
-                halo_cells,
+                clr_cells,
                 cost_map,
                 &net_trace_cells,
             ) else {
@@ -890,7 +859,8 @@ fn route_pass(
                 net_name,
                 net_id,
                 opts,
-                halo_cells,
+                copper_cells,
+                via_copper_cells,
                 spoke_width,
                 Some(spoke.center),
             );
@@ -1002,7 +972,8 @@ fn lay_path(
     net: &str,
     net_id: u32,
     opts: &RouteOptions,
-    halo_cells: i32,
+    copper_cells: i32,
+    via_copper_cells: i32,
     trace_width: Length,
     target_world: Option<Point>,
 ) -> (usize, usize, f64) {
@@ -1025,7 +996,7 @@ fn lay_path(
                     net,
                     net_id,
                     opts,
-                    halo_cells,
+                    copper_cells,
                     trace_width,
                     None,
                 );
@@ -1038,7 +1009,7 @@ fn lay_path(
                 diameter: opts.via_diameter,
                 net: net.to_string(),
             });
-            grid.stamp_via(prev, net_id, halo_cells);
+            grid.stamp_via(prev, net_id, via_copper_cells);
             vias += 1;
             seg_start_idx = i;
         }
@@ -1051,7 +1022,7 @@ fn lay_path(
             net,
             net_id,
             opts,
-            halo_cells,
+            copper_cells,
             trace_width,
             target_world,
         );
@@ -1076,7 +1047,7 @@ fn emit_trace(
     net: &str,
     net_id: u32,
     _opts: &RouteOptions,
-    halo_cells: i32,
+    copper_cells: i32,
     trace_width: Length,
     target_world: Option<Point>,
 ) -> f64 {
@@ -1109,7 +1080,7 @@ fn emit_trace(
             width: trace_width,
             net: net.to_string(),
         };
-        grid.stamp_trace(s, e, net_id, halo_cells);
+        grid.stamp_trace(s, e, net_id, copper_cells);
         board.add_trace(trace);
         total_mm += len_mm;
     }
@@ -1135,10 +1106,14 @@ fn check_diff_corridor_clear(
     t: &Trace,
     self_net: &str,
     partner_net: &str,
+    clearance_mm: f64,
 ) -> Result<(), String> {
     let half_w = t.width.to_mm() / 2.0;
     // Foreign-net traces — except the partner, which we deliberately
-    // want to run alongside.
+    // want to run alongside. Require full edge-to-edge clearance: the
+    // diff-pair offset is only loosened toward the PARTNER, never toward
+    // unrelated copper (otherwise the parallel run hugs foreign traces
+    // and the DRC flags TraceTraceClearance).
     for other in &board.traces {
         if other.net == self_net || other.net == partner_net {
             continue;
@@ -1147,7 +1122,7 @@ fn check_diff_corridor_clear(
             continue;
         }
         let half_other = other.width.to_mm() / 2.0;
-        let min_dist = (half_w + half_other) * 0.5;
+        let min_dist = half_w + half_other + clearance_mm;
         let d = segment_to_segment_distance_mm(t, other);
         if d < min_dist {
             return Err(format!("crosses foreign net `{}`", other.net));
@@ -1168,10 +1143,14 @@ fn check_diff_corridor_clear(
             }
         }
     }
-    // Foreign pads.
+    // Foreign pads — but NOT the partner's: a diff pair runs deliberately
+    // close to its partner, including the partner's breakout pads at the
+    // connector. Only unrelated copper demands full clearance.
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
-            if pad.net.as_deref() == Some(self_net) {
+            if pad.net.as_deref() == Some(self_net)
+                || pad.net.as_deref() == Some(partner_net)
+            {
                 continue;
             }
             if pad.layer != t.layer {
@@ -1189,7 +1168,7 @@ fn check_diff_corridor_clear(
                 t.end.y.to_mm(),
             );
             let pad_r = pw.to_mm().max(ph.to_mm()) / 2.0;
-            if d < pad_r + half_w {
+            if d < pad_r + half_w + clearance_mm {
                 return Err(format!(
                     "crosses pad of net `{}`",
                     pad.net.as_deref().unwrap_or("(no-net)")
@@ -1288,14 +1267,22 @@ fn try_diff_pair_follow(
     width_b: Length,
     gap_mm: f64,
     opts: &RouteOptions,
-    halo_cells: i32,
-    via_safe_radius: i32,
+    via_copper_cells: i32,
     cost_map: &crate::grid::CostMap,
 ) -> Result<(usize, usize, f64), String> {
     use crate::astar::search;
     if b_pads.len() < 2 {
         return Err("less than 2 pads on follower".into());
     }
+    // Per-trace clearance / copper / via-safe radii for net B, from its
+    // own width and clearance — mirrors the spoke loop in `route_pass`.
+    let (_, net_b_clearance) = effective_net_rules(opts, net_b);
+    let clr_cells_b = (ceil_cells(net_b_clearance.0 + width_b.0 / 2, opts.cell.0)
+        + CLEARANCE_GUARD_CELLS)
+        .max(1);
+    let copper_cells_b = ceil_cells(width_b.0 / 2, opts.cell.0).max(0);
+    let via_safe_radius =
+        ceil_cells(opts.via_diameter.0 / 2 + net_b_clearance.0, opts.cell.0).max(1);
     // Pick a layer that the partner actually uses (same layer for both).
     let layer = partner_traces[0].layer;
     if !partner_traces.iter().all(|t| t.layer == layer) {
@@ -1367,15 +1354,16 @@ fn try_diff_pair_follow(
     // by design. We check foreign-net traces (excluding the partner),
     // foreign pads, and keepouts directly.
     let partner_net_str = diff_pair_partner(opts, net_b).unwrap_or_default();
+    let clearance_mm = net_b_clearance.to_mm();
     for t in &emitted {
-        check_diff_corridor_clear(board, t, net_b, &partner_net_str)?;
+        check_diff_corridor_clear(board, t, net_b, &partner_net_str, clearance_mm)?;
     }
     // Commit traces and stamp them on the grid.
     let mut segments = 0usize;
     for t in &emitted {
         let a = grid.snap(t.start, t.layer);
         let b = grid.snap(t.end, t.layer);
-        grid.stamp_trace(a, b, net_id_b, halo_cells);
+        grid.stamp_trace(a, b, net_id_b, copper_cells_b);
         board.add_trace(t.clone());
         segments += 1;
     }
@@ -1422,7 +1410,7 @@ fn try_diff_pair_follow(
                 };
                 let a = grid.snap(stub.start, stub.layer);
                 let b = grid.snap(stub.end, stub.layer);
-                grid.stamp_trace(a, b, net_id_b, halo_cells);
+                grid.stamp_trace(a, b, net_id_b, copper_cells_b);
                 board.add_trace(stub);
                 total_segs += 1;
                 total_len_mm += d;
@@ -1463,7 +1451,7 @@ fn try_diff_pair_follow(
             opts.via_cost,
             spoke_grid,
             via_safe_radius,
-            halo_cells,
+            clr_cells_b,
             cost_map,
             &db_sources,
         ) else {
@@ -1476,7 +1464,8 @@ fn try_diff_pair_follow(
             net_b,
             net_id_b,
             opts,
-            halo_cells,
+            copper_cells_b,
+            via_copper_cells,
             width_b,
             Some(pad.center),
         );

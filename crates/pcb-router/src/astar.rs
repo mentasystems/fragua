@@ -10,7 +10,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
-use crate::grid::{Cell, CostMap, Grid, GridPoint};
+use crate::grid::{self, Cell, CostMap, Grid, GridPoint};
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 struct Node {
@@ -48,10 +48,14 @@ const VIA_IN_PAD_PENALTY: u32 = 40 * SCALE;
 // A via flip is rejected if any foreign-net cell sits within this radius
 // on either layer. Pass 0 to disable the check.
 //
-// `halo`: same value `route_pass` uses when stamping traces. Forwarded
-// into `line_of_sight` so the Theta* shortcut rejects any-angle segments
-// whose swept body would clip a foreign-net cell, not just whose centre
-// line does.
+// `clr_cells`: the searching net's per-trace clearance radius in cells,
+// `ceil((clearance + trace_width/2) / cell)`. A precomputed Euclidean
+// disk of this radius is scanned at every non-via expansion (and along
+// the Theta* LOS shortcut): if any foreign copper sits inside the disk,
+// the move is rejected. Because foreign copper is stamped bare (its own
+// half-width baked into the stamp) and this radius adds clearance plus
+// the searching net's own half-width, centreline-to-centreline ends up at
+// `w_a/2 + w_b/2 + clearance` — exact at any grid pitch.
 //
 // `cost_map` adds per-cell extra bias for negotiated congestion. Raw
 // `cost_map` values are promoted into the scaled cost domain on use.
@@ -81,7 +85,7 @@ pub fn search(
     via_cost: u32,
     target: GridPoint,
     via_safe_radius: i32,
-    halo: i32,
+    clr_cells: i32,
     cost_map: &CostMap,
     // Existing trace cells of `target_net` laid so far (the partial
     // tree). Seeded at g=0 so a later spoke branches off the closest
@@ -98,6 +102,11 @@ pub fn search(
     const SEED_FALLBACK_PENALTY: u32 = 24 * SCALE;
 
     let via_scaled = via_cost.saturating_mul(SCALE);
+
+    // Per-trace clearance disk, computed once: the set of cell offsets
+    // within `clr_cells` of any candidate centreline cell that must be
+    // free of foreign copper. Reused for every expansion and LOS check.
+    let disk = grid::disk_offsets(clr_cells);
 
     // Bound the search to the bounding box of {sources, start, target}
     // inflated by a generous margin. A purely local connection (e.g.
@@ -250,12 +259,8 @@ pub fn search(
             if !grid.in_bounds(next_p) || !in_window(next_p) {
                 continue;
             }
-            let walkable = match grid.get(next_p) {
-                Cell::Free => true,
-                Cell::NetPad(n) | Cell::DrilledPad(n) | Cell::Trace(n) => n == target_net,
-                Cell::Obstacle => false,
-            };
-            if !walkable {
+            let cell = grid.get(next_p);
+            if !grid::walkable(cell, target_net) {
                 continue;
             }
             let is_via = matches!(kind, Move::Via);
@@ -278,6 +283,20 @@ pub fn search(
             {
                 continue;
             }
+            // Per-trace clearance for a planar move: the candidate
+            // centreline cell must keep its clearance disk free of foreign
+            // copper. Landing on our OWN pad is always allowed — the pad's
+            // clearance to its neighbours is fixed placement/fanout
+            // geometry, not the router's to enforce; this is what lets a
+            // net reach a fine-pitch pad whose foreign neighbour sits
+            // inside the disk. (Vias use `via_safe`, not the disk.)
+            if !is_via {
+                let own_pad =
+                    matches!(cell, Cell::NetPad(n) | Cell::DrilledPad(n) if n == target_net);
+                if !own_pad && !grid.clearance_ok_disk(next_p, target_net, &disk) {
+                    continue;
+                }
+            }
 
             // Step-wise A* relaxation as the default proposal.
             let base_step = match kind {
@@ -296,7 +315,7 @@ pub fn search(
             if !is_via {
                 if let Some(&parent) = came_from.get(&p) {
                     if parent.layer == next_p.layer
-                        && grid.line_of_sight(parent, next_p, target_net, halo)
+                        && grid.line_of_sight(parent, next_p, target_net, &disk)
                     {
                         let g_parent = *g_score.get(&parent).unwrap_or(&u32::MAX);
                         if g_parent != u32::MAX {

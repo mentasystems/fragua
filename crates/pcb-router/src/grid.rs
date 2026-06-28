@@ -73,6 +73,53 @@ impl CostMap {
     }
 }
 
+/// Sentinel net id stamped on pads that carry no net (NC pads, mounting
+/// holes, etc.). It is never a real net id (those are `0..order.len()`),
+/// so the per-trace clearance disk treats this copper as foreign to every
+/// net — a trace keeps clearance to a no-net pad — while `walkable` never
+/// lets any net enter it (it is `n == target_net` for nobody). This is
+/// what replaces the old "no-net pad = Obstacle" stamp, which blocked
+/// entry but demanded no clearance.
+pub(crate) const FOREIGN_NET: u32 = u32::MAX;
+
+/// True if `c` is copper belonging to a net other than `target` — the
+/// only thing the per-trace clearance disk treats as a clearance demand.
+/// `Obstacle` is deliberately NOT foreign: component bodies and keepouts
+/// block entry (via `walkable`) but impose no edge-to-edge clearance, so
+/// traces may still run flush to a body edge exactly as before.
+#[inline]
+pub(crate) fn is_foreign(c: Cell, target: u32) -> bool {
+    matches!(c, Cell::NetPad(n) | Cell::DrilledPad(n) | Cell::Trace(n) if n != target)
+}
+
+/// True if `target` may occupy `c`: a free cell or copper of its own net.
+#[inline]
+pub(crate) fn walkable(c: Cell, target: u32) -> bool {
+    match c {
+        Cell::Free => true,
+        Cell::NetPad(n) | Cell::DrilledPad(n) | Cell::Trace(n) => n == target,
+        Cell::Obstacle => false,
+    }
+}
+
+/// All `(dc, dr)` cell offsets inside the Euclidean disk of radius `r`
+/// cells (`dc² + dr² ≤ r²`). Precomputed once per search and reused for
+/// every clearance test, so the radius² comparison isn't redone per
+/// expansion.
+pub(crate) fn disk_offsets(r: i32) -> Vec<(i32, i32)> {
+    let r = r.max(0);
+    let r2 = r * r;
+    let mut v = Vec::new();
+    for dr in -r..=r {
+        for dc in -r..=r {
+            if dc * dc + dr * dr <= r2 {
+                v.push((dc, dr));
+            }
+        }
+    }
+    v
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cell {
     Free,
@@ -199,6 +246,29 @@ impl Grid {
         }
     }
 
+    /// Cell range `(min, max)` (layer 0, only `col`/`row` meaningful)
+    /// that fully COVERS the board-coord rectangle `[lo, hi]`: the low
+    /// corner is floored and the high corner ceiled to cell boundaries.
+    /// Unlike `snap` (nearest), this never under-covers the rectangle, so
+    /// a bare pad stamp can't leave a sliver of true copper outside the
+    /// stamped cells.
+    pub(crate) fn cover_rect_cells(&self, lo: Point, hi: Point) -> (GridPoint, GridPoint) {
+        let cell = self.cell_nm.max(1) as f64;
+        let fdiv = |num: i64| -> i32 { (num as f64 / cell).floor() as i32 };
+        let cdiv = |num: i64| -> i32 { (num as f64 / cell).ceil() as i32 };
+        let lo = GridPoint {
+            layer: 0,
+            col: fdiv(lo.x.0 - self.origin_nm.0),
+            row: fdiv(lo.y.0 - self.origin_nm.1),
+        };
+        let hi = GridPoint {
+            layer: 0,
+            col: cdiv(hi.x.0 - self.origin_nm.0),
+            row: cdiv(hi.y.0 - self.origin_nm.1),
+        };
+        (lo, hi)
+    }
+
     /// Convert a grid point back to a board-coord `Point`.
     pub fn unsnap(&self, p: GridPoint) -> Point {
         Point::new(
@@ -279,13 +349,23 @@ impl Grid {
                 let half_h = ph / 2 + clearance;
                 let min = center.translate(-half_w, -half_h);
                 let max = center.translate(half_w, half_h);
-                let cmin = self.snap(min, pad.layer);
-                let cmax = self.snap(max, pad.layer);
+                // Round the stamped rect OUTWARD (floor the min corner,
+                // ceil the max corner) so the stamped copper always fully
+                // covers the true pad rectangle. Snapping to the NEAREST
+                // cell could shave up to half a cell off each edge, which —
+                // now that pads are stamped bare and clearance is enforced
+                // by the search disk against these cells — silently let a
+                // trace sit up to half a cell too close to the real pad
+                // edge (the sub-cell TracePadClearance / NetShort the bare
+                // stamp would otherwise produce on fine-pitch connectors).
+                let (cmin, cmax) = self.cover_rect_cells(min, max);
                 let net = pad.net.as_deref().and_then(net_id_of);
                 let cell_for_net = match (net, is_th) {
                     (Some(id), true) => Cell::DrilledPad(id),
                     (Some(id), false) => Cell::NetPad(id),
-                    (None, _) => Cell::Obstacle,
+                    // No-net pad: stamp the sentinel so the clearance disk
+                    // still keeps traces off it, while nobody may enter it.
+                    (None, _) => Cell::NetPad(FOREIGN_NET),
                 };
                 // TH pads punch every copper layer — stamp the copper
                 // region on the outer two (vias still only go
@@ -408,39 +488,56 @@ impl Grid {
             .collect()
     }
 
-    /// Mark the path of an existing trace as `Trace(net)`, plus a
-    /// `halo` of cells around it on the same layer so foreign nets
-    /// can't run flush against this one. Works for arbitrary
-    /// straight segments (H/V/diagonal/any angle) via Bresenham.
-    pub fn stamp_trace(&mut self, a: GridPoint, b: GridPoint, net: u32, halo: i32) {
+    /// Stamp the bare copper of a trace `a..b`: each Bresenham cell, plus a
+    /// disk of radius `copper` cells around it, becomes `Trace(net)` — the
+    /// trace's own half-width and nothing more. No clearance halo is
+    /// stamped; edge-to-edge clearance is enforced at search time by the
+    /// per-trace clearance disk. Works for any-angle segments via Bresenham.
+    pub fn stamp_trace(&mut self, a: GridPoint, b: GridPoint, net: u32, copper: i32) {
         debug_assert_eq!(a.layer, b.layer);
         let layer = a.layer;
         for (c, r) in bresenham(a.col, a.row, b.col, b.row) {
-            self.stamp_cell_with_halo(layer, c, r, net, halo);
+            self.stamp_cell_copper(layer, c, r, net, copper);
         }
     }
 
-    /// True if the swept halo of every Bresenham cell between `a` and `b`
-    /// (inclusive of both endpoints) is walkable for `target_net`. The
-    /// `halo` parameter mirrors `stamp_cell_with_halo`: each centre cell
-    /// is checked along with the (2*halo+1)² box around it, so the LOS
-    /// shortcut never lets a trace pass through cells the trace's own
-    /// halo would otherwise overlap with foreign copper.
-    /// Requires `a.layer == b.layer`.
-    pub fn line_of_sight(&self, a: GridPoint, b: GridPoint, target_net: u32, halo: i32) -> bool {
+    /// True if no foreign copper sits inside the precomputed clearance
+    /// `disk` centred on `p` (same layer). The disk is the set of cell
+    /// offsets within the searching net's clearance radius; any foreign
+    /// `NetPad`/`DrilledPad`/`Trace` inside it rejects the move. Bodies
+    /// (`Obstacle`) are ignored here — they only block entry.
+    pub(crate) fn clearance_ok_disk(&self, p: GridPoint, target: u32, disk: &[(i32, i32)]) -> bool {
+        for &(dc, dr) in disk {
+            let gp = GridPoint { layer: p.layer, col: p.col + dc, row: p.row + dr };
+            if is_foreign(self.get(gp), target) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// True if every Bresenham cell of the straight segment `a..b`
+    /// (inclusive) is enterable by `target_net` AND keeps the per-trace
+    /// clearance `disk` clear of foreign copper. This is the LOS test the
+    /// Theta* any-angle shortcut uses: the centre cell must be walkable
+    /// (catches `Obstacle`, which the disk ignores) and its clearance disk
+    /// must hold no foreign copper. Requires `a.layer == b.layer`.
+    pub(crate) fn line_of_sight(
+        &self,
+        a: GridPoint,
+        b: GridPoint,
+        target_net: u32,
+        disk: &[(i32, i32)],
+    ) -> bool {
         debug_assert_eq!(a.layer, b.layer);
         let layer = a.layer;
         for (c, r) in bresenham(a.col, a.row, b.col, b.row) {
-            for dr in -halo..=halo {
-                for dc in -halo..=halo {
-                    let gp = GridPoint { layer, col: c + dc, row: r + dr };
-                    match self.get(gp) {
-                        Cell::Free => {}
-                        Cell::NetPad(n) | Cell::DrilledPad(n) | Cell::Trace(n)
-                            if n == target_net => {}
-                        _ => return false,
-                    }
-                }
+            let p = GridPoint { layer, col: c, row: r };
+            if !walkable(self.get(p), target_net) {
+                return false;
+            }
+            if !self.clearance_ok_disk(p, target_net, disk) {
+                return false;
             }
         }
         true
@@ -468,13 +565,14 @@ impl Grid {
         sum
     }
 
-    /// Mark a via and its halo on every copper layer. Vias punch
-    /// through (top↔bottom only in this iteration), so they need
-    /// clearance on every copper layer; otherwise a trace on the
-    /// opposite layer might come right up against the via pad.
-    pub fn stamp_via(&mut self, p: GridPoint, net: u32, halo: i32) {
+    /// Stamp a via's bare copper disk (radius `copper` cells) on every
+    /// copper layer — the via barrel shorts all layers, so its copper
+    /// blocks later nets' clearance disks on every layer. No clearance
+    /// halo: separation to the via is enforced at search time like any
+    /// other copper.
+    pub fn stamp_via(&mut self, p: GridPoint, net: u32, copper: i32) {
         for layer in 0..self.layer_count {
-            self.stamp_cell_with_halo(layer, p.col, p.row, net, halo);
+            self.stamp_cell_copper(layer, p.col, p.row, net, copper);
         }
     }
 
@@ -489,33 +587,22 @@ impl Grid {
         }
     }
 
-    fn stamp_cell_with_halo(&mut self, layer: u8, c: i32, r: i32, net: u32, halo: i32) {
-        // Centre cell: Trace(net) — walkable by the same net so star
-        // routes can share path along the trunk.
-        let centre = GridPoint {
-            layer,
-            col: c,
-            row: r,
-        };
-        if matches!(self.get(centre), Cell::Free) {
-            self.set(centre, Cell::Trace(net));
-        }
-        // Halo cells: Obstacle — blocked for *every* net, including
-        // the trace's own. This stops same-net parallel spokes from
-        // running in cells adjacent to the trunk (which used to make
-        // pairs of blue lines look glued together).
-        for dr in -halo..=halo {
-            for dc in -halo..=halo {
-                if dr == 0 && dc == 0 {
+    /// Stamp the bare copper of a single trace/via cell: the centre cell
+    /// plus a Euclidean disk of radius `copper` cells become `Trace(net)`.
+    /// Only `Free` cells are overwritten — pads and foreign copper are
+    /// never clobbered. This represents the feature's own copper
+    /// half-width; all edge-to-edge clearance is enforced at search time.
+    fn stamp_cell_copper(&mut self, layer: u8, c: i32, r: i32, net: u32, copper: i32) {
+        let copper = copper.max(0);
+        let r2 = copper * copper;
+        for dr in -copper..=copper {
+            for dc in -copper..=copper {
+                if dc * dc + dr * dr > r2 {
                     continue;
                 }
-                let gp = GridPoint {
-                    layer,
-                    col: c + dc,
-                    row: r + dr,
-                };
+                let gp = GridPoint { layer, col: c + dc, row: r + dr };
                 if matches!(self.get(gp), Cell::Free) {
-                    self.set(gp, Cell::Obstacle);
+                    self.set(gp, Cell::Trace(net));
                 }
             }
         }
