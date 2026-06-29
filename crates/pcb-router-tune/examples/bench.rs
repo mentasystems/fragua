@@ -58,13 +58,21 @@ fn main() {
         // connectors (J1/J2 define the board I/O and stay put). Default
         // PlaceOptions enforce a 2 mm body-to-body gap, which is what
         // un-crowds the pads enough for honest-clearance routing.
+        //
+        // `footprints_in_order()` (NOT `footprints.values()`) — the latter
+        // iterates a HashMap, so `movable`'s order, hence the seeded
+        // annealer's per-iteration footprint pick, varied run-to-run and
+        // the whole placement (and SCORE) was non-deterministic. Ordered
+        // iteration makes a fixed seed reproducible.
         let movable: Vec<String> = board
-            .footprints
-            .values()
+            .footprints_in_order()
             .map(|f| f.reference.clone())
             .filter(|r| r != "J1" && r != "J2")
             .collect();
-        let opts = pcb_placer::PlaceOptions { seed: 7, ..Default::default() };
+        // Placer seed from the documented `PSEED` env var (the harness
+        // previously hard-coded 7 and ignored PSEED entirely).
+        let seed: u64 = std::env::var("PSEED").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
+        let opts = pcb_placer::PlaceOptions { seed, ..Default::default() };
         let margins: pcb_placer::MarginMap = Default::default();
         match pcb_placer::place(&mut board, &movable, &opts, &margins) {
             Ok(rep) => {
