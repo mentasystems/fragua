@@ -62,12 +62,6 @@ pub struct RouteOptions {
     /// small detour for the big speed win. Orthogonal to clearance
     /// stamping, so it never changes the DRC/CLEAN outcome, only latency.
     pub heuristic_weight: f64,
-    /// Opt-in localized fine-grid escape (Level 2). When `true`, fine-pitch
-    /// pads escape via a short surface stub to a fanned-out breakout via
-    /// (`escape::plan_escapes`) instead of a plain via-in-pad
-    /// (`fanout::plan_fanout`). Default `false` so existing callers/tests
-    /// stay byte-identical; the bench turns it on.
-    pub fine_escape: bool,
 }
 
 /// Per-net rule overrides — fields default to "use the global
@@ -95,7 +89,6 @@ impl Default for RouteOptions {
             schematic: None,
             initial_net_order: None,
             heuristic_weight: 1.0,
-            fine_escape: false,
         }
     }
 }
@@ -284,16 +277,13 @@ const CONGESTION_MAX: u32 = 32;
 pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     let nets = collect_nets(board);
     // Fanout / escape pre-pass: get fine-pitch pads off the congested
-    // surface so the coarse router can reach them. Default is the plain
-    // via-in-pad fanout; `fine_escape` swaps in the localized fine-grid
-    // escape (short surface stub → fanned-out breakout via) for rows the
-    // via-in-pad can't unbox. No-op on 2-layer boards.
-    let (fanout, escape_stubs) = if opts.fine_escape {
-        let plan = crate::escape::plan_escapes(board, opts);
-        (plan.fanout, plan.stubs)
-    } else {
-        (crate::fanout::plan_fanout(board, opts), Vec::new())
-    };
+    // surface so the coarse router can reach them. The localized fine-grid
+    // escape (short surface stub → fanned-out breakout via) is the standard
+    // path; it internally falls back to a plain via-in-pad fanout for parts
+    // that don't need a fine escape (and for coarse cell pitches where the
+    // breakout spread can't fit). No-op on 2-layer boards.
+    let plan = crate::escape::plan_escapes(board, opts);
+    let (fanout, escape_stubs) = (plan.fanout, plan.stubs);
     if nets.is_empty() {
         board.clear_routing();
         return RouteReport {

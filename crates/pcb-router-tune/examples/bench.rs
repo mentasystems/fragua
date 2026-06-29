@@ -125,7 +125,6 @@ fn main() {
             .unwrap_or(1.0),
         // Localized fine-grid escape (Level 2). On by default in the bench;
         // set FINE_ESCAPE=0 to compare against the plain via-in-pad fanout.
-        fine_escape: std::env::var("FINE_ESCAPE").map(|v| v != "0").unwrap_or(true),
     };
 
     let t0 = std::time::Instant::now();

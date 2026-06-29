@@ -131,7 +131,6 @@ impl Genome {
             schematic: baseline.schematic.clone(),
             initial_net_order: Some(self.net_order.clone()),
             heuristic_weight: baseline.heuristic_weight,
-            fine_escape: baseline.fine_escape,
         }
     }
 
@@ -584,7 +583,6 @@ fn hill_climb_rotations(
         },
         schematic: baseline_opts.schematic.clone(),
         heuristic_weight: baseline_opts.heuristic_weight,
-        fine_escape: baseline_opts.fine_escape,
     };
 
     let mut current_board = start_board.clone();

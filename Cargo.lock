@@ -1061,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "fragua"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "pcb-core",
@@ -2559,7 +2559,7 @@ dependencies = [
 
 [[package]]
 name = "pcb-core"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2569,7 +2569,7 @@ dependencies = [
 
 [[package]]
 name = "pcb-drc"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "pcb-core",
  "serde",
@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "pcb-erc"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "pcb-core",
  "serde",
@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "pcb-fab"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "pcb-core",
  "pcb-drc",
@@ -2597,14 +2597,14 @@ dependencies = [
 
 [[package]]
 name = "pcb-gerber"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "pcb-core",
 ]
 
 [[package]]
 name = "pcb-odb"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "flate2",
  "pcb-core",
@@ -2612,14 +2612,14 @@ dependencies = [
 
 [[package]]
 name = "pcb-placer"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "pcb-core",
 ]
 
 [[package]]
 name = "pcb-render"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "pcb-core",
  "resvg",
@@ -2629,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "pcb-router"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "pcb-core",
  "serde_json",
@@ -2637,7 +2637,7 @@ dependencies = [
 
 [[package]]
 name = "pcb-router-tune"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "pcb-core",
@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "pcb-script"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "pcb-core",

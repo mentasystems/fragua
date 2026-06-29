@@ -2972,7 +2972,7 @@ where
 }
 
 fn default_cell() -> f64 {
-    0.25
+    0.20
 }
 fn default_trace_w() -> f64 {
     0.25
@@ -3208,7 +3208,6 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         heuristic_weight: 1.0,
         // Localized fine-grid escape stays opt-in; the default fanout path
         // is unchanged for the interactive tool.
-        fine_escape: false,
     };
 
     // Route on a clone so the lock is released quickly; then push the
