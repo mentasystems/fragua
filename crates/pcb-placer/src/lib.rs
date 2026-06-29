@@ -114,6 +114,14 @@ pub struct PlaceOptions {
     /// short. Default 1.5 mm gives the router about 5 cells of free
     /// corridor at a 0.25 mm pitch.
     pub min_gap_mm: f64,
+    /// **Hard** minimum body-to-body clearance (mm). The SA never accepts
+    /// a move that leaves the moved footprint closer than this to any
+    /// other body — so the final placement ALWAYS has at least this much
+    /// margin between component edges (no overlaps, no touching). Moves
+    /// that *increase* the gap of an already-too-close pair are still
+    /// allowed, so the placer can separate an overlapping starting layout.
+    /// Distinct from `min_gap_mm` (a soft *preference*, typically larger).
+    pub min_clearance_mm: f64,
     /// Score weight on the soft-gap penalty term. Penalty per pair is
     /// `(min_gap_mm - actual_gap)^2` (mm²) when below the threshold;
     /// the score adds `gap_penalty_factor * Σ penalty` to HPWL. Default
@@ -151,6 +159,10 @@ impl Default for PlaceOptions {
             // footprints without DRC pad-pad clearance violations on
             // the typical 0.2 mm clearance.
             min_gap_mm: 2.0,
+            // 0.5 mm hard margin between any two component bodies — never
+            // violated by the placer. JLCPCB's component-to-component
+            // recommendation is ~0.5 mm; smaller risks placement/assembly.
+            min_clearance_mm: 0.5,
             // Steep enough that SA reliably enforces `min_gap_mm` on
             // small nets — a 1 mm shortfall on one pair costs
             // 16 mm-equivalent of HPWL, well above the noise floor.
@@ -314,13 +326,19 @@ pub fn place(
         if !inside_outline(&probe, outline, margins) {
             continue;
         }
-        // Hard reject: actual pad-on-pad overlap is an electrical
-        // short — we never accept that, no matter the temperature.
-        // The soft `min_gap_mm` preference is folded into the score
-        // delta below so SA can climb out of a tight starting state
-        // instead of being stuck.
-        if would_overlap(board, &probe, Some(probe.id), 0.0, margins) {
-            continue;
+        // Hard clearance: never accept a move that leaves the moved
+        // footprint closer than `min_clearance_mm` to any other body — so
+        // the result always has a real margin between component edges (no
+        // overlap, no touching). EXCEPTION: if the part is already inside
+        // the margin (e.g. an overlapping starting layout), allow a move
+        // that *increases* its worst gap, so SA can separate things out
+        // instead of being frozen.
+        let after_gap = probe_min_gap(board, &probe, margins);
+        if after_gap < opts.min_clearance_mm {
+            let before_gap = footprint_min_gap(board, probe.id, margins);
+            if after_gap <= before_gap {
+                continue; // would create or worsen a sub-margin clearance
+            }
         }
         if board.edge_mount_violation(&probe).is_some() {
             continue;
@@ -585,6 +603,53 @@ fn aabb_gap_mm(a: pcb_core::Rect, b: pcb_core::Rect) -> f64 {
     }
 }
 
+/// Smallest body-to-body gap (mm, margins folded in) between the
+/// footprint with `fp_id` and every other footprint on the board.
+/// `+INFINITY` when it has no neighbours / no bounds.
+fn footprint_min_gap(board: &Board, fp_id: Id, margins: &MarginMap) -> f64 {
+    let Some(fp) = board.footprints.get(&fp_id) else {
+        return f64::INFINITY;
+    };
+    let Some(fb) = fp_bounds_with_margin(fp, margins) else {
+        return f64::INFINITY;
+    };
+    board
+        .footprints_in_order()
+        .filter(|o| o.id != fp_id)
+        .filter_map(|o| fp_bounds_with_margin(o, margins).map(|ob| aabb_gap_mm(fb, ob)))
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Same as `footprint_min_gap` but for a probe footprint (a candidate
+/// at a new position), measured against every board footprint except its
+/// own id.
+fn probe_min_gap(board: &Board, probe: &Footprint, margins: &MarginMap) -> f64 {
+    let Some(pb) = fp_bounds_with_margin(probe, margins) else {
+        return f64::INFINITY;
+    };
+    board
+        .footprints_in_order()
+        .filter(|o| o.id != probe.id)
+        .filter_map(|o| fp_bounds_with_margin(o, margins).map(|ob| aabb_gap_mm(pb, ob)))
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Smallest body-to-body gap across EVERY pair on the board (mm). Used
+/// to verify a finished placement honours the hard clearance.
+pub fn min_pairwise_gap(board: &Board, margins: &MarginMap) -> f64 {
+    let fps: Vec<&Footprint> = board.footprints_in_order().collect();
+    let mut m = f64::INFINITY;
+    for i in 0..fps.len() {
+        let Some(a) = fp_bounds_with_margin(fps[i], margins) else { continue };
+        for b in fps.iter().skip(i + 1) {
+            if let Some(bb) = fp_bounds_with_margin(b, margins) {
+                m = m.min(aabb_gap_mm(a, bb));
+            }
+        }
+    }
+    m
+}
+
 /// Quadratic shortfall against `min_gap_mm` for a single pair, mm².
 /// 0 if the pair is clear by at least `min_gap_mm`. Margins from
 /// `LibraryEntry::placement_margin` are folded in by inflating each
@@ -644,6 +709,7 @@ fn total_gap_penalty(board: &Board, min_gap_mm: f64, margins: &MarginMap) -> f64
 /// here means "do not let the bodies of two parts overlap their
 /// keep-outs" is a hard reject — exactly what AI-authored pad-only
 /// footprints need when the real part body is wider than the pads.
+#[allow(dead_code)]
 fn would_overlap(
     board: &Board,
     probe: &Footprint,

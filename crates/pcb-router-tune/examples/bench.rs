@@ -67,10 +67,14 @@ fn main() {
         let opts = pcb_placer::PlaceOptions { seed: 7, ..Default::default() };
         let margins: pcb_placer::MarginMap = Default::default();
         match pcb_placer::place(&mut board, &movable, &opts, &margins) {
-            Ok(rep) => eprintln!(
-                "(auto-place: HPWL {:.0}->{:.0} mm, congestion {:.0}->{:.0}, moved {})",
-                rep.initial_hpwl_mm, rep.final_hpwl_mm, rep.initial_congestion, rep.final_congestion, rep.moved.len()
-            ),
+            Ok(rep) => {
+                let mg = pcb_placer::min_pairwise_gap(&board, &margins);
+                eprintln!(
+                    "(auto-place: HPWL {:.0}->{:.0} mm, congestion {:.0}->{:.0}, moved {}; MIN body gap={:.3}mm {})",
+                    rep.initial_hpwl_mm, rep.final_hpwl_mm, rep.initial_congestion, rep.final_congestion, rep.moved.len(),
+                    mg, if mg >= opts.min_clearance_mm - 1e-6 { "OK" } else { "VIOLATION" }
+                );
+            }
             Err(e) => eprintln!("(auto-place FAILED: {e})"),
         }
     }
