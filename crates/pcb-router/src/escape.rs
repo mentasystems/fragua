@@ -97,7 +97,10 @@ const FINE_ESCAPE_MAX_CELL_MM: f64 = 0.22;
 const POWER_NEIGHBOUR_MM: f64 = 0.62;
 
 pub fn plan_escapes(board: &Board, opts: &RouteOptions) -> EscapePlan {
-    let mut plan = EscapePlan { fanout: FanoutPlan::default(), stubs: Vec::new() };
+    let mut plan = EscapePlan {
+        fanout: FanoutPlan::default(),
+        stubs: Vec::new(),
+    };
     if board.stackup.layer_count() < 3 {
         return plan;
     }
@@ -131,7 +134,9 @@ pub fn plan_escapes(board: &Board, opts: &RouteOptions) -> EscapePlan {
         // fanout pass)?
         let mut targets: Vec<EscapePad> = Vec::new();
         for pad in &fp.pads {
-            let Some(net) = pad.net.as_deref() else { continue };
+            let Some(net) = pad.net.as_deref() else {
+                continue;
+            };
             if pad.drill.is_some() {
                 continue;
             }
@@ -199,7 +204,11 @@ pub fn plan_escapes(board: &Board, opts: &RouteOptions) -> EscapePlan {
                 let (px, py) = (-dy, dx);
                 // side key: which end of the long axis (groups the two
                 // rows of a connector / the four edges of a QFN).
-                let side = if long_x { (t.cx - fp_cx).signum() } else { (t.cy - fp_cy).signum() };
+                let side = if long_x {
+                    (t.cx - fp_cx).signum()
+                } else {
+                    (t.cy - fp_cy).signum()
+                };
                 let group = (long_x, side as i64 as i32);
                 PadInfo {
                     idx: i,
@@ -223,11 +232,13 @@ pub fn plan_escapes(board: &Board, opts: &RouteOptions) -> EscapePlan {
         for members in groups.values() {
             let mut ms = members.clone();
             ms.sort_by(|&a, &b| {
-                infos[a].perp_coord.partial_cmp(&infos[b].perp_coord).unwrap()
+                infos[a]
+                    .perp_coord
+                    .partial_cmp(&infos[b].perp_coord)
+                    .unwrap()
             });
             let n = ms.len();
-            let center: f64 =
-                ms.iter().map(|&k| infos[k].perp_coord).sum::<f64>() / n as f64;
+            let center: f64 = ms.iter().map(|&k| infos[k].perp_coord).sum::<f64>() / n as f64;
             for (rank, &k) in ms.iter().enumerate() {
                 let off = (rank as f64 - (n as f64 - 1.0) / 2.0) * spread;
                 fan_target.insert(k, center + off);
@@ -262,7 +273,9 @@ pub fn plan_escapes(board: &Board, opts: &RouteOptions) -> EscapePlan {
                 work.vias.push(via.clone());
                 plan.fanout.vias.push(via);
                 plan.fanout.through_pads.insert(esc.pad_ref.clone());
-                plan.fanout.via_positions.insert(esc.pad_ref.clone(), esc.breakout);
+                plan.fanout
+                    .via_positions
+                    .insert(esc.pad_ref.clone(), esc.breakout);
                 // Stamp the laid stub on the local grid as own copper so a
                 // later same-tile stub treats it as an obstacle.
                 if let Some(&id) = net_ids.get(&esc.net) {
@@ -273,8 +286,7 @@ pub fn plan_escapes(board: &Board, opts: &RouteOptions) -> EscapePlan {
                 // Fall back to the staggered via-in-pad (legacy fanout
                 // behaviour) — never worse than before.
                 if let Some((vx, vy)) = fanout::pick_via_position(
-                    t.cx, t.cy, t.hw, t.hh, fp_cx, fp_cy, &t.net, via_r, clearance, &foreign,
-                    &work,
+                    t.cx, t.cy, t.hw, t.hh, fp_cx, fp_cy, &t.net, via_r, clearance, &foreign, &work,
                 ) {
                     let pos = Point::new(Length::from_mm(vx), Length::from_mm(vy));
                     let via = Via {
@@ -346,7 +358,6 @@ fn route_one(
     opts: &RouteOptions,
 ) -> Option<Escape> {
     let target_id = *net_ids.get(&t.net)?;
-    let (dx, dy) = info.dir;
     let (px, py) = info.perp;
     let width = opts.trace_width.to_mm();
     // Permissive fine-grid clearance: floor (so the truly-valid tight gap
@@ -362,61 +373,70 @@ fn route_one(
     // if the via won't fit. First clean one wins.
     let base_depth = info.half_len + BREAKOUT_DEPTH_MM;
     let perp_nudges = [0.0, 0.15, -0.15, 0.3, -0.3];
-    for ddepth in DEPTH_STEPS {
-        let depth = base_depth + ddepth;
-        for dn in perp_nudges {
-            let target_perp = want_perp + dn;
-            // Breakout = pad centre + dir*depth shifted to the fanned perp.
-            let shift = target_perp - (px * t.cx + py * t.cy);
-            let bx = t.cx + dx * depth + px * shift;
-            let by = t.cy + dy * depth + py * shift;
-            // Via must fit (exact) against foreign pads, existing vias, edge.
-            if !fanout::fanout_via_fits(bx, by, &t.net, via_r, clearance, foreign, work) {
-                continue;
+    // Interior direction first (inline connectors: interior IS the open
+    // inter-row channel — USB-C byte-for-byte unchanged), then exterior
+    // (centre-thermal QFNs whose interior is blocked by the exposed pad).
+    // First fitting + routable + validated breakout wins; if neither
+    // direction yields one, the caller falls back to via-in-pad.
+    let (idx, idy) = info.dir;
+    for (dx, dy) in [(idx, idy), (-idx, -idy)] {
+        for ddepth in DEPTH_STEPS {
+            let depth = base_depth + ddepth;
+            for dn in perp_nudges {
+                let target_perp = want_perp + dn;
+                // Breakout = pad centre + dir*depth shifted to the fanned perp.
+                let shift = target_perp - (px * t.cx + py * t.cy);
+                let bx = t.cx + dx * depth + px * shift;
+                let by = t.cy + dy * depth + py * shift;
+                // Via must fit (exact) against foreign pads, existing vias, edge.
+                if !fanout::fanout_via_fits(bx, by, &t.net, via_r, clearance, foreign, work) {
+                    continue;
+                }
+                let breakout = Point::new(Length::from_mm(bx), Length::from_mm(by));
+                // Stamp the breakout as a landing pad on the fine grid so the
+                // search can terminate on it, then route pad → breakout.
+                let via_copper = ((via_r / cell).round() as i32).max(1);
+                grid.stamp_drilled_disk(breakout, via_copper, target_id);
+                let start = grid.snap(t.center, t.layer);
+                let target = grid.snap(breakout, t.layer);
+                let res = search(
+                    grid,
+                    start,
+                    target_id,
+                    huge_via_cost,
+                    target,
+                    via_safe,
+                    clr_cells,
+                    &cost_map,
+                    &[],
+                    1.0,
+                );
+                // Un-stamp the trial landing (set back to free) regardless of
+                // outcome; an accepted stub re-stamps its own copper.
+                unstamp_disk(grid, breakout, via_copper);
+                let Some(res) = res else { continue };
+                // Build the world polyline, exact endpoints at pad centre and
+                // breakout.
+                let mut pts: Vec<Point> = res.path.iter().map(|gp| grid.unsnap(*gp)).collect();
+                if pts.len() < 2 {
+                    continue;
+                }
+                *pts.first_mut().unwrap() = t.center;
+                *pts.last_mut().unwrap() = breakout;
+                simplify_collinear(&mut pts);
+                if !validate_polyline(
+                    &pts, t.layer, &t.net, width, foreign, work, accepted, clearance,
+                ) {
+                    continue;
+                }
+                return Some(Escape {
+                    pad_ref: t.pad_ref.clone(),
+                    net: t.net.clone(),
+                    layer: t.layer,
+                    points: pts,
+                    breakout,
+                });
             }
-            let breakout = Point::new(Length::from_mm(bx), Length::from_mm(by));
-            // Stamp the breakout as a landing pad on the fine grid so the
-            // search can terminate on it, then route pad → breakout.
-            let via_copper = ((via_r / cell).round() as i32).max(1);
-            grid.stamp_drilled_disk(breakout, via_copper, target_id);
-            let start = grid.snap(t.center, t.layer);
-            let target = grid.snap(breakout, t.layer);
-            let res = search(
-                grid,
-                start,
-                target_id,
-                huge_via_cost,
-                target,
-                via_safe,
-                clr_cells,
-                &cost_map,
-                &[],
-                1.0,
-            );
-            // Un-stamp the trial landing (set back to free) regardless of
-            // outcome; an accepted stub re-stamps its own copper.
-            unstamp_disk(grid, breakout, via_copper);
-            let Some(res) = res else { continue };
-            // Build the world polyline, exact endpoints at pad centre and
-            // breakout.
-            let mut pts: Vec<Point> = res.path.iter().map(|gp| grid.unsnap(*gp)).collect();
-            if pts.len() < 2 {
-                continue;
-            }
-            *pts.first_mut().unwrap() = t.center;
-            *pts.last_mut().unwrap() = breakout;
-            simplify_collinear(&mut pts);
-            if !validate_polyline(&pts, t.layer, &t.net, width, foreign, work, accepted, clearance)
-            {
-                continue;
-            }
-            return Some(Escape {
-                pad_ref: t.pad_ref.clone(),
-                net: t.net.clone(),
-                layer: t.layer,
-                points: pts,
-                breakout,
-            });
         }
     }
     None
@@ -461,9 +481,8 @@ fn validate_polyline(
                 if v.net == net {
                     continue;
                 }
-                let d = ((sx - v.position.x.to_mm()).powi(2)
-                    + (sy - v.position.y.to_mm()).powi(2))
-                .sqrt();
+                let d = ((sx - v.position.x.to_mm()).powi(2) + (sy - v.position.y.to_mm()).powi(2))
+                    .sqrt();
                 if d < half + v.diameter.to_mm() / 2.0 + clearance - 1e-9 {
                     return false;
                 }
@@ -536,7 +555,13 @@ fn simplify_collinear(pts: &mut Vec<Point>) {
     *pts = out;
 }
 
-fn stamp_polyline(grid: &mut Grid, pts: &[Point], layer: CopperLayer, id: u32, opts: &RouteOptions) {
+fn stamp_polyline(
+    grid: &mut Grid,
+    pts: &[Point],
+    layer: CopperLayer,
+    id: u32,
+    opts: &RouteOptions,
+) {
     let copper = (((opts.trace_width.to_mm() / 2.0) / FINE_CELL_MM).round() as i32).max(0);
     for w in pts.windows(2) {
         let a = grid.snap(w[0], layer);
@@ -558,7 +583,11 @@ fn unstamp_disk(grid: &mut Grid, center: Point, copper: i32) {
                 if dc * dc + dr * dr > r2 {
                     continue;
                 }
-                let p = crate::grid::GridPoint { layer, col: gp.col + dc, row: gp.row + dr };
+                let p = crate::grid::GridPoint {
+                    layer,
+                    col: gp.col + dc,
+                    row: gp.row + dr,
+                };
                 if grid.in_bounds(p) && matches!(grid.get(p), Cell::DrilledPad(_)) {
                     grid.set(p, Cell::Free);
                 }
@@ -582,7 +611,10 @@ fn net_id_map(board: &Board) -> HashMap<String, u32> {
     }
     let mut v: Vec<String> = names.into_iter().collect();
     v.sort();
-    v.into_iter().enumerate().map(|(i, n)| (n, i as u32)).collect()
+    v.into_iter()
+        .enumerate()
+        .map(|(i, n)| (n, i as u32))
+        .collect()
 }
 
 fn footprint_centroid(fp: &pcb_core::Footprint) -> (f64, f64) {
@@ -616,7 +648,13 @@ fn footprint_tile(fp: &pcb_core::Footprint, margin: f64) -> Rect {
         max_y = max_y.max(cy + hh);
     }
     Rect::from_corners(
-        Point::new(Length::from_mm(min_x - margin), Length::from_mm(min_y - margin)),
-        Point::new(Length::from_mm(max_x + margin), Length::from_mm(max_y + margin)),
+        Point::new(
+            Length::from_mm(min_x - margin),
+            Length::from_mm(min_y - margin),
+        ),
+        Point::new(
+            Length::from_mm(max_x + margin),
+            Length::from_mm(max_y + margin),
+        ),
     )
 }
