@@ -84,6 +84,28 @@ impl Provider {
     /// fab's published "minimum capability" page; the conservative
     /// side of any range is used so a board that passes our check
     /// also passes the fab's intake review.
+    /// Manufacturing rules taking the board's actual copper-layer count
+    /// into account. JLCPCB's 4-layer (and up) tier supports the
+    /// fine-pitch fanout's 0.15 mm-hole / 0.30 mm-via "special" option
+    /// (0.075 mm annular ring) that the 2-layer standard tier forbids, so
+    /// a multilayer board is checked against the looser multilayer
+    /// minimums it will actually be built to.
+    #[must_use]
+    pub fn rules_for(self, layer_count: u8) -> FabRules {
+        if matches!(self, Self::Jlcpcb) && layer_count > 2 {
+            return FabRules {
+                min_trace_width_mm: 0.127, // 5 mil
+                min_clearance_mm: 0.127,
+                min_drill_mm: 0.15,         // 4-layer special: 0.15 mm via hole
+                min_annular_ring_mm: 0.075, // 0.15/0.30 mm via => 0.075 mm ring
+                max_board_w_mm: 100.0,
+                max_board_h_mm: 100.0,
+                supported_layers: 8,
+            };
+        }
+        self.rules()
+    }
+
     #[must_use]
     pub fn rules(self) -> FabRules {
         match self {
@@ -200,7 +222,7 @@ impl FabReport {
 /// the order outright).
 #[must_use]
 pub fn manufacturing_drc(board: &Board, provider: Provider) -> FabReport {
-    let rules = provider.rules();
+    let rules = provider.rules_for(board.stackup.layer_count());
     let mut report = FabReport {
         provider: provider.name().to_string(),
         ..FabReport::default()
@@ -555,13 +577,18 @@ pub fn pack(project: &Project, provider: Provider, out_dir: &Path) -> Result<Pac
         Ok(())
     };
 
-    // Gerbers + drills.
-    emit(&mut zip, &mut files, format!("{stem}-F_Cu.gbr"), &|w| {
-        gerber::write_copper(&board, Side::Top, w)
-    })?;
-    emit(&mut zip, &mut files, format!("{stem}-B_Cu.gbr"), &|w| {
-        gerber::write_copper(&board, Side::Bottom, w)
-    })?;
+    // Copper gerbers — one per stackup copper layer, so 4/6/8-layer
+    // boards export every layer (F.Cu, the inner planes/signals In1.Cu…,
+    // and B.Cu), not just the two outer sides. The file stem is the
+    // stackup's own layer name with `.` → `_` (KiCad/JLCPCB convention:
+    // F_Cu, In1_Cu, In2_Cu, B_Cu).
+    for (i, spec) in board.stackup.layers.iter().enumerate() {
+        let layer = pcb_core::Layer { index: i as u8 };
+        let fname = format!("{stem}-{}.gbr", spec.name.replace('.', "_"));
+        emit(&mut zip, &mut files, fname, &|w| {
+            gerber::write_copper_layer(&board, layer, w)
+        })?;
+    }
     emit(&mut zip, &mut files, format!("{stem}-F_Mask.gbr"), &|w| {
         gerber::write_mask(&board, Side::Top, w)
     })?;
