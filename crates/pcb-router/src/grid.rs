@@ -496,6 +496,37 @@ impl Grid {
             .collect()
     }
 
+    /// Distinct net ids of `Trace` copper lying in the clearance corridor of
+    /// the straight segment `a..b` (the Bresenham line dilated by the disk of
+    /// radius `clr_cells`), scanned on EVERY layer, restricted to nets for
+    /// which `accept(net)` is true. Returned ascending (deterministic). Only
+    /// `Trace` cells are reported — pads/drilled pads are fixed placement and
+    /// cannot be ripped, so they are deliberately excluded. Used by the
+    /// router to pick rip-up candidates that actually block a failed corridor.
+    pub fn corridor_trace_nets(
+        &self,
+        a: GridPoint,
+        b: GridPoint,
+        clr_cells: i32,
+        accept: impl Fn(u32) -> bool,
+    ) -> Vec<u32> {
+        let disk = disk_offsets(clr_cells);
+        let mut found: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for layer in 0..self.layer_count {
+            for (c, r) in bresenham(a.col, a.row, b.col, b.row) {
+                for &(dc, dr) in &disk {
+                    let gp = GridPoint { layer, col: c + dc, row: r + dr };
+                    if let Cell::Trace(n) = self.get(gp) {
+                        if n != FOREIGN_NET && accept(n) {
+                            found.insert(n);
+                        }
+                    }
+                }
+            }
+        }
+        found.into_iter().collect()
+    }
+
     /// Stamp the bare copper of a trace `a..b`: each Bresenham cell, plus a
     /// disk of radius `copper` cells around it, becomes `Trace(net)` — the
     /// trace's own half-width and nothing more. No clearance halo is
@@ -506,6 +537,19 @@ impl Grid {
         let layer = a.layer;
         for (c, r) in bresenham(a.col, a.row, b.col, b.row) {
             self.stamp_cell_copper(layer, c, r, net, copper);
+        }
+    }
+
+    /// Exact inverse of `stamp_trace`: for the same Bresenham cells + copper
+    /// disk, free ONLY cells whose current value is `Trace(net)`. Pads,
+    /// foreign copper, and obstacles are never touched, so the grid stays
+    /// byte-consistent with the board copper that remains. Re-rasterises the
+    /// trace's own geometry, never the whole grid — O(trace length), not O(board).
+    pub fn unstamp_trace(&mut self, a: GridPoint, b: GridPoint, net: u32, copper: i32) {
+        debug_assert_eq!(a.layer, b.layer);
+        let layer = a.layer;
+        for (c, r) in bresenham(a.col, a.row, b.col, b.row) {
+            self.unstamp_cell_copper(layer, c, r, net, copper);
         }
     }
 
@@ -584,6 +628,15 @@ impl Grid {
         }
     }
 
+    /// Inverse of `stamp_via`: free this net's via-barrel copper (cells equal
+    /// to `Trace(net)`) on every layer. Via copper is stamped as `Trace(net)`
+    /// (see `stamp_via`), so the same free-if-`Trace(net)` rule applies.
+    pub fn unstamp_via(&mut self, p: GridPoint, net: u32, copper: i32) {
+        for layer in 0..self.layer_count {
+            self.unstamp_cell_copper(layer, p.col, p.row, net, copper);
+        }
+    }
+
     /// Allocate a same-shape `CostMap` for negotiated-congestion routing.
     /// Identical layer/col/row dims as this grid; all biases start at 0.
     pub fn new_cost_map(&self) -> CostMap {
@@ -611,6 +664,26 @@ impl Grid {
                 let gp = GridPoint { layer, col: c + dc, row: r + dr };
                 if matches!(self.get(gp), Cell::Free) {
                     self.set(gp, Cell::Trace(net));
+                }
+            }
+        }
+    }
+
+    /// Inverse of `stamp_cell_copper`: over the same copper disk, set to
+    /// `Free` only cells currently equal to `Trace(net)`. Mirror of the
+    /// free-only stamp, so unstamping a net leaves every other net's copper
+    /// and all pads exactly as they were.
+    fn unstamp_cell_copper(&mut self, layer: u8, c: i32, r: i32, net: u32, copper: i32) {
+        let copper = copper.max(0);
+        let r2 = copper * copper;
+        for dr in -copper..=copper {
+            for dc in -copper..=copper {
+                if dc * dc + dr * dr > r2 {
+                    continue;
+                }
+                let gp = GridPoint { layer, col: c + dc, row: r + dr };
+                if matches!(self.get(gp), Cell::Trace(n) if n == net) {
+                    self.set(gp, Cell::Free);
                 }
             }
         }

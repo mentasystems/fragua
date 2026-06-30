@@ -264,6 +264,24 @@ const CONGESTION_RADIUS_CELLS: i32 = 6;
 /// the only path; keep it bounded.
 const CONGESTION_MAX: u32 = 32;
 
+/// Rip-up: max distinct blocker nets tried per failing net. Tiny by
+/// design — bounds the per-pass extra work and guarantees termination.
+const RIPUP_MAX_BLOCKERS: usize = 4;
+/// Rip-up recursion cap: how many levels of "rip a blocker, and if the
+/// blocker can't reroute, let IT rip one of its own blockers" we allow.
+/// Depth 2 resolves 3-way mutual conflicts (e.g. CC2 needs VBUS_OUT moved,
+/// and VBUS_OUT in turn needs a third net moved) without unbounded churn.
+/// Termination is guaranteed independently by the pass-wide `taboo` set
+/// (each successful rip tabooes a net; taboo only grows), so this is just a
+/// work cap.
+const RIPUP_MAX_DEPTH: usize = 2;
+/// Extra cells added to the clearance radius when scanning a failed net's
+/// corridor for rip-up blockers. The failing spoke is a single straight
+/// segment; the net that actually boxes it can sit a little off that line
+/// (especially for multi-pad nets), so we dilate the scan beyond the bare
+/// trace clearance to surface the real obstruction.
+const RIPUP_CORRIDOR_WIDEN: i32 = 4;
+
 /// Route every net found in the board's pad assignments. Mutates
 /// `board` in place: existing routing is cleared, new routing is laid.
 ///
@@ -359,6 +377,11 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     let layer_count = board.stackup.layer_count();
     let mut cost_map = Grid::with_layers(region, opts.cell, layer_count).new_cost_map();
 
+    // The pristine easy-first order iteration 1 uses. The loop below mutates
+    // `order` (failed nets to the front); we keep the original to feed the
+    // dedicated rip-up pass its known-good baseline substrate.
+    let original_order = order.clone();
+
     let mut best: Option<(Board, RouteReport)> = None;
     let mut last_order: Option<Vec<String>> = None;
     let mut iterations_run = 0;
@@ -373,7 +396,20 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
 
         let mut work = board.clone();
         work.clear_routing();
-        let report = route_pass(&mut work, &nets, &order, opts, &cost_map, &fanout, &escape_stubs);
+        // The reorder/congestion loop is rip-up-free: it stays fast and
+        // byte-identical to the historical baseline, so `best` is always
+        // seeded at (and never drops below) the baseline result. Rip-up runs
+        // once after the loop, on the pristine substrate (see below).
+        let report = route_pass(
+            &mut work,
+            &nets,
+            &order,
+            opts,
+            &cost_map,
+            &fanout,
+            &escape_stubs,
+            false,
+        );
 
         let take_it = match &best {
             None => true,
@@ -438,6 +474,39 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
             .cloned()
             .collect();
         order = failed.into_iter().chain(inefficient).chain(rest).collect();
+    }
+
+    // Dedicated clean-board rip-up pass. The loop above is rip-up-free, so its
+    // `best` is exactly the historical baseline. If failures remain, run ONE
+    // more pass on the PRISTINE substrate — original easy-first order, zero
+    // cost bias (no reorder/congestion churn) — but with rip-up enabled. On
+    // that substrate only the genuinely congested nets fail, so targeted
+    // rip-up resolves them surgically; doing it here (rather than inside the
+    // reordered/bumped loop) avoids the global degradation greedy rip-up
+    // causes on a churned board. Kept only when strictly better, so it can
+    // never regress below baseline.
+    if best.as_ref().is_none_or(|(_, r)| count_failed(r) > 0) {
+        let mut work = board.clone();
+        work.clear_routing();
+        let clean_cost = Grid::with_layers(region, opts.cell, layer_count).new_cost_map();
+        let report = route_pass(
+            &mut work,
+            &nets,
+            &original_order,
+            opts,
+            &clean_cost,
+            &fanout,
+            &escape_stubs,
+            true,
+        );
+        iterations_run += 1;
+        let take_it = match &best {
+            None => true,
+            Some((_, prev)) => report_is_better(&report, prev),
+        };
+        if take_it {
+            best = Some((work, report));
+        }
     }
 
     let (best_work, mut best_report) = best.expect("at least one iteration ran");
@@ -609,6 +678,7 @@ fn compute_region(board: &Board, opts: &RouteOptions) -> Rect {
 /// One full routing pass: lay every net (in `order`) onto a freshly
 /// cleared `board` and return the per-net outcomes. The board's
 /// routing must already be cleared by the caller.
+#[allow(clippy::too_many_arguments)]
 fn route_pass(
     board: &mut Board,
     nets: &BTreeMap<String, Vec<NetPadInfo>>,
@@ -617,6 +687,7 @@ fn route_pass(
     cost_map: &CostMap,
     fanout: &crate::fanout::FanoutPlan,
     escape_stubs: &[Trace],
+    allow_ripup: bool,
 ) -> RouteReport {
     let net_id_of: HashMap<String, u32> = order
         .iter()
@@ -689,12 +760,6 @@ fn route_pass(
     // bare on every layer. Independent of trace width, so computed once.
     let via_copper_cells = ceil_cells(opts.via_diameter.0 / 2, opts.cell.0).max(0);
 
-    let mut per_net = Vec::with_capacity(nets.len());
-    let mut total_traces = 0;
-    let mut total_vias = 0;
-    let mut total_length_mm = 0.0_f64;
-    let mut total_lower_bound_mm = 0.0_f64;
-
     // Nets that already have a copper pour on at least one layer
     // skip the router entirely — the pour itself is the electrical
     // connection, so adding traces is redundant copper that just
@@ -702,34 +767,174 @@ fn route_pass(
     let pour_nets: std::collections::HashSet<String> =
         board.pours.iter().map(|p| p.net.clone()).collect();
 
+    // Per-net outcomes, folded into the report totals after the pass.
+    // Storing outcomes (instead of incrementally summing) makes rip-up's
+    // re-accounting of a rerouted blocker trivial and order-independent.
+    let mut outcomes: BTreeMap<String, NetRoute> = BTreeMap::new();
+    let mut routed_ids: HashSet<u32> = HashSet::new();
+    let mut taboo: HashSet<u32> = HashSet::new();
+
     for net_name in order {
         let Some(pad_points) = nets.get(net_name) else {
             continue;
         };
         let net_id = net_id_of[net_name];
-        if pour_nets.contains(net_name) {
-            per_net.push((
-                net_name.clone(),
-                Outcome::Ok {
-                    trace_segments: 0,
-                    vias: 0,
-                    length_mm: 0.0,
-                    lower_bound_mm: 0.0,
-                },
-            ));
+
+        // Snapshot before attempting so a rip-up retry starts from a clean
+        // corridor (this net's partial copper discarded). Only paid when
+        // rip-up is enabled (iterations >= 2); iteration 1 is byte-identical
+        // to the historical baseline.
+        let snap = if allow_ripup {
+            Some(Snapshot::take(board, &grid))
+        } else {
+            None
+        };
+        let mut nr = route_one_net(
+            board,
+            &mut grid,
+            net_name,
+            net_id,
+            pad_points,
+            opts,
+            cost_map,
+            fanout,
+            via_copper_cells,
+            &pour_nets,
+        );
+        if allow_ripup {
+            if let NetRoute::Failed {
+                corridor: Some((seed_g, spoke_g, clr)),
+                ..
+            } = &nr
+            {
+                let (seed_g, spoke_g, clr) = (*seed_g, *spoke_g, *clr);
+                if let Some(s) = snap.as_ref() {
+                    Snapshot::restore(board, &mut grid, s);
+                }
+                nr = try_ripup_route(
+                    board,
+                    &mut grid,
+                    net_name,
+                    net_id,
+                    pad_points,
+                    (seed_g, spoke_g, clr),
+                    nets,
+                    &net_id_of,
+                    opts,
+                    cost_map,
+                    fanout,
+                    via_copper_cells,
+                    &pour_nets,
+                    &routed_ids,
+                    &mut taboo,
+                    &mut outcomes,
+                    0,
+                );
+            }
+        }
+        routed_ids.insert(net_id);
+        outcomes.insert(net_name.clone(), nr);
+    }
+
+    // Fold outcomes into report totals, emitting `per_net` in `order`
+    // sequence so the report stays deterministic.
+    let mut per_net = Vec::with_capacity(order.len());
+    let mut total_traces = 0usize;
+    let mut total_vias = 0usize;
+    let mut total_length_mm = 0.0_f64;
+    let mut total_lower_bound_mm = 0.0_f64;
+    for net_name in order {
+        let Some(nr) = outcomes.get(net_name) else {
             continue;
+        };
+        let outcome = match nr {
+            NetRoute::Ok {
+                trace_segments,
+                vias,
+                length_mm,
+                lower_bound_mm,
+            } => {
+                total_traces += *trace_segments;
+                total_vias += *vias;
+                total_length_mm += *length_mm;
+                total_lower_bound_mm += *lower_bound_mm;
+                Outcome::Ok {
+                    trace_segments: *trace_segments,
+                    vias: *vias,
+                    length_mm: *length_mm,
+                    lower_bound_mm: *lower_bound_mm,
+                }
+            }
+            NetRoute::Failed { reason, .. } => Outcome::Failed {
+                reason: reason.clone(),
+            },
+        };
+        per_net.push((net_name.clone(), outcome));
+    }
+
+    RouteReport {
+        per_net,
+        trace_count: total_traces,
+        via_count: total_vias,
+        total_length_mm,
+        total_lower_bound_mm,
+        iterations: 0,
+        hints: Vec::new(),
+    }
+}
+
+/// Outcome of routing a single net into `grid`/`board`.
+#[derive(Clone)]
+enum NetRoute {
+    Ok {
+        trace_segments: usize,
+        vias: usize,
+        length_mm: f64,
+        lower_bound_mm: f64,
+    },
+    /// Failed at a spoke. `corridor` = (seed cell, failing spoke cell,
+    /// clr_cells used) so a rip-up retry can scan that exact corridor.
+    /// Partial copper laid before the failure REMAINS on board/grid
+    /// (unchanged from today's behaviour); the caller rolls back via its
+    /// own snapshot when it wants the failure undone.
+    Failed {
+        reason: String,
+        corridor: Option<(GridPoint, GridPoint, i32)>,
+    },
+}
+
+/// Route a single net into `grid`/`board`, laying copper exactly as the
+/// historical per-net loop body did. Returns `Ok` with the net's tallies,
+/// or `Failed` carrying the failing spoke's corridor so the caller can
+/// pick rip-up blockers. Never accumulates pass totals, never nests rip-up.
+#[allow(clippy::too_many_arguments)]
+fn route_one_net(
+    board: &mut Board,
+    grid: &mut Grid,
+    net_name: &str,
+    net_id: u32,
+    pad_points: &[NetPadInfo],
+    opts: &RouteOptions,
+    cost_map: &CostMap,
+    fanout: &crate::fanout::FanoutPlan,
+    via_copper_cells: i32,
+    pour_nets: &std::collections::HashSet<String>,
+) -> NetRoute {
+        if pour_nets.contains(net_name) {
+            return NetRoute::Ok {
+                trace_segments: 0,
+                vias: 0,
+                length_mm: 0.0,
+                lower_bound_mm: 0.0,
+            };
         }
         if pad_points.len() < 2 {
-            per_net.push((
-                net_name.clone(),
-                Outcome::Ok {
-                    trace_segments: 0,
-                    vias: 0,
-                    length_mm: 0.0,
-                    lower_bound_mm: 0.0,
-                },
-            ));
-            continue;
+            return NetRoute::Ok {
+                trace_segments: 0,
+                vias: 0,
+                length_mm: 0.0,
+                lower_bound_mm: 0.0,
+            };
         }
 
         // Differential-pair follow attempt. If this net's class names
@@ -752,7 +957,7 @@ fn route_pass(
                     .unwrap_or(0.2);
                 match try_diff_pair_follow(
                     board,
-                    &mut grid,
+                    grid,
                     pad_points,
                     &partner_traces,
                     net_name,
@@ -764,20 +969,12 @@ fn route_pass(
                     cost_map,
                 ) {
                     Ok((segs, vias, length_mm)) => {
-                        total_traces += segs;
-                        total_vias += vias;
-                        total_length_mm += length_mm;
-                        total_lower_bound_mm += hpwl_mm(pad_points);
-                        per_net.push((
-                            net_name.clone(),
-                            Outcome::Ok {
-                                trace_segments: segs,
-                                vias,
-                                length_mm,
-                                lower_bound_mm: hpwl_mm(pad_points),
-                            },
-                        ));
-                        continue;
+                        return NetRoute::Ok {
+                            trace_segments: segs,
+                            vias,
+                            length_mm,
+                            lower_bound_mm: hpwl_mm(pad_points),
+                        };
                     }
                     Err(reason) => {
                         eprintln!(
@@ -856,7 +1053,6 @@ fn route_pass(
         let mut net_segments = 0usize;
         let mut net_vias = 0usize;
         let mut net_length_mm = 0.0_f64;
-        let mut failed = false;
         // The net's already-laid trace cells, accumulated as each spoke
         // is routed. Seeds the multi-source search (Prim/Steiner growth)
         // without rescanning the whole grid — the key to fine-grid speed.
@@ -897,7 +1093,7 @@ fn route_pass(
                 .max(1);
             let copper_cells = ceil_cells(spoke_width.0 / 2, opts.cell.0).max(0);
             let Some(result) = search(
-                &grid,
+                grid,
                 seed_grid,
                 net_id,
                 opts.via_cost,
@@ -908,23 +1104,19 @@ fn route_pass(
                 &net_trace_cells,
                 opts.heuristic_weight,
             ) else {
-                per_net.push((
-                    net_name.clone(),
-                    Outcome::Failed {
-                        reason: format!(
-                            "no path to pad {} at ({:.2}, {:.2}) mm",
-                            spoke.pad_ref,
-                            spoke.center.x.to_mm(),
-                            spoke.center.y.to_mm(),
-                        ),
-                    },
-                ));
-                failed = true;
-                break;
+                return NetRoute::Failed {
+                    reason: format!(
+                        "no path to pad {} at ({:.2}, {:.2}) mm",
+                        spoke.pad_ref,
+                        spoke.center.x.to_mm(),
+                        spoke.center.y.to_mm(),
+                    ),
+                    corridor: Some((seed_grid, spoke_grid, clr_cells)),
+                };
             };
             let (segs, vias, length_mm) = lay_path(
                 board,
-                &mut grid,
+                grid,
                 &result.path,
                 net_name,
                 net_id,
@@ -947,32 +1139,201 @@ fn route_pass(
             // The spoke's own pad cell joins the tree too.
             net_trace_cells.push(spoke_grid);
         }
-        if !failed {
-            total_traces += net_segments;
-            total_vias += net_vias;
-            total_length_mm += net_length_mm;
-            total_lower_bound_mm += net_lower_bound_mm;
-            per_net.push((
-                net_name.clone(),
-                Outcome::Ok {
-                    trace_segments: net_segments,
-                    vias: net_vias,
-                    length_mm: net_length_mm,
-                    lower_bound_mm: net_lower_bound_mm,
-                },
-            ));
+        NetRoute::Ok {
+            trace_segments: net_segments,
+            vias: net_vias,
+            length_mm: net_length_mm,
+            lower_bound_mm: net_lower_bound_mm,
+        }
+}
+
+/// Byte-exact snapshot of the routing-mutable state, used to make a
+/// rip-up attempt transactional: any failure path restores this clone, so
+/// the grid never desyncs from the committed board copper (INV-A) and a
+/// failed speculation costs nothing. Only `grid`, `board.traces` and
+/// `board.vias` change during a pass, so the rest of the board is not cloned.
+struct Snapshot {
+    grid: Grid,
+    traces: Vec<Trace>,
+    vias: Vec<Via>,
+}
+
+impl Snapshot {
+    fn take(board: &Board, grid: &Grid) -> Self {
+        Snapshot {
+            grid: grid.clone(),
+            traces: board.traces.clone(),
+            vias: board.vias.clone(),
         }
     }
-
-    RouteReport {
-        per_net,
-        trace_count: total_traces,
-        via_count: total_vias,
-        total_length_mm,
-        total_lower_bound_mm,
-        iterations: 0,
-        hints: Vec::new(),
+    fn restore(board: &mut Board, grid: &mut Grid, s: &Snapshot) {
+        grid.clone_from(&s.grid);
+        board.traces.clone_from(&s.traces);
+        board.vias.clone_from(&s.vias);
     }
+}
+
+/// Remove every trace and via of `net_name` from both the board and the
+/// grid. Grid removal uses the exact-inverse unstamp (free only
+/// `Trace(net_id)` cells), so INV-A holds. O(net copper), not O(board).
+fn rip_net(
+    board: &mut Board,
+    grid: &mut Grid,
+    net_name: &str,
+    net_id: u32,
+    opts: &RouteOptions,
+    via_copper_cells: i32,
+) {
+    for t in board.traces.iter().filter(|t| t.net == net_name) {
+        let a = grid.snap(t.start, t.layer);
+        let b = grid.snap(t.end, t.layer);
+        let copper = ceil_cells(t.width.0 / 2, opts.cell.0).max(0);
+        grid.unstamp_trace(a, b, net_id, copper);
+    }
+    for v in board.vias.iter().filter(|v| v.net == net_name) {
+        let p = grid.snap(v.position, CopperLayer::Top);
+        grid.unstamp_via(p, net_id, via_copper_cells);
+    }
+    board.traces.retain(|t| t.net != net_name);
+    board.vias.retain(|v| v.net != net_name);
+}
+
+/// Last-resort, transactional rip-up-and-reroute for a failed net `A`.
+/// Scans A's failing corridor for already-routed blocker nets (deterministic,
+/// ascending net id) and rips them CUMULATIVELY — one at a time, retrying A
+/// after each — because a net is often boxed by two or three adjacent traces
+/// at once. As soon as A routes, every ripped blocker is rerouted into the
+/// updated grid; a blocker that can't fit on its own gets one depth-limited
+/// rip-up of its OWN (so chained conflicts resolve). If the whole rip set
+/// reroutes, it is committed (blockers tabooed, accounting updated). Any
+/// failure path restores a byte-exact `Snapshot`, so the grid never desyncs
+/// from board copper (INV-A) and a dead-end attempt costs nothing. If no rip
+/// set lets A route, A is laid once more to reproduce the baseline
+/// partial-copper + `Failed`.
+#[allow(clippy::too_many_arguments)]
+fn try_ripup_route(
+    board: &mut Board,
+    grid: &mut Grid,
+    a_name: &str,
+    a_id: u32,
+    a_pads: &[NetPadInfo],
+    corridor: (GridPoint, GridPoint, i32),
+    nets: &BTreeMap<String, Vec<NetPadInfo>>,
+    net_id_of: &HashMap<String, u32>,
+    opts: &RouteOptions,
+    cost_map: &CostMap,
+    fanout: &crate::fanout::FanoutPlan,
+    via_copper_cells: i32,
+    pour_nets: &std::collections::HashSet<String>,
+    routed_ids: &HashSet<u32>,
+    taboo: &mut HashSet<u32>,
+    outcomes: &mut BTreeMap<String, NetRoute>,
+    depth: usize,
+) -> NetRoute {
+    let (seed_g, spoke_g, clr) = corridor;
+    let id_to_name: HashMap<u32, &String> = net_id_of.iter().map(|(n, i)| (*i, n)).collect();
+
+    // Candidate blockers: routed `Trace` nets in A's failing corridor, not
+    // tabooed, excluding A itself. Ascending net id ⇒ deterministic order.
+    let candidates: Vec<u32> =
+        grid.corridor_trace_nets(seed_g, spoke_g, clr + RIPUP_CORRIDOR_WIDEN, |n| {
+            n != a_id && routed_ids.contains(&n) && !taboo.contains(&n)
+        });
+
+    // Pristine pre-rip state (A absent — the caller rolled its partial copper
+    // back; every other net as routed). Restored on any give-up so the whole
+    // attempt is transactional (INV-A: grid never desyncs from board copper).
+    let snap0 = Snapshot::take(board, grid);
+    // The bookkeeping (taboo + outcomes) is part of the transaction: inner
+    // blocker re-routes mutate them as they go, so a give-up must roll them
+    // back together with the copper or they describe geometry no longer on
+    // the board (stale wire tallies, spurious taboos).
+    let taboo0 = taboo.clone();
+    let outcomes0 = outcomes.clone();
+
+    // Cumulative rip set. A single blocker often isn't enough (a net can be
+    // boxed by two adjacent traces at once), so we rip blockers one at a time
+    // and retry A after each; once A routes we reroute the WHOLE rip set.
+    let mut ripped: Vec<(u32, &String)> = Vec::new();
+
+    for b_id in candidates.into_iter().take(RIPUP_MAX_BLOCKERS) {
+        let Some(&b_name) = id_to_name.get(&b_id) else {
+            continue;
+        };
+        if nets.get(b_name).is_none() {
+            continue;
+        }
+        rip_net(board, grid, b_name, b_id, opts, via_copper_cells);
+        ripped.push((b_id, b_name));
+
+        // Route A through the freed corridor.
+        let a_res = route_one_net(
+            board, grid, a_name, a_id, a_pads, opts, cost_map, fanout, via_copper_cells,
+            pour_nets,
+        );
+        let NetRoute::Ok { .. } = a_res else {
+            // A still boxed: keep this blocker ripped and add the next.
+            continue;
+        };
+
+        // A routes with the current rip set. Reroute every ripped blocker;
+        // each may itself need a depth-limited rip-up to fit back.
+        let mut all_ok = true;
+        for &(rid, rname) in &ripped {
+            let Some(r_pads) = nets.get(rname) else {
+                continue;
+            };
+            let snap_r = Snapshot::take(board, grid);
+            let mut r_res = route_one_net(
+                board, grid, rname, rid, r_pads, opts, cost_map, fanout, via_copper_cells,
+                pour_nets,
+            );
+            if let NetRoute::Failed {
+                corridor: Some((rs, rsp, rc)),
+                ..
+            } = &r_res
+            {
+                if depth + 1 < RIPUP_MAX_DEPTH {
+                    let rcc = (*rs, *rsp, *rc);
+                    // Discard the blocker's partial copper so its own rip-up
+                    // starts from a clean corridor.
+                    Snapshot::restore(board, grid, &snap_r);
+                    r_res = try_ripup_route(
+                        board, grid, rname, rid, r_pads, rcc, nets, net_id_of, opts, cost_map,
+                        fanout, via_copper_cells, pour_nets, routed_ids, taboo, outcomes,
+                        depth + 1,
+                    );
+                }
+            }
+            if let NetRoute::Ok { .. } = r_res {
+                taboo.insert(rid);
+                outcomes.insert((*rname).clone(), r_res);
+            } else {
+                all_ok = false;
+                break;
+            }
+        }
+        if all_ok {
+            return a_res;
+        }
+        // A routed but some blocker couldn't be replaced: abandon the whole
+        // attempt and restore the pristine pre-rip state (copper + bookkeeping).
+        Snapshot::restore(board, grid, &snap0);
+        *taboo = taboo0.clone();
+        *outcomes = outcomes0.clone();
+        break;
+    }
+
+    // No rip set let A route: restore the pristine state and reproduce
+    // baseline behaviour (A's partial copper + Failed), identical to the
+    // non-rip path.
+    Snapshot::restore(board, grid, &snap0);
+    *taboo = taboo0;
+    *outcomes = outcomes0;
+    route_one_net(
+        board, grid, a_name, a_id, a_pads, opts, cost_map, fanout, via_copper_cells,
+        pour_nets,
+    )
 }
 
 /// HPWL (half-perimeter wire length) of the net's pad bounding box, in

@@ -139,13 +139,12 @@ fn main() {
         // set FINE_ESCAPE=0 to compare against the plain via-in-pad fanout.
     };
 
+    let t0 = std::time::Instant::now();
     let report = if std::env::var("NOROUTE").is_ok() {
         pcb_router::RouteReport { per_net: vec![], trace_count: 0, via_count: 0, total_length_mm: 0.0, total_lower_bound_mm: 0.0, iterations: 0, hints: vec![] }
     } else {
         pcb_router::route(&mut board, &opts)
     };
-    let t0 = std::time::Instant::now();
-    let _keep = &report;
     let elapsed = t0.elapsed();
 
     let drc = pcb_drc::run(&board, &pcb_drc::DrcOptions::default());
