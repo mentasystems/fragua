@@ -16,6 +16,54 @@
 use base64::Engine;
 use serde_json::{json, Value};
 
+/// Every top-level verb the parser accepts. Kept here so an `unknown
+/// verb` error can list them and suggest the closest match — the surface
+/// the user is most likely groping for when they guess a name.
+pub(crate) const VERBS: &[&str] = &[
+    "outline", "lib", "sym", "net", "net-class", "nets", "class", "palette", "clear-palette",
+    "list-palette", "place", "move", "rotate", "delete", "clear-board", "auto-place", "route",
+    "clear-route", "clear-net", "trace", "via", "delete-trace", "delete-via", "auto-pour", "pour",
+    "clear-pour", "stitch", "stitch-isolated-pads", "silk-line", "silk-text", "erc", "drc", "pack",
+    "export", "fab", "snap", "view", "save", "status", "sch", "sch-status", "screenshot", "stackup",
+    "layer", "impedance", "sheet", "keepout", "reset", "attach", "detach", "find-lib", "list-lib",
+    "delete-lib",
+];
+
+/// Levenshtein edit distance, for the "did you mean" suggestion.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Best guess for a mistyped verb: the longest real verb contained in the
+/// typo (or vice-versa) — catches `add-trace`/`do-route` → `trace`/`route`
+/// — else the nearest by edit distance if it's close (≤3).
+pub(crate) fn closest_verb(input: &str) -> Option<&'static str> {
+    if let Some(v) = VERBS
+        .iter()
+        .filter(|v| v.len() >= 3 && (input.contains(**v) || v.contains(input)))
+        .max_by_key(|v| v.len())
+    {
+        return Some(v);
+    }
+    VERBS
+        .iter()
+        .map(|&v| (edit_distance(input, v), v))
+        .min_by_key(|(d, _)| *d)
+        .filter(|(d, _)| *d <= 3)
+        .map(|(_, v)| v)
+}
+
 /// One parsed command + the line number it came from. The compiler
 /// turns each `Cmd` into a `(tool_name, args_json)` pair routed through
 /// the regular `dispatch` function.
@@ -1384,7 +1432,15 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
             }
         }
 
-        other => Err(ParseError::at(line, format!("unknown verb `{other}`"))),
+        other => Err(ParseError::at(line, {
+            let hint = closest_verb(other)
+                .map(|v| format!(" — did you mean `{v}`?"))
+                .unwrap_or_default();
+            format!(
+                "unknown verb `{other}`{hint}\n  verbs: {}\n  (full reference: GET /help)",
+                VERBS.join(", ")
+            )
+        })),
     }
 }
 

@@ -18,9 +18,13 @@ const USAGE: &str = "\
 Fragua — AI-native PCB design tool.
 
 USAGE
-  fragua                 open with no project loaded (in-memory only)
-  fragua <file.fragua>   load that file; autosave to it on every edit
+  fragua                 print this help + the full script reference, then exit
+                         (so you read the surface before driving it)
+  fragua run             launch the API server, empty in-memory project
+  fragua run <file.fragua>
+                         launch + load that file; autosave to it on every edit
                          (legacy `.json` files are also accepted)
+  fragua help            same as bare `fragua`
 
 LOCAL API
   Stateless HTTP on http://127.0.0.1:7878 (override: FRAGUA_API_ADDR).
@@ -29,6 +33,7 @@ LOCAL API
   needed on the client side. Request bodies are JSON.
 
   GET  /                 usage + the full script reference
+  GET  /help             same as `GET /` (usage + full script reference)
   POST /script           run a multi-line script
                          body:  {\"script\": \"...\"}
                          reply: per-line outcomes,
@@ -1117,22 +1122,28 @@ fn stitch_isolated_pads(state: State<'_, AppState>) -> serde_json::Value {
 
 /// Entry point used by the binary in `main.rs`.
 pub fn run() {
-    // First thing on launch — print the usage AND the full script
-    // language reference so the operator (or the agent that just
-    // spawned the process) sees the entire surface without grepping the
-    // source or hitting `GET /` first.
-    print!("{USAGE}");
-    println!("\n--- SCRIPT REFERENCE ---\n");
-    print!("{}", pcb_script::tools::script_reference());
-    let _ = std::io::Write::flush(&mut std::io::stdout());
+    // Launch is gated behind a `run` subcommand on purpose: `fragua run
+    // [file.fragua]` starts the API server (+ optional file, autosaved);
+    // ANY other invocation — bare `fragua`, `fragua help`, `fragua
+    // <file>` — prints the usage + the FULL script reference and exits
+    // WITHOUT launching. The point is to force whoever just wants to
+    // "open it" (a human, or an agent that backgrounds the process and
+    // never reads its stdout) to actually see the surface — the verbs,
+    // the manual `trace`/`via`, `GET /help` — instead of flying blind.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) != Some("run") {
+        print!("{USAGE}");
+        println!("\n--- SCRIPT REFERENCE ---\n");
+        print!("{}", pcb_script::tools::script_reference());
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        return;
+    }
 
-    // CLI: `fragua` (no args) → empty in-memory project, no autosave.
-    // `fragua <file.fragua>` → load that file (or start empty if missing
-    // / unreadable) and autosave back to it. Legacy `.json` files load
-    // too — the format on disk is JSON regardless of extension. The
-    // autosave target lives on the project itself, so a later
-    // `POST /save` (or `save PATH` verb) rebinds it without restart.
-    let cli_path = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    // `fragua run [file.fragua]` — the file, if any, is the arg after
+    // `run`. Legacy `.json` loads too (on-disk format is JSON regardless
+    // of extension); a missing/unreadable file starts empty. Autosave
+    // target lives on the project, so a later `POST /save` rebinds it.
+    let cli_path = args.get(1).map(std::path::PathBuf::from);
     let project = match cli_path {
         Some(path) => Project::load_from_path(&path).unwrap_or_else(|| {
             let p = Project::new(name_from_path(&path));
@@ -1143,6 +1154,11 @@ pub fn run() {
     };
     let api_addr =
         std::env::var("FRAGUA_API_ADDR").unwrap_or_else(|_| API_DEFAULT_ADDR.to_string());
+
+    // Concise startup line — the full usage + script reference is at
+    // `GET /` and `GET /help`, and bare `fragua` (no `run`) prints it.
+    println!("Fragua — API on http://{api_addr}  ·  GET /help for the full script reference");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let state = AppState {
         project: project.clone(),
@@ -1396,6 +1412,13 @@ mod http {
                 out.push_str(USAGE);
                 out.push_str("\n--- SCRIPT REFERENCE ---\n");
                 out.push_str(reference);
+                write_text(&mut sock, 200, "OK", &out).await
+            }
+            ("GET", "/help") => {
+                let mut out = String::new();
+                out.push_str(USAGE);
+                out.push_str("\n--- SCRIPT REFERENCE ---\n");
+                out.push_str(pcb_script::tools::script_reference());
                 write_text(&mut sock, 200, "OK", &out).await
             }
             ("GET", "/health") => write_text(&mut sock, 200, "OK", "ok\n").await,
