@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/mentasystems/fragua/actions/workflows/ci.yml/badge.svg)](https://github.com/mentasystems/fragua/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-d6905b.svg)](LICENSE)
-[![Landing](https://img.shields.io/badge/landing-mentasystems.github.io%2Ffragua-d6905b)](https://mentasystems.github.io/fragua/)
+[![Landing](https://img.shields.io/badge/landing-mentasystems.com%2Ffragua-d6905b)](https://mentasystems.com/fragua)
 
 AI-native PCB design tool. The agent does the work, the human watches and steers.
 
-- 🌐 Landing: <https://mentasystems.github.io/fragua/>
+- 🌐 Landing: <https://mentasystems.com/fragua>
 - 🧭 [VISION.md](VISION.md) — what we are building and why
 - 🏗️ [ARCHITECTURE.md](ARCHITECTURE.md) — the stack and crate layout
 - 🤝 [CONTRIBUTING.md](CONTRIBUTING.md) — how to help
