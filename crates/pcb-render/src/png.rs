@@ -49,8 +49,7 @@ pub fn svg_to_png(svg: &str, target_width_px: u32) -> Result<Vec<u8>, RenderErro
     let pixmap_w = width;
     let pixmap_h = ((svg_size.height() * scale).round() as u32).clamp(1, MAX_PNG_DIMENSION);
 
-    let mut pixmap =
-        tiny_skia::Pixmap::new(pixmap_w, pixmap_h).ok_or("allocate pixmap failed")?;
+    let mut pixmap = tiny_skia::Pixmap::new(pixmap_w, pixmap_h).ok_or("allocate pixmap failed")?;
     // Most of our SVGs paint a background rectangle of their own, but
     // a few (library entry thumbnails) are transparent — fill with
     // white so the resulting PNG is readable on dark terminal viewers.
@@ -78,15 +77,15 @@ pub fn render_board_png_with_margins(
 }
 
 /// Convenience: render a schematic to a PNG at the requested width.
-pub fn render_schematic_png(
-    schematic: &Schematic,
-    width_px: u32,
-) -> Result<Vec<u8>, RenderError> {
+pub fn render_schematic_png(schematic: &Schematic, width_px: u32) -> Result<Vec<u8>, RenderError> {
     svg_to_png(&crate::render_schematic_svg(schematic), width_px)
 }
 
 /// Convenience: render a single library entry's review SVG to PNG.
-pub fn render_library_entry_png(entry: &LibraryEntry, width_px: u32) -> Result<Vec<u8>, RenderError> {
+pub fn render_library_entry_png(
+    entry: &LibraryEntry,
+    width_px: u32,
+) -> Result<Vec<u8>, RenderError> {
     svg_to_png(&crate::render_library_entry_svg(entry), width_px)
 }
 

@@ -594,10 +594,7 @@ pub enum StitchPolicy {
     /// cells too close to traces, pads, vias, or keepouts. Only fires
     /// when another `Pour` exists on the OPPOSITE layer for the same
     /// net.
-    Grid {
-        pitch_mm: f64,
-        clearance_mm: f64,
-    },
+    Grid { pitch_mm: f64, clearance_mm: f64 },
 }
 
 /// How a copper pour connects to same-net pads sitting inside it.
@@ -970,12 +967,11 @@ impl<'de> Deserialize<'de> for LayerStackup {
         // and dispatch. The board model lives in serde_json territory
         // anyway (the .fragua format is JSON).
         let val = serde_json::Value::deserialize(de)?;
-        let obj = val.as_object().ok_or_else(|| de::Error::custom(
-            "LayerStackup must be an object",
-        ))?;
+        let obj = val
+            .as_object()
+            .ok_or_else(|| de::Error::custom("LayerStackup must be an object"))?;
         if obj.contains_key("layers") {
-            let new: NewLayerStackup =
-                serde_json::from_value(val).map_err(de::Error::custom)?;
+            let new: NewLayerStackup = serde_json::from_value(val).map_err(de::Error::custom)?;
             Ok(Self {
                 layers: new.layers,
                 dielectrics: new.dielectrics,
@@ -1145,13 +1141,7 @@ impl Board {
         let traces_before = self.traces.len();
         self.traces.retain(|t| {
             let tol = t.width.to_mm() / 2.0 + 1e-3;
-            let a_hit = touches_pad(
-                t.layer,
-                &t.net,
-                t.start.x.to_mm(),
-                t.start.y.to_mm(),
-                tol,
-            );
+            let a_hit = touches_pad(t.layer, &t.net, t.start.x.to_mm(), t.start.y.to_mm(), tol);
             let b_hit = touches_pad(t.layer, &t.net, t.end.x.to_mm(), t.end.y.to_mm(), tol);
             !(a_hit || b_hit)
         });
@@ -1796,10 +1786,7 @@ mod tests {
 
     #[test]
     fn inflated_bbox_zero_margin_matches_bounds() {
-        let fp = make_two_pad_fp(
-            Point::new(Length::from_mm(5.0), Length::from_mm(-2.0)),
-            0.0,
-        );
+        let fp = make_two_pad_fp(Point::new(Length::from_mm(5.0), Length::from_mm(-2.0)), 0.0);
         let bb = fp
             .inflated_bbox(crate::library::PlacementMargin::default())
             .expect("bbox");

@@ -14,7 +14,9 @@ use pcb_core::thermal::{select_spokes, POUR_CLEARANCE};
 use pcb_core::{Length, Project, ThermalRelief};
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: verify_spokes <file>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: verify_spokes <file>");
     let proj = Project::load_from_path(Path::new(&path)).expect("load project");
     let snap = proj.read();
     let board = snap.board();
@@ -27,7 +29,10 @@ fn main() {
     // larger visual void (`POUR_CLEARANCE_MM`, 0.6 mm). Report each so
     // both screen and fab can be checked for isolated pads.
     const RENDER_CLEARANCE: Length = Length(600_000); // 0.6 mm
-    for (label, clearance) in [("fab/gerber (0.2 mm)", POUR_CLEARANCE), ("render (0.6 mm)", RENDER_CLEARANCE)] {
+    for (label, clearance) in [
+        ("fab/gerber (0.2 mm)", POUR_CLEARANCE),
+        ("render (0.6 mm)", RENDER_CLEARANCE),
+    ] {
         let mut pads = 0usize;
         let mut spokes = 0usize;
         let mut diag_fallback: Vec<String> = Vec::new();
@@ -72,9 +77,7 @@ fn main() {
                     } else {
                         // A spoke whose endpoints differ on both axes is a
                         // diagonal — only emitted when all orthogonals fail.
-                        let is_diag = kept
-                            .iter()
-                            .any(|(a, b)| a.x.0 != b.x.0 && a.y.0 != b.y.0);
+                        let is_diag = kept.iter().any(|(a, b)| a.x.0 != b.x.0 && a.y.0 != b.y.0);
                         if is_diag {
                             diag_fallback.push(id);
                         }
@@ -90,7 +93,10 @@ fn main() {
         for p in &diag_fallback {
             println!("    diagonal at pad {p}");
         }
-        println!("  ISOLATED pads (no spoke — floating off plane): {}", isolated.len());
+        println!(
+            "  ISOLATED pads (no spoke — floating off plane): {}",
+            isolated.len()
+        );
         for p in &isolated {
             println!("    ISOLATED pad {p}");
         }

@@ -628,7 +628,10 @@ mod tests {
         // U1 has a PowerIn pin on net "WEIRD_RAIL" (not power-named,
         // no PowerOut, no pour). Expect an UnpoweredPowerNet warning.
         let mut sch = Schematic::new();
-        let u1 = make_ic("U1", vec![ic_pin("1", PinRole::PowerIn), ic_pin("2", PinRole::Input)]);
+        let u1 = make_ic(
+            "U1",
+            vec![ic_pin("1", PinRole::PowerIn), ic_pin("2", PinRole::Input)],
+        );
         let u1_id = u1.id;
         // Second symbol to keep the net from also tripping FloatingNet.
         let u2 = make_ic("U2", vec![ic_pin("1", PinRole::Passive)]);
@@ -638,8 +641,14 @@ mod tests {
         sch.set_net(Net {
             name: "WEIRD_RAIL".into(),
             connections: vec![
-                NetConnection { symbol_id: u1_id, pin_number: "1".into() },
-                NetConnection { symbol_id: u2_id, pin_number: "1".into() },
+                NetConnection {
+                    symbol_id: u1_id,
+                    pin_number: "1".into(),
+                },
+                NetConnection {
+                    symbol_id: u2_id,
+                    pin_number: "1".into(),
+                },
             ],
             class: None,
         });
@@ -647,10 +656,16 @@ mod tests {
         let report = run(
             &pcb_core::Board::new(),
             &sch,
-            &ErcOptions { heuristics: false, ..ErcOptions::default() },
+            &ErcOptions {
+                heuristics: false,
+                ..ErcOptions::default()
+            },
         );
         assert!(
-            report.violations.iter().any(|v| v.kind == ErcKind::UnpoweredPowerNet),
+            report
+                .violations
+                .iter()
+                .any(|v| v.kind == ErcKind::UnpoweredPowerNet),
             "expected UnpoweredPowerNet, got {:?}",
             report.violations.iter().map(|v| v.kind).collect::<Vec<_>>(),
         );
@@ -668,18 +683,31 @@ mod tests {
         sch.set_net(Net {
             name: "DATA".into(),
             connections: vec![
-                NetConnection { symbol_id: u1_id, pin_number: "1".into() },
-                NetConnection { symbol_id: u2_id, pin_number: "1".into() },
+                NetConnection {
+                    symbol_id: u1_id,
+                    pin_number: "1".into(),
+                },
+                NetConnection {
+                    symbol_id: u2_id,
+                    pin_number: "1".into(),
+                },
             ],
             class: None,
         });
         let report = run(
             &pcb_core::Board::new(),
             &sch,
-            &ErcOptions { heuristics: false, ..ErcOptions::default() },
+            &ErcOptions {
+                heuristics: false,
+                ..ErcOptions::default()
+            },
         );
         assert_eq!(
-            report.violations.iter().filter(|v| v.kind == ErcKind::MultipleDrivers).count(),
+            report
+                .violations
+                .iter()
+                .filter(|v| v.kind == ErcKind::MultipleDrivers)
+                .count(),
             1,
             "{:?}",
             report.violations,
@@ -700,18 +728,30 @@ mod tests {
         sch.set_net(Net {
             name: "READ_ONLY".into(),
             connections: vec![
-                NetConnection { symbol_id: u1_id, pin_number: "1".into() },
-                NetConnection { symbol_id: u2_id, pin_number: "1".into() },
+                NetConnection {
+                    symbol_id: u1_id,
+                    pin_number: "1".into(),
+                },
+                NetConnection {
+                    symbol_id: u2_id,
+                    pin_number: "1".into(),
+                },
             ],
             class: None,
         });
         let report = run(
             &pcb_core::Board::new(),
             &sch,
-            &ErcOptions { heuristics: false, ..ErcOptions::default() },
+            &ErcOptions {
+                heuristics: false,
+                ..ErcOptions::default()
+            },
         );
         assert!(
-            report.violations.iter().any(|v| v.kind == ErcKind::UndrivenInput),
+            report
+                .violations
+                .iter()
+                .any(|v| v.kind == ErcKind::UndrivenInput),
             "expected UndrivenInput, got {:?}",
             report.violations.iter().map(|v| v.kind).collect::<Vec<_>>(),
         );

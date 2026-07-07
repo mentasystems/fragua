@@ -9,8 +9,12 @@ use pcb_core::Project;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let file = args.next().expect("usage: export_fab <file> <out_dir> [stem]");
-    let out_dir = args.next().expect("usage: export_fab <file> <out_dir> [stem]");
+    let file = args
+        .next()
+        .expect("usage: export_fab <file> <out_dir> [stem]");
+    let out_dir = args
+        .next()
+        .expect("usage: export_fab <file> <out_dir> [stem]");
     let proj = Project::load_from_path(Path::new(&file)).expect("load project");
     let snap = proj.read();
     let stem = args.next().unwrap_or_else(|| snap.name().to_string());

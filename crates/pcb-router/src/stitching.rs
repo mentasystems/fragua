@@ -15,7 +15,11 @@ pub fn add_stitching_vias(board: &mut Board, opts: &RouteOptions) -> usize {
     // Snapshot pours upfront — we mutate `board.vias` while iterating.
     let pours: Vec<_> = board.pours.clone();
     for pour in &pours {
-        let StitchPolicy::Grid { pitch_mm, clearance_mm } = pour.stitching else {
+        let StitchPolicy::Grid {
+            pitch_mm,
+            clearance_mm,
+        } = pour.stitching
+        else {
             continue;
         };
         if pitch_mm <= 0.0 {
@@ -77,13 +81,7 @@ pub fn add_stitching_vias(board: &mut Board, opts: &RouteOptions) -> usize {
 /// pads, existing vias, and keepout polygons within `clearance_mm`.
 /// Foreign-net traces/vias respect the clearance too — same-net stays
 /// out of the way because the stitching grid is per-net.
-fn cell_is_clear(
-    board: &Board,
-    x: f64,
-    y: f64,
-    opts: &RouteOptions,
-    clearance_mm: f64,
-) -> bool {
+fn cell_is_clear(board: &Board, x: f64, y: f64, opts: &RouteOptions, clearance_mm: f64) -> bool {
     let via_r = opts.via_diameter.to_mm() / 2.0;
     let needed = via_r + clearance_mm;
     // Existing vias of ANY net (including just-added stitching).

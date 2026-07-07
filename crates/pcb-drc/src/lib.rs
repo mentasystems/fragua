@@ -673,12 +673,7 @@ fn check_body_overlap(board: &Board, opts: &DrcOptions, report: &mut DrcReport) 
     }
 }
 
-fn check_body_off_board(
-    board: &Board,
-    outline: Rect,
-    opts: &DrcOptions,
-    report: &mut DrcReport,
-) {
+fn check_body_off_board(board: &Board, outline: Rect, opts: &DrcOptions, report: &mut DrcReport) {
     if opts.placement_margins.is_empty() {
         return;
     }
@@ -1131,7 +1126,9 @@ fn trace_touches_pad(board: &Board, pad: &PadGeom, net: &str) -> bool {
 /// signal layer counts. Cross-layer SMD pads still need a via to
 /// reach the pour — that case is handled by `via_touches_pad`.
 fn pour_covers_pad(pours: &[Pour], pad: &PadGeom, net: &str) -> bool {
-    pours.iter().any(|p| p.net == net && pad.occupies_layer(p.layer))
+    pours
+        .iter()
+        .any(|p| p.net == net && pad.occupies_layer(p.layer))
 }
 
 fn via_touches_pad(board: &Board, pad: &PadGeom, net: &str) -> bool {
@@ -1418,8 +1415,15 @@ const TOUCH_TOL_MM: f64 = 1e-6;
 /// One piece of copper, flattened into the connectivity graph.
 enum CopperShape {
     Pad(Rect),
-    Trace { a: (f64, f64), b: (f64, f64), half: f64 },
-    Via { c: (f64, f64), r: f64 },
+    Trace {
+        a: (f64, f64),
+        b: (f64, f64),
+        half: f64,
+    },
+    Via {
+        c: (f64, f64),
+        r: f64,
+    },
     /// A pour fills its whole layer for its net — the model carries no
     /// polygon yet (see [`pcb_core::Pour`]), so it has no geometry of its
     /// own and instead binds every same-net item that shares its layer.
@@ -1447,7 +1451,10 @@ struct UnionFind {
 
 impl UnionFind {
     fn new(n: usize) -> Self {
-        Self { parent: (0..n).collect(), rank: vec![0; n] }
+        Self {
+            parent: (0..n).collect(),
+            rank: vec![0; n],
+        }
     }
 
     fn find(&mut self, mut x: usize) -> usize {
@@ -1481,8 +1488,12 @@ fn layers_overlap(a: Option<CopperLayer>, b: Option<CopperLayer>) -> bool {
 
 /// Distance (mm) from a point to an axis-aligned rect (0 if inside).
 fn point_rect_distance(p: (f64, f64), rect: Rect) -> f64 {
-    let dx = (rect.min.x.to_mm() - p.0).max(p.0 - rect.max.x.to_mm()).max(0.0);
-    let dy = (rect.min.y.to_mm() - p.1).max(p.1 - rect.max.y.to_mm()).max(0.0);
+    let dx = (rect.min.x.to_mm() - p.0)
+        .max(p.0 - rect.max.x.to_mm())
+        .max(0.0);
+    let dy = (rect.min.y.to_mm() - p.1)
+        .max(p.1 - rect.max.y.to_mm())
+        .max(0.0);
     (dx * dx + dy * dy).sqrt()
 }
 
@@ -1502,9 +1513,18 @@ fn elems_touch(a: &CopperElem, b: &CopperElem) -> bool {
         (Pad(rect), Via { c, r }) | (Via { c, r }, Pad(rect)) => {
             point_rect_distance(*c, *rect) - *r <= TOUCH_TOL_MM
         }
-        (Trace { a: a0, b: a1, half: h0 }, Trace { a: b0, b: b1, half: h1 }) => {
-            segment_segment_distance(*a0, *a1, *b0, *b1) - (*h0 + *h1) <= TOUCH_TOL_MM
-        }
+        (
+            Trace {
+                a: a0,
+                b: a1,
+                half: h0,
+            },
+            Trace {
+                a: b0,
+                b: b1,
+                half: h1,
+            },
+        ) => segment_segment_distance(*a0, *a1, *b0, *b1) - (*h0 + *h1) <= TOUCH_TOL_MM,
         (Trace { a, b, half }, Via { c, r }) | (Via { c, r }, Trace { a, b, half }) => {
             point_segment_distance(*c, *a, *b) - (*half + *r) <= TOUCH_TOL_MM
         }
@@ -1522,7 +1542,11 @@ fn build_copper_elems(board: &Board, pads: &[PadGeom]) -> Vec<CopperElem> {
         let Some(net) = p.net else { continue };
         elems.push(CopperElem {
             net: net.to_string(),
-            layer: if p.is_through_hole { None } else { Some(p.layer) },
+            layer: if p.is_through_hole {
+                None
+            } else {
+                Some(p.layer)
+            },
             shape: CopperShape::Pad(p.rect),
             is_pad: true,
             label: p.label(),
@@ -1535,7 +1559,11 @@ fn build_copper_elems(board: &Board, pads: &[PadGeom]) -> Vec<CopperElem> {
         elems.push(CopperElem {
             net: t.net.clone(),
             layer: Some(t.layer),
-            shape: CopperShape::Trace { a, b, half: t.width.to_mm() / 2.0 },
+            shape: CopperShape::Trace {
+                a,
+                b,
+                half: t.width.to_mm() / 2.0,
+            },
             is_pad: false,
             label: "trace".into(),
             center: (f64::midpoint(a.0, b.0), f64::midpoint(a.1, b.1)),
@@ -1546,7 +1574,10 @@ fn build_copper_elems(board: &Board, pads: &[PadGeom]) -> Vec<CopperElem> {
         elems.push(CopperElem {
             net: v.net.clone(),
             layer: None,
-            shape: CopperShape::Via { c, r: v.diameter.to_mm() / 2.0 },
+            shape: CopperShape::Via {
+                c,
+                r: v.diameter.to_mm() / 2.0,
+            },
             is_pad: false,
             label: "via".into(),
             center: c,
@@ -1625,8 +1656,7 @@ fn check_net_continuity(board: &Board, pads: &[PadGeom], report: &mut DrcReport)
             })
             .collect();
         let marker = elems[groups[0][0]].center;
-        let mut involved: Vec<String> =
-            pad_idxs.iter().map(|&i| elems[i].label.clone()).collect();
+        let mut involved: Vec<String> = pad_idxs.iter().map(|&i| elems[i].label.clone()).collect();
         involved.sort();
         report.push(Violation {
             kind: ViolationKind::NetSplit,
@@ -1725,9 +1755,16 @@ mod feature3_tests {
         };
         let report = run(&board, &opts);
         assert!(
-            !report.violations.iter().any(|v| v.kind == ViolationKind::ImpedanceMismatch),
+            !report
+                .violations
+                .iter()
+                .any(|v| v.kind == ViolationKind::ImpedanceMismatch),
             "expected no impedance mismatch, got {:?}",
-            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
+            report
+                .violations
+                .iter()
+                .map(|v| (v.kind, v.message.clone()))
+                .collect::<Vec<_>>(),
         );
     }
 
@@ -1757,9 +1794,16 @@ mod feature3_tests {
         };
         let report = run(&board, &opts);
         assert!(
-            report.violations.iter().any(|v| v.kind == ViolationKind::ImpedanceMismatch),
+            report
+                .violations
+                .iter()
+                .any(|v| v.kind == ViolationKind::ImpedanceMismatch),
             "expected impedance mismatch for narrow trace, got {:?}",
-            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
+            report
+                .violations
+                .iter()
+                .map(|v| (v.kind, v.message.clone()))
+                .collect::<Vec<_>>(),
         );
     }
 
@@ -1793,7 +1837,10 @@ mod feature3_tests {
                 number: "1".into(),
                 name: String::new(),
                 offset: Point::ORIGIN,
-                size: (pcb_core::Length::from_mm(1.0), pcb_core::Length::from_mm(1.0)),
+                size: (
+                    pcb_core::Length::from_mm(1.0),
+                    pcb_core::Length::from_mm(1.0),
+                ),
                 layer: pcb_core::CopperLayer::Top,
                 net: Some(net.into()),
                 drill: None,
@@ -1825,8 +1872,14 @@ mod feature3_tests {
         board.add_trace(Trace {
             id: Id::new(),
             layer: pcb_core::CopperLayer::Top,
-            start: Point::new(pcb_core::Length::from_mm(0.0), pcb_core::Length::from_mm(0.0)),
-            end: Point::new(pcb_core::Length::from_mm(2.0), pcb_core::Length::from_mm(0.0)),
+            start: Point::new(
+                pcb_core::Length::from_mm(0.0),
+                pcb_core::Length::from_mm(0.0),
+            ),
+            end: Point::new(
+                pcb_core::Length::from_mm(2.0),
+                pcb_core::Length::from_mm(0.0),
+            ),
             // 0.10 mm is below JLCPCB's 0.127 mm minimum.
             width: pcb_core::Length::from_mm(0.10),
             net: "SIG".into(),
@@ -1837,9 +1890,16 @@ mod feature3_tests {
         };
         let report = run(&board, &opts);
         assert!(
-            report.violations.iter().any(|v| v.kind == ViolationKind::FabProfileMin),
+            report
+                .violations
+                .iter()
+                .any(|v| v.kind == ViolationKind::FabProfileMin),
             "expected FabProfileMin, got {:?}",
-            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
+            report
+                .violations
+                .iter()
+                .map(|v| (v.kind, v.message.clone()))
+                .collect::<Vec<_>>(),
         );
     }
 
@@ -1851,8 +1911,14 @@ mod feature3_tests {
         board.add_trace(Trace {
             id: Id::new(),
             layer: pcb_core::CopperLayer::Top,
-            start: Point::new(pcb_core::Length::from_mm(0.0), pcb_core::Length::from_mm(0.0)),
-            end: Point::new(pcb_core::Length::from_mm(2.0), pcb_core::Length::from_mm(0.0)),
+            start: Point::new(
+                pcb_core::Length::from_mm(0.0),
+                pcb_core::Length::from_mm(0.0),
+            ),
+            end: Point::new(
+                pcb_core::Length::from_mm(2.0),
+                pcb_core::Length::from_mm(0.0),
+            ),
             width: pcb_core::Length::from_mm(0.25),
             net: "SIG".into(),
         });
@@ -1862,9 +1928,16 @@ mod feature3_tests {
         };
         let report = run(&board, &opts);
         assert!(
-            !report.violations.iter().any(|v| v.kind == ViolationKind::FabProfileMin),
+            !report
+                .violations
+                .iter()
+                .any(|v| v.kind == ViolationKind::FabProfileMin),
             "should not flag a 0.25 mm trace; got {:?}",
-            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
+            report
+                .violations
+                .iter()
+                .map(|v| (v.kind, v.message.clone()))
+                .collect::<Vec<_>>(),
         );
     }
 
@@ -1875,8 +1948,14 @@ mod feature3_tests {
         board.add_trace(Trace {
             id: Id::new(),
             layer: pcb_core::CopperLayer::Top,
-            start: Point::new(pcb_core::Length::from_mm(0.0), pcb_core::Length::from_mm(0.0)),
-            end: Point::new(pcb_core::Length::from_mm(2.0), pcb_core::Length::from_mm(0.0)),
+            start: Point::new(
+                pcb_core::Length::from_mm(0.0),
+                pcb_core::Length::from_mm(0.0),
+            ),
+            end: Point::new(
+                pcb_core::Length::from_mm(2.0),
+                pcb_core::Length::from_mm(0.0),
+            ),
             // Below JLCPCB minimum but above the default min_trace_width.
             width: pcb_core::Length::from_mm(0.10),
             net: "SIG".into(),
@@ -1889,11 +1968,17 @@ mod feature3_tests {
                 ..DrcOptions::default()
             },
         );
-        assert!(with_profile.violations.iter().any(|v| v.kind == ViolationKind::FabProfileMin));
+        assert!(with_profile
+            .violations
+            .iter()
+            .any(|v| v.kind == ViolationKind::FabProfileMin));
         // Without the profile, no FabProfileMin should appear (NarrowTrace may, with default).
         let without = run(&board, &DrcOptions::default());
         assert!(
-            !without.violations.iter().any(|v| v.kind == ViolationKind::FabProfileMin),
+            !without
+                .violations
+                .iter()
+                .any(|v| v.kind == ViolationKind::FabProfileMin),
             "clearing the profile should drop FabProfileMin violations",
         );
     }
@@ -1918,7 +2003,10 @@ mod feature3_tests {
                 number: "1".into(),
                 name: String::new(),
                 offset: Point::ORIGIN,
-                size: (pcb_core::Length::from_mm(1.0), pcb_core::Length::from_mm(1.0)),
+                size: (
+                    pcb_core::Length::from_mm(1.0),
+                    pcb_core::Length::from_mm(1.0),
+                ),
                 layer: pcb_core::CopperLayer::Top,
                 net: Some(net.into()),
                 drill: None,
@@ -1954,13 +2042,23 @@ mod feature3_tests {
 
         let report = run(&board, &DrcOptions::default());
         assert!(
-            report.violations.iter().any(|v| v.kind == ViolationKind::NetSplit),
+            report
+                .violations
+                .iter()
+                .any(|v| v.kind == ViolationKind::NetSplit),
             "expected NetSplit, got {:?}",
-            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
+            report
+                .violations
+                .iter()
+                .map(|v| (v.kind, v.message.clone()))
+                .collect::<Vec<_>>(),
         );
         // Both pads are locally connected, so this is NOT an UnconnectedPad.
         assert!(
-            !report.violations.iter().any(|v| v.kind == ViolationKind::UnconnectedPad),
+            !report
+                .violations
+                .iter()
+                .any(|v| v.kind == ViolationKind::UnconnectedPad),
             "split with local copper must not double-report as UnconnectedPad",
         );
     }
@@ -1975,9 +2073,16 @@ mod feature3_tests {
 
         let report = run(&board, &DrcOptions::default());
         assert!(
-            !report.violations.iter().any(|v| v.kind == ViolationKind::NetSplit),
+            !report
+                .violations
+                .iter()
+                .any(|v| v.kind == ViolationKind::NetSplit),
             "a continuously routed net must not flag NetSplit, got {:?}",
-            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
+            report
+                .violations
+                .iter()
+                .map(|v| (v.kind, v.message.clone()))
+                .collect::<Vec<_>>(),
         );
     }
 
@@ -1991,7 +2096,10 @@ mod feature3_tests {
         board.add_trace(trace("GND", 2.5, -2.0, 2.5, 2.0));
 
         let report = run(&board, &DrcOptions::default());
-        let short = report.violations.iter().find(|v| v.kind == ViolationKind::NetShort);
+        let short = report
+            .violations
+            .iter()
+            .find(|v| v.kind == ViolationKind::NetShort);
         let short = short.expect("expected a NetShort for crossing VCC/GND traces");
         assert!(
             short.involved.contains(&"VCC".to_string())
@@ -2012,9 +2120,16 @@ mod feature3_tests {
 
         let report = run(&board, &DrcOptions::default());
         assert!(
-            !report.violations.iter().any(|v| v.kind == ViolationKind::NetShort),
+            !report
+                .violations
+                .iter()
+                .any(|v| v.kind == ViolationKind::NetShort),
             "well-separated nets must not flag NetShort, got {:?}",
-            report.violations.iter().map(|v| (v.kind, v.message.clone())).collect::<Vec<_>>(),
+            report
+                .violations
+                .iter()
+                .map(|v| (v.kind, v.message.clone()))
+                .collect::<Vec<_>>(),
         );
     }
 }

@@ -104,8 +104,7 @@ fn main() {
 }
 
 fn run(cli: &Cli) -> Result<(), String> {
-    let bytes =
-        fs::read(&cli.input).map_err(|e| format!("read {}: {e}", cli.input.display()))?;
+    let bytes = fs::read(&cli.input).map_err(|e| format!("read {}: {e}", cli.input.display()))?;
     let project: ProjectFile = serde_json::from_slice(&bytes)
         .map_err(|e| format!("parse {}: {e}", cli.input.display()))?;
 
@@ -157,8 +156,7 @@ fn run(cli: &Cli) -> Result<(), String> {
     };
     let out_bytes =
         serde_json::to_vec_pretty(&out_project).map_err(|e| format!("serialise: {e}"))?;
-    fs::write(&cli.out, &out_bytes)
-        .map_err(|e| format!("write {}: {e}", cli.out.display()))?;
+    fs::write(&cli.out, &out_bytes).map_err(|e| format!("write {}: {e}", cli.out.display()))?;
 
     print_summary(cli, &outcome);
     Ok(())
@@ -341,9 +339,7 @@ fn http_trial(
         .send()
         .map_err(|e| format!("http POST /script: {e}"))?;
     let status = resp.status();
-    let text = resp
-        .text()
-        .map_err(|e| format!("http read body: {e}"))?;
+    let text = resp.text().map_err(|e| format!("http read body: {e}"))?;
     if !status.is_success() {
         return Err(format!("fragua /script {status}: {text}"));
     }
@@ -376,9 +372,7 @@ fn parse_route_response(text: &str) -> Result<HttpMetrics, String> {
         .lines()
         .find(|l| l.contains("] Routed:"))
         .ok_or_else(|| format!("no 'Routed:' line in response:\n{text}"))?;
-    let (_, after) = line
-        .split_once("Routed:")
-        .ok_or("malformed Routed: line")?;
+    let (_, after) = line.split_once("Routed:").ok_or("malformed Routed: line")?;
     let _traces = extract_usize_before(after, "traces")?;
     let vias = extract_usize_before(after, "vias")?;
     let length = extract_f64_before(after, "mm wire")?;

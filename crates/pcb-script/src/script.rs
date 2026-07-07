@@ -20,12 +20,58 @@ use serde_json::{json, Value};
 /// verb` error can list them and suggest the closest match — the surface
 /// the user is most likely groping for when they guess a name.
 pub(crate) const VERBS: &[&str] = &[
-    "outline", "lib", "sym", "net", "net-class", "nets", "class", "palette", "clear-palette",
-    "list-palette", "place", "move", "rotate", "delete", "clear-board", "auto-place", "route",
-    "clear-route", "clear-net", "trace", "via", "delete-trace", "delete-via", "auto-pour", "pour",
-    "clear-pour", "stitch", "stitch-isolated-pads", "silk-line", "silk-text", "erc", "drc", "pack",
-    "export", "fab", "snap", "view", "save", "status", "sch", "sch-status", "screenshot", "stackup",
-    "layer", "impedance", "sheet", "keepout", "reset", "attach", "detach", "find-lib", "list-lib",
+    "outline",
+    "lib",
+    "sym",
+    "net",
+    "net-class",
+    "nets",
+    "class",
+    "palette",
+    "clear-palette",
+    "list-palette",
+    "place",
+    "move",
+    "rotate",
+    "delete",
+    "clear-board",
+    "auto-place",
+    "route",
+    "clear-route",
+    "clear-net",
+    "trace",
+    "via",
+    "delete-trace",
+    "delete-via",
+    "auto-pour",
+    "pour",
+    "clear-pour",
+    "stitch",
+    "stitch-isolated-pads",
+    "silk-line",
+    "silk-text",
+    "erc",
+    "drc",
+    "pack",
+    "export",
+    "fab",
+    "snap",
+    "view",
+    "save",
+    "status",
+    "sch",
+    "sch-status",
+    "screenshot",
+    "stackup",
+    "layer",
+    "impedance",
+    "sheet",
+    "keepout",
+    "reset",
+    "attach",
+    "detach",
+    "find-lib",
+    "list-lib",
     "delete-lib",
 ];
 
@@ -589,10 +635,7 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                             break;
                         }
                         let (xs, ys) = t.split_once(',').ok_or_else(|| {
-                            ParseError::at(
-                                line,
-                                format!("keepout add: expected `x,y`, got `{t}`"),
-                            )
+                            ParseError::at(line, format!("keepout add: expected `x,y`, got `{t}`"))
                         })?;
                         let x = parse_num(xs, line, "x")?;
                         let y = parse_num(ys, line, "y")?;
@@ -645,7 +688,12 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
             //   pour relief NET spokes [width=N] [gap=N]
             //   pour stitch NET none                    — disable stitching
             //   pour stitch NET grid [pitch=N] [clearance=N]
-            need_args(line, tokens, 2, "pour NET LAYER | pour relief NET ... | pour stitch NET ...")?;
+            need_args(
+                line,
+                tokens,
+                2,
+                "pour NET LAYER | pour relief NET ... | pour stitch NET ...",
+            )?;
             if tokens[1] == "stitch" {
                 need_args(
                     line,
@@ -1340,7 +1388,12 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                     args: json!({}),
                 }),
                 "add" => {
-                    need_args(line, tokens, 3, "layer add NAME (signal|plane|mixed) [thickness=N]")?;
+                    need_args(
+                        line,
+                        tokens,
+                        3,
+                        "layer add NAME (signal|plane|mixed) [thickness=N]",
+                    )?;
                     let name = tokens[2].as_str();
                     let kind = tokens[3].as_str();
                     let mut args = json!({ "name": name, "kind": kind });
@@ -1401,7 +1454,12 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
             // fab profile (jlcpcb|pcbway|oshpark)
             // fab profile clear
             // fab check  (alias for `drc` honouring the adopted profile)
-            need_args(line, tokens, 1, "fab profile NAME | fab profile clear | fab check")?;
+            need_args(
+                line,
+                tokens,
+                1,
+                "fab profile NAME | fab profile clear | fab check",
+            )?;
             match tokens[1].as_str() {
                 "profile" => {
                     need_args(line, tokens, 2, "fab profile NAME|clear")?;

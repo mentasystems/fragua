@@ -222,7 +222,11 @@ pub(crate) fn pick_via_position(
 ) -> Option<(f64, f64)> {
     // Long axis + how far the via centre may slide while staying fully
     // inside the pad copper (a via-in-pad must sit on its own pad).
-    let (dx, dy, half_len) = if hw >= hh { (1.0, 0.0, hw) } else { (0.0, 1.0, hh) };
+    let (dx, dy, half_len) = if hw >= hh {
+        (1.0, 0.0, hw)
+    } else {
+        (0.0, 1.0, hh)
+    };
     let max_off = (half_len - via_r).max(0.0);
     // Slide along the long axis, biased toward the footprint INTERIOR (its
     // central channel) but allowed toward the outer end too. A row of N

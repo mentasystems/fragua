@@ -304,13 +304,21 @@ impl Grid {
             // TH pads punch every copper layer they straddle. Since
             // we currently only model through-hole vias top↔bottom,
             // stamp the outer two for TH parts.
-            let layers: Vec<u8> = if is_th { vec![0, bottom] } else { vec![primary] };
+            let layers: Vec<u8> = if is_th {
+                vec![0, bottom]
+            } else {
+                vec![primary]
+            };
             let cmin = self.snap(bounds.min, fp.layer);
             let cmax = self.snap(bounds.max, fp.layer);
             for &layer in &layers {
                 for r in cmin.row..=cmax.row {
                     for c in cmin.col..=cmax.col {
-                        let gp = GridPoint { layer, col: c, row: r };
+                        let gp = GridPoint {
+                            layer,
+                            col: c,
+                            row: r,
+                        };
                         if !self.in_bounds(gp) {
                             continue;
                         }
@@ -374,12 +382,19 @@ impl Grid {
                 // like the outer layers do, or it grazes the barrel and the
                 // DRC flags it. (On a 2-layer board `0..layer_count` is just
                 // `[0, bottom]`, so this is unchanged there.)
-                let layers: Vec<u8> =
-                    if is_th { (0..self.layer_count).collect() } else { vec![primary_layer] };
+                let layers: Vec<u8> = if is_th {
+                    (0..self.layer_count).collect()
+                } else {
+                    vec![primary_layer]
+                };
                 for &layer in &layers {
                     for r in cmin.row..=cmax.row {
                         for c in cmin.col..=cmax.col {
-                            let gp = GridPoint { layer, col: c, row: r };
+                            let gp = GridPoint {
+                                layer,
+                                col: c,
+                                row: r,
+                            };
                             if !self.in_bounds(gp) {
                                 continue;
                             }
@@ -439,14 +454,22 @@ impl Grid {
             for r in min_r..=max_r {
                 for c in min_c..=max_c {
                     // Use cell-centre coords in mm for the test.
-                    let p = self.unsnap(GridPoint { layer: 0, col: c, row: r });
+                    let p = self.unsnap(GridPoint {
+                        layer: 0,
+                        col: c,
+                        row: r,
+                    });
                     let px = p.x.to_mm();
                     let py = p.y.to_mm();
                     if !point_in_polygon(&kp.polygon, px, py) {
                         continue;
                     }
                     for &layer in &layers {
-                        let gp = GridPoint { layer, col: c, row: r };
+                        let gp = GridPoint {
+                            layer,
+                            col: c,
+                            row: r,
+                        };
                         if matches!(self.get(gp), Cell::Free) {
                             self.set(gp, Cell::Obstacle);
                         }
@@ -474,7 +497,11 @@ impl Grid {
                     if dc * dc + dr * dr > r2 {
                         continue;
                     }
-                    let p = GridPoint { layer, col: gp.col + dc, row: gp.row + dr };
+                    let p = GridPoint {
+                        layer,
+                        col: gp.col + dc,
+                        row: gp.row + dr,
+                    };
                     if self.in_bounds(p) {
                         self.set(p, Cell::DrilledPad(net));
                     }
@@ -492,7 +519,11 @@ impl Grid {
         let layer = a.layer;
         bresenham(a.col, a.row, b.col, b.row)
             .into_iter()
-            .map(|(c, r)| GridPoint { layer, col: c, row: r })
+            .map(|(c, r)| GridPoint {
+                layer,
+                col: c,
+                row: r,
+            })
             .collect()
     }
 
@@ -515,7 +546,11 @@ impl Grid {
         for layer in 0..self.layer_count {
             for (c, r) in bresenham(a.col, a.row, b.col, b.row) {
                 for &(dc, dr) in &disk {
-                    let gp = GridPoint { layer, col: c + dc, row: r + dr };
+                    let gp = GridPoint {
+                        layer,
+                        col: c + dc,
+                        row: r + dr,
+                    };
                     if let Cell::Trace(n) = self.get(gp) {
                         if n != FOREIGN_NET && accept(n) {
                             found.insert(n);
@@ -560,7 +595,11 @@ impl Grid {
     /// (`Obstacle`) are ignored here — they only block entry.
     pub(crate) fn clearance_ok_disk(&self, p: GridPoint, target: u32, disk: &[(i32, i32)]) -> bool {
         for &(dc, dr) in disk {
-            let gp = GridPoint { layer: p.layer, col: p.col + dc, row: p.row + dr };
+            let gp = GridPoint {
+                layer: p.layer,
+                col: p.col + dc,
+                row: p.row + dr,
+            };
             if is_foreign(self.get(gp), target) {
                 return false;
             }
@@ -584,7 +623,11 @@ impl Grid {
         debug_assert_eq!(a.layer, b.layer);
         let layer = a.layer;
         for (c, r) in bresenham(a.col, a.row, b.col, b.row) {
-            let p = GridPoint { layer, col: c, row: r };
+            let p = GridPoint {
+                layer,
+                col: c,
+                row: r,
+            };
             if !walkable(self.get(p), target_net) {
                 return false;
             }
@@ -611,7 +654,11 @@ impl Grid {
                 first = false;
                 continue;
             }
-            let gp = GridPoint { layer, col: c, row: r };
+            let gp = GridPoint {
+                layer,
+                col: c,
+                row: r,
+            };
             sum = sum.saturating_add(cost_map.at(gp));
         }
         sum
@@ -661,7 +708,11 @@ impl Grid {
                 if dc * dc + dr * dr > r2 {
                     continue;
                 }
-                let gp = GridPoint { layer, col: c + dc, row: r + dr };
+                let gp = GridPoint {
+                    layer,
+                    col: c + dc,
+                    row: r + dr,
+                };
                 if matches!(self.get(gp), Cell::Free) {
                     self.set(gp, Cell::Trace(net));
                 }
@@ -681,7 +732,11 @@ impl Grid {
                 if dc * dc + dr * dr > r2 {
                     continue;
                 }
-                let gp = GridPoint { layer, col: c + dc, row: r + dr };
+                let gp = GridPoint {
+                    layer,
+                    col: c + dc,
+                    row: r + dr,
+                };
                 if matches!(self.get(gp), Cell::Trace(n) if n == net) {
                     self.set(gp, Cell::Free);
                 }

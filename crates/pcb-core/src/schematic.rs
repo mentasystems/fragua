@@ -489,7 +489,11 @@ impl Schematic {
     /// Assign `net_name` to the class `class_name`. Mirrors `Net::class`
     /// but lives in a flat map so callers that haven't yet declared the
     /// net can still record the assignment.
-    pub fn assign_net_to_class(&mut self, net_name: impl Into<String>, class_name: impl Into<String>) {
+    pub fn assign_net_to_class(
+        &mut self,
+        net_name: impl Into<String>,
+        class_name: impl Into<String>,
+    ) {
         self.net_to_class.insert(net_name.into(), class_name.into());
     }
 
@@ -537,11 +541,15 @@ impl Schematic {
             trace_width: class
                 .trace_width_mm
                 .map_or(default_trace_width, Length::from_mm),
-            clearance: class.clearance_mm.map_or(default_clearance, Length::from_mm),
+            clearance: class
+                .clearance_mm
+                .map_or(default_clearance, Length::from_mm),
             via_diameter: class
                 .via_diameter_mm
                 .map_or(default_via_diameter, Length::from_mm),
-            via_drill: class.via_drill_mm.map_or(default_via_drill, Length::from_mm),
+            via_drill: class
+                .via_drill_mm
+                .map_or(default_via_drill, Length::from_mm),
         }
     }
 

@@ -79,13 +79,7 @@ fn segs_intersect(a: Point, b: Point, c: Point, d: Point) -> bool {
     let d2 = orient(c, d, b);
     let d3 = orient(a, b, c);
     let d4 = orient(a, b, d);
-    if d1 != 0
-        && d2 != 0
-        && d3 != 0
-        && d4 != 0
-        && (d1 > 0) != (d2 > 0)
-        && (d3 > 0) != (d4 > 0)
-    {
+    if d1 != 0 && d2 != 0 && d3 != 0 && d4 != 0 && (d1 > 0) != (d2 > 0) && (d3 > 0) != (d4 > 0) {
         return true;
     }
     (d1 == 0 && on_seg(c, d, a))
@@ -195,7 +189,12 @@ const SPOKE_OVERLAP: i64 = 50_000; // 0.05 mm
 /// The four orthogonal N/S/E/W spoke candidates for a rectangular pad.
 /// Each segment runs from `SPOKE_OVERLAP` inside the pad edge to `reach`
 /// beyond it, so it bridges the pad copper to the surrounding pour.
-fn orthogonal_candidates(center: Point, half_w: i64, half_h: i64, reach: i64) -> [(Point, Point); 4] {
+fn orthogonal_candidates(
+    center: Point,
+    half_w: i64,
+    half_h: i64,
+    reach: i64,
+) -> [(Point, Point); 4] {
     let cx = center.x.0;
     let cy = center.y.0;
     [

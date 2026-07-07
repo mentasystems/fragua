@@ -287,8 +287,16 @@ fn tournament<'a>(scored: &'a [(Genome, f64)], k: usize, rng: &mut StdRng) -> &'
 }
 
 fn crossover(a: &Genome, b: &Genome, rng: &mut StdRng) -> Genome {
-    let cell_mm = if rng.gen_bool(0.5) { a.cell_mm } else { b.cell_mm };
-    let via_cost = if rng.gen_bool(0.5) { a.via_cost } else { b.via_cost };
+    let cell_mm = if rng.gen_bool(0.5) {
+        a.cell_mm
+    } else {
+        b.cell_mm
+    };
+    let via_cost = if rng.gen_bool(0.5) {
+        a.via_cost
+    } else {
+        b.via_cost
+    };
     let clearance_mm = if rng.gen_bool(0.5) {
         a.clearance_mm
     } else {
@@ -429,10 +437,7 @@ fn evaluate_in_process(
         // Mark every net as failed so the GA score (failed_nets *
         // 100_000) dwarfs anything legal, without paying the
         // routing cost on an unroutable layout.
-        let failed_nets = options
-            .net_overrides
-            .len()
-            .max(work.footprints.len());
+        let failed_nets = options.net_overrides.len().max(work.footprints.len());
         return (
             TrialMetrics {
                 drc_errors: 0,
@@ -635,10 +640,26 @@ fn hill_climb_rotations(
                 cache_hits: start_outcome.cache_hits,
                 elapsed_secs: start_outcome.elapsed_secs + start_t.elapsed().as_secs_f64(),
                 best_score: current_score.min(score),
-                best_drc_errors: if improved { metrics.drc_errors } else { current_metrics.drc_errors },
-                best_failed_nets: if improved { metrics.failed_nets } else { current_metrics.failed_nets },
-                best_length_mm: if improved { metrics.total_length_mm } else { current_metrics.total_length_mm },
-                best_vias: if improved { metrics.via_count } else { current_metrics.via_count },
+                best_drc_errors: if improved {
+                    metrics.drc_errors
+                } else {
+                    current_metrics.drc_errors
+                },
+                best_failed_nets: if improved {
+                    metrics.failed_nets
+                } else {
+                    current_metrics.failed_nets
+                },
+                best_length_mm: if improved {
+                    metrics.total_length_mm
+                } else {
+                    current_metrics.total_length_mm
+                },
+                best_vias: if improved {
+                    metrics.via_count
+                } else {
+                    current_metrics.via_count
+                },
                 best_cell_mm: best_progress.best_cell_mm,
                 best_via_cost: best_progress.best_via_cost,
                 best_clearance_mm: best_progress.best_clearance_mm,
@@ -697,7 +718,12 @@ fn run_ga(
     let mut last_improved_gen = 0usize;
 
     let mut population: Vec<Genome> = Vec::with_capacity(config.population);
-    population.push(baseline_genome(baseline_opts, net_names, board, footprint_ids));
+    population.push(baseline_genome(
+        baseline_opts,
+        net_names,
+        board,
+        footprint_ids,
+    ));
     while population.len() < config.population {
         population.push(random_genome(rng, net_names, footprint_ids.len()));
     }

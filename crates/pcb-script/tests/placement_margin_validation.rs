@@ -175,10 +175,7 @@ fn place_two_parts_whose_bodies_overlap_fails() {
     let reply = run_script(&project, "place U1 15 15\nplace U2 22 15\n");
     let results = extract_results(&reply);
     assert_eq!(results.len(), 2, "two place attempts: {reply:#?}");
-    assert_eq!(
-        results[0]["ok"], true,
-        "U1 should place fine: {reply:#?}"
-    );
+    assert_eq!(results[0]["ok"], true, "U1 should place fine: {reply:#?}");
     assert_eq!(
         results[1]["ok"], false,
         "U2 must be rejected for body overlap: {reply:#?}"
@@ -220,10 +217,7 @@ fn move_into_body_overlap_fails() {
     let reply = run_script(&project, "move U2 16 15\n");
     let results = extract_results(&reply);
     assert_eq!(results.len(), 1, "one move attempt: {reply:#?}");
-    assert_eq!(
-        results[0]["ok"], false,
-        "move should fail: {reply:#?}"
-    );
+    assert_eq!(results[0]["ok"], false, "move should fail: {reply:#?}");
     let err = results[0]["error"].as_str().unwrap_or_default();
     assert!(
         err.contains("body") && err.contains("U1"),

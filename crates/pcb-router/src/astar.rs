@@ -149,7 +149,11 @@ pub fn search(
     // the target column/row.
     let target_is_th = (0..grid.layer_count).any(|l| {
         matches!(
-            grid.get(GridPoint { layer: l, col: target.col, row: target.row }),
+            grid.get(GridPoint {
+                layer: l,
+                col: target.col,
+                row: target.row
+            }),
             Cell::DrilledPad(_)
         )
     });
@@ -240,12 +244,20 @@ pub fn search(
     // ordinary SMD pad only its own layer is walkable, so this seeds just
     // `start`, exactly as before.
     for layer in 0..grid.layer_count {
-        let p = GridPoint { layer, col: start.col, row: start.row };
+        let p = GridPoint {
+            layer,
+            col: start.col,
+            row: start.row,
+        };
         let walkable = p == start
             || matches!(grid.get(p), Cell::NetPad(n) | Cell::DrilledPad(n) | Cell::Trace(n) if n == target_net);
         if walkable && !g_score.contains_key(&p) {
             g_score.insert(p, seed_g);
-            open.push(Node { f: seed_g.saturating_add(wh(h(p))), g: seed_g, p });
+            open.push(Node {
+                f: seed_g.saturating_add(wh(h(p))),
+                g: seed_g,
+                p,
+            });
         }
     }
 
@@ -305,16 +317,18 @@ pub fn search(
             if is_via
                 && (0..grid.layer_count).any(|l| {
                     matches!(
-                        grid.get(GridPoint { layer: l, col: next_p.col, row: next_p.row }),
+                        grid.get(GridPoint {
+                            layer: l,
+                            col: next_p.col,
+                            row: next_p.row
+                        }),
                         Cell::DrilledPad(_)
                     )
                 })
             {
                 continue;
             }
-            if is_via
-                && via_safe_radius > 0
-                && !via_safe(grid, next_p, target_net, via_safe_radius)
+            if is_via && via_safe_radius > 0 && !via_safe(grid, next_p, target_net, via_safe_radius)
             {
                 continue;
             }
@@ -375,7 +389,11 @@ pub fn search(
                 // DrilledPad cases are already hard-rejected above.
                 let on_pad = (0..grid.layer_count).any(|l| {
                     matches!(
-                        grid.get(GridPoint { layer: l, col: next_p.col, row: next_p.row }),
+                        grid.get(GridPoint {
+                            layer: l,
+                            col: next_p.col,
+                            row: next_p.row
+                        }),
                         Cell::NetPad(_)
                     )
                 });
@@ -408,12 +426,14 @@ fn via_safe(grid: &Grid, p: GridPoint, target_net: u32, radius: i32) -> bool {
                 if dr * dr + dc * dc > r2 {
                     continue;
                 }
-                let np = GridPoint { layer, col: p.col + dc, row: p.row + dr };
+                let np = GridPoint {
+                    layer,
+                    col: p.col + dc,
+                    row: p.row + dr,
+                };
                 match grid.get(np) {
                     Cell::Obstacle => return false,
-                    Cell::NetPad(n) | Cell::DrilledPad(n) | Cell::Trace(n)
-                        if n != target_net =>
-                    {
+                    Cell::NetPad(n) | Cell::DrilledPad(n) | Cell::Trace(n) if n != target_net => {
                         return false;
                     }
                     _ => {}
@@ -444,17 +464,80 @@ fn neighbours(p: GridPoint, layer_count: u8) -> Vec<(GridPoint, Move)> {
     // the two outer layers it used pre-Phase-4. On a 2-layer board this
     // degenerates to the old single top↔bottom flip.
     let mut out = Vec::with_capacity(8 + layer_count.saturating_sub(1) as usize);
-    out.push((GridPoint { layer: l, col: c + 1, row: r }, Move::Ortho));
-    out.push((GridPoint { layer: l, col: c - 1, row: r }, Move::Ortho));
-    out.push((GridPoint { layer: l, col: c, row: r + 1 }, Move::Ortho));
-    out.push((GridPoint { layer: l, col: c, row: r - 1 }, Move::Ortho));
-    out.push((GridPoint { layer: l, col: c + 1, row: r + 1 }, Move::Diag));
-    out.push((GridPoint { layer: l, col: c + 1, row: r - 1 }, Move::Diag));
-    out.push((GridPoint { layer: l, col: c - 1, row: r + 1 }, Move::Diag));
-    out.push((GridPoint { layer: l, col: c - 1, row: r - 1 }, Move::Diag));
+    out.push((
+        GridPoint {
+            layer: l,
+            col: c + 1,
+            row: r,
+        },
+        Move::Ortho,
+    ));
+    out.push((
+        GridPoint {
+            layer: l,
+            col: c - 1,
+            row: r,
+        },
+        Move::Ortho,
+    ));
+    out.push((
+        GridPoint {
+            layer: l,
+            col: c,
+            row: r + 1,
+        },
+        Move::Ortho,
+    ));
+    out.push((
+        GridPoint {
+            layer: l,
+            col: c,
+            row: r - 1,
+        },
+        Move::Ortho,
+    ));
+    out.push((
+        GridPoint {
+            layer: l,
+            col: c + 1,
+            row: r + 1,
+        },
+        Move::Diag,
+    ));
+    out.push((
+        GridPoint {
+            layer: l,
+            col: c + 1,
+            row: r - 1,
+        },
+        Move::Diag,
+    ));
+    out.push((
+        GridPoint {
+            layer: l,
+            col: c - 1,
+            row: r + 1,
+        },
+        Move::Diag,
+    ));
+    out.push((
+        GridPoint {
+            layer: l,
+            col: c - 1,
+            row: r - 1,
+        },
+        Move::Diag,
+    ));
     for tl in 0..layer_count {
         if tl != l {
-            out.push((GridPoint { layer: tl, col: c, row: r }, Move::Via));
+            out.push((
+                GridPoint {
+                    layer: tl,
+                    col: c,
+                    row: r,
+                },
+                Move::Via,
+            ));
         }
     }
     out

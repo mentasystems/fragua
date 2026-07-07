@@ -378,10 +378,8 @@ fn theta_star_emits_diagonal_when_obstacle_forces_detour() {
 
     let report = route(&mut board, &RouteOptions::default());
     assert!(
-        report
-            .per_net
-            .iter()
-            .any(|(n, o)| n == "DIAG" && matches!(o, Outcome::Ok { trace_segments, .. } if *trace_segments >= 1)),
+        report.per_net.iter().any(|(n, o)| n == "DIAG"
+            && matches!(o, Outcome::Ok { trace_segments, .. } if *trace_segments >= 1)),
         "DIAG net should route, got {:?}",
         report.per_net,
     );
@@ -497,5 +495,10 @@ fn keepout_blocks_foreign_net_routing() {
         .iter()
         .filter(|(_, o)| matches!(o, Outcome::Failed { .. }))
         .collect();
-    assert_eq!(failed.len(), 1, "expected 1 failed net, got {:?}", report.per_net);
+    assert_eq!(
+        failed.len(),
+        1,
+        "expected 1 failed net, got {:?}",
+        report.per_net
+    );
 }

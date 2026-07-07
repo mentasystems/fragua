@@ -640,7 +640,9 @@ pub fn min_pairwise_gap(board: &Board, margins: &MarginMap) -> f64 {
     let fps: Vec<&Footprint> = board.footprints_in_order().collect();
     let mut m = f64::INFINITY;
     for i in 0..fps.len() {
-        let Some(a) = fp_bounds_with_margin(fps[i], margins) else { continue };
+        let Some(a) = fp_bounds_with_margin(fps[i], margins) else {
+            continue;
+        };
         for b in fps.iter().skip(i + 1) {
             if let Some(bb) = fp_bounds_with_margin(b, margins) {
                 m = m.min(aabb_gap_mm(a, bb));

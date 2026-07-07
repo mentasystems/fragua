@@ -487,7 +487,8 @@ fn tool_screenshot(project: &Project, args: &Value) -> Result<Value, ToolError> 
     }
     let view = input.view.as_deref().unwrap_or("board");
     let width = input.width.map_or(pcb_render::DEFAULT_PNG_WIDTH, |w| {
-        w.round().clamp(1.0, f64::from(pcb_render::MAX_PNG_DIMENSION)) as u32
+        w.round()
+            .clamp(1.0, f64::from(pcb_render::MAX_PNG_DIMENSION)) as u32
     });
 
     let snap = project.read();
@@ -502,8 +503,8 @@ fn tool_screenshot(project: &Project, args: &Value) -> Result<Value, ToolError> 
         }
     };
     drop(snap);
-    let png = png_result
-        .map_err(|e| ToolError::invalid_params(format!("screenshot: render: {e}")))?;
+    let png =
+        png_result.map_err(|e| ToolError::invalid_params(format!("screenshot: render: {e}")))?;
 
     let path = std::path::PathBuf::from(&input.path);
     std::fs::write(&path, &png).map_err(|e| {
@@ -942,14 +943,16 @@ fn tool_view_snapshot(project: &Project) -> Result<Value, ToolError> {
     let traces: Vec<Value> = board
         .traces
         .iter()
-        .map(|t| json!({
-            "id": t.id.0.to_string(),
-            "net": t.net,
-            "layer": if t.layer.is_top() { "top" } else { "bottom" },
-            "x1_mm": t.start.x.to_mm(), "y1_mm": t.start.y.to_mm(),
-            "x2_mm": t.end.x.to_mm(),   "y2_mm": t.end.y.to_mm(),
-            "width_mm": t.width.to_mm(),
-        }))
+        .map(|t| {
+            json!({
+                "id": t.id.0.to_string(),
+                "net": t.net,
+                "layer": if t.layer.is_top() { "top" } else { "bottom" },
+                "x1_mm": t.start.x.to_mm(), "y1_mm": t.start.y.to_mm(),
+                "x2_mm": t.end.x.to_mm(),   "y2_mm": t.end.y.to_mm(),
+                "width_mm": t.width.to_mm(),
+            })
+        })
         .collect();
     let vias: Vec<Value> = board
         .vias
@@ -2538,7 +2541,9 @@ fn tool_route_add_trace(project: &Project, args: &Value) -> Result<Value, ToolEr
     });
     Ok(text_result(format!(
         "trace {} on {} ({})",
-        id.0, layer_to_str(layer), input.net
+        id.0,
+        layer_to_str(layer),
+        input.net
     ))
     .with_data(json!({"id": id.0.to_string()})))
 }
@@ -2672,8 +2677,10 @@ fn tool_keepout_add(project: &Project, args: &Value) -> Result<Value, ToolError>
     };
     let id = project.add_keepout(kp);
     project.log(ActivityLevel::Info, format!("keepout.add: {}", id.0));
-    Ok(text_result(format!("Keepout added: {}", id.0))
-        .with_data(json!({ "id": id.0.to_string() })))
+    Ok(
+        text_result(format!("Keepout added: {}", id.0))
+            .with_data(json!({ "id": id.0.to_string() })),
+    )
 }
 
 fn tool_keepout_list(project: &Project) -> Result<Value, ToolError> {
@@ -3475,9 +3482,10 @@ fn tool_schematic_assign_net_class(project: &Project, args: &Value) -> Result<Va
     project
         .assign_net_to_class(input.net.clone(), input.class.clone())
         .map_err(ToolError::invalid_params)?;
-    Ok(text_result(format!("net `{}` → class `{}`", input.net, input.class)).with_data(
-        json!({ "net": input.net, "class": input.class }),
-    ))
+    Ok(
+        text_result(format!("net `{}` → class `{}`", input.net, input.class))
+            .with_data(json!({ "net": input.net, "class": input.class })),
+    )
 }
 
 fn tool_schematic_set_class(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -3779,9 +3787,11 @@ fn tool_sheet_add(project: &Project, args: &Value) -> Result<Value, ToolError> {
         ActivityLevel::Info,
         format!("sheet.add: {}", input.reference),
     );
-    Ok(text_result(format!("sheet `{}` added", input.reference)).with_data(json!({
-        "reference": input.reference,
-    })))
+    Ok(
+        text_result(format!("sheet `{}` added", input.reference)).with_data(json!({
+            "reference": input.reference,
+        })),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -3823,7 +3833,11 @@ fn tool_sheet_port(project: &Project, args: &Value) -> Result<Value, ToolError> 
         ActivityLevel::Info,
         format!(
             "sheet.port: {}.{} -> {}",
-            if input.sheet.is_empty() { "root" } else { input.sheet.as_str() },
+            if input.sheet.is_empty() {
+                "root"
+            } else {
+                input.sheet.as_str()
+            },
             input.name,
             input.net
         ),
@@ -3832,7 +3846,11 @@ fn tool_sheet_port(project: &Project, args: &Value) -> Result<Value, ToolError> 
         "port `{}` ({}) on sheet `{}` declared (internal net `{}`)",
         input.name,
         input.direction,
-        if input.sheet.is_empty() { "root" } else { input.sheet.as_str() },
+        if input.sheet.is_empty() {
+            "root"
+        } else {
+            input.sheet.as_str()
+        },
         input.net,
     ))
     .with_data(json!({
@@ -4168,8 +4186,10 @@ fn tool_layer_rename(project: &Project, args: &Value) -> Result<Value, ToolError
         )));
     }
     project.log(ActivityLevel::Info, "layer.rename");
-    Ok(text_result(format!("renamed `{}` → `{}`", input.old, input.new))
-        .with_data(json!({ "old": input.old, "new": input.new })))
+    Ok(
+        text_result(format!("renamed `{}` → `{}`", input.old, input.new))
+            .with_data(json!({ "old": input.old, "new": input.new })),
+    )
 }
 
 fn tool_impedance_suggest(project: &Project, args: &Value) -> Result<Value, ToolError> {

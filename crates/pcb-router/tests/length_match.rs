@@ -1,8 +1,6 @@
 //! Length-matching tests.
 
-use pcb_core::{
-    Board, CopperLayer, Id, Length, NetClass, Point, Rect, Schematic, Trace,
-};
+use pcb_core::{Board, CopperLayer, Id, Length, NetClass, Point, Rect, Schematic, Trace};
 use pcb_router::length_match_pass;
 
 fn trace(start: (f64, f64), end: (f64, f64), net: &str) -> Trace {

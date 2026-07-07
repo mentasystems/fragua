@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use pcb_core::{Board, CopperLayer, Footprint, Id, Length, Pad, PlacementMargin, Point, Rect, Trace};
+use pcb_core::{
+    Board, CopperLayer, Footprint, Id, Length, Pad, PlacementMargin, Point, Rect, Trace,
+};
 use pcb_drc::{run, DrcOptions, Severity, ViolationKind};
 
 fn pad(num: &str, off_x: f64, off_y: f64, net: Option<&str>) -> Pad {

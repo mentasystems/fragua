@@ -113,9 +113,11 @@ pub fn render_svg_with_margins(board: &Board, margins: &PlacementMarginMap) -> S
     // pre-Phase-4 behaviour.
     let stackup_count = board.stackup.layer_count();
     for idx in (1..stackup_count).rev() {
-        for trace in board.traces.iter().filter(|t| {
-            t.layer.index == idx && !orphans.contains(&t.id)
-        }) {
+        for trace in board
+            .traces
+            .iter()
+            .filter(|t| t.layer.index == idx && !orphans.contains(&t.id))
+        {
             write_trace(&mut svg, trace);
         }
     }
@@ -661,12 +663,8 @@ fn write_footprint(
         if let Some(pad_bbox) = local_pad_bbox(fp) {
             let bx = pad_bbox.min.x.to_mm() - margin.left_mm;
             let by = pad_bbox.min.y.to_mm() - margin.bottom_mm;
-            let bw = (pad_bbox.max.x - pad_bbox.min.x).to_mm()
-                + margin.left_mm
-                + margin.right_mm;
-            let bh = (pad_bbox.max.y - pad_bbox.min.y).to_mm()
-                + margin.top_mm
-                + margin.bottom_mm;
+            let bw = (pad_bbox.max.x - pad_bbox.min.x).to_mm() + margin.left_mm + margin.right_mm;
+            let bh = (pad_bbox.max.y - pad_bbox.min.y).to_mm() + margin.top_mm + margin.bottom_mm;
             let _ = write!(
                 svg,
                 r##"<rect data-body-outline="{r}" x="{bx:.3}" y="{by:.3}" width="{bw:.3}" height="{bh:.3}" fill="none" stroke="#6e7681" stroke-width="0.08" stroke-dasharray="0.4 0.3" pointer-events="none"/>"##,
@@ -972,7 +970,11 @@ pub fn render_library_entry_svg(entry: &pcb_core::LibraryEntry) -> String {
         // Y-flip the text group because the outer `scale(1,-1)` would
         // otherwise mirror the glyphs.
         let pin_number = pad.number.as_str();
-        let net_label = if pad.name.is_empty() { None } else { Some(pad.name.as_str()) };
+        let net_label = if pad.name.is_empty() {
+            None
+        } else {
+            Some(pad.name.as_str())
+        };
         let base_sz = (pad.w_mm.min(pad.h_mm) * 0.45).clamp(0.3, 1.2);
         let label_color = if is_gnd { "#ff2bd6" } else { "#0e1116" };
         // When there are two lines, shrink slightly and offset.

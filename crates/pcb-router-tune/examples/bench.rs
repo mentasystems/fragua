@@ -31,7 +31,8 @@ struct ProjectFile {
 fn is_power(net: &str) -> bool {
     let u = net.to_ascii_uppercase();
     const PREFIXES: &[&str] = &[
-        "GND", "VBUS", "+3V3", "3V3", "+5V", "5V", "VCC", "VDD", "VIN", "+1V", "VSYS", "PWR", "VDDA",
+        "GND", "VBUS", "+3V3", "3V3", "+5V", "5V", "VCC", "VDD", "VIN", "+1V", "VSYS", "PWR",
+        "VDDA",
     ];
     PREFIXES.iter().any(|p| u == *p || u.starts_with(p))
 }
@@ -43,11 +44,25 @@ fn dist_mm(a: Point, b: Point) -> f64 {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: bench <project.json> [cell_mm] [via_cost]");
-    let cell_mm: f64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(0.25);
-    let via_cost: u32 = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(8);
-    let layers: u8 = std::env::args().nth(4).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let do_place: bool = std::env::args().nth(5).map(|s| s == "place").unwrap_or(false);
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: bench <project.json> [cell_mm] [via_cost]");
+    let cell_mm: f64 = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.25);
+    let via_cost: u32 = std::env::args()
+        .nth(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    let layers: u8 = std::env::args()
+        .nth(4)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let do_place: bool = std::env::args()
+        .nth(5)
+        .map(|s| s == "place")
+        .unwrap_or(false);
     let bytes = std::fs::read(&path).expect("read project");
     let pf: ProjectFile = serde_json::from_slice(&bytes).expect("parse project");
 
@@ -71,8 +86,14 @@ fn main() {
             .collect();
         // Placer seed from the documented `PSEED` env var (the harness
         // previously hard-coded 7 and ignored PSEED entirely).
-        let seed: u64 = std::env::var("PSEED").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
-        let opts = pcb_placer::PlaceOptions { seed, ..Default::default() };
+        let seed: u64 = std::env::var("PSEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(7);
+        let opts = pcb_placer::PlaceOptions {
+            seed,
+            ..Default::default()
+        };
         let margins: pcb_placer::MarginMap = Default::default();
         match pcb_placer::place(&mut board, &movable, &opts, &margins) {
             Ok(rep) => {
@@ -114,10 +135,16 @@ fn main() {
         clearance: Length::from_mm(0.20),
         via_cost,
         via_drill: Length::from_mm(
-            std::env::var("VIA_DRILL").ok().and_then(|s| s.parse().ok()).unwrap_or(0.30),
+            std::env::var("VIA_DRILL")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.30),
         ),
         via_diameter: Length::from_mm(
-            std::env::var("VIA_DIA").ok().and_then(|s| s.parse().ok()).unwrap_or(0.60),
+            std::env::var("VIA_DIA")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.60),
         ),
         net_overrides: Default::default(),
         schematic: Some(sch.clone()),
@@ -141,7 +168,15 @@ fn main() {
 
     let t0 = std::time::Instant::now();
     let report = if std::env::var("NOROUTE").is_ok() {
-        pcb_router::RouteReport { per_net: vec![], trace_count: 0, via_count: 0, total_length_mm: 0.0, total_lower_bound_mm: 0.0, iterations: 0, hints: vec![] }
+        pcb_router::RouteReport {
+            per_net: vec![],
+            trace_count: 0,
+            via_count: 0,
+            total_length_mm: 0.0,
+            total_lower_bound_mm: 0.0,
+            iterations: 0,
+            hints: vec![],
+        }
     } else {
         pcb_router::route(&mut board, &opts)
     };
@@ -208,7 +243,11 @@ fn main() {
     );
     println!(
         "wire:  {:.1} mm total, {:.1} mm lower-bound, detour {:.3}x   traces={} vias={}",
-        report.total_length_mm, report.total_lower_bound_mm, detour, report.trace_count, report.via_count
+        report.total_length_mm,
+        report.total_lower_bound_mm,
+        detour,
+        report.trace_count,
+        report.via_count
     );
     let fanout_vias = board
         .vias
@@ -231,7 +270,10 @@ fn main() {
         let pads = &net_pads[net];
         let segs: Vec<&pcb_core::Trace> = board.traces.iter().filter(|t| &t.net == net).collect();
         if pour_nets.contains(net) {
-            println!("  {net:10} POUR  ({} pads)  [plane, not routed]", pads.len());
+            println!(
+                "  {net:10} POUR  ({} pads)  [plane, not routed]",
+                pads.len()
+            );
             continue;
         }
         // Judge by the TRUNK: the widest segment. Entries into fine-pitch
@@ -278,7 +320,9 @@ fn main() {
         println!("FAILED-NET pad crowding (proxy for placement box-in):");
         let outline = board.outline;
         for net in &failed {
-            let Some(pads) = net_pads.get(*net) else { continue };
+            let Some(pads) = net_pads.get(*net) else {
+                continue;
+            };
             let mut crowded = 0;
             for p in pads {
                 // nearest foreign pad edge distance
@@ -307,7 +351,11 @@ fn main() {
                     crowded += 1;
                 }
             }
-            println!("  {net:10} {}/{} pads crowded (<0.6mm to foreign pad/edge)", crowded, pads.len());
+            println!(
+                "  {net:10} {}/{} pads crowded (<0.6mm to foreign pad/edge)",
+                crowded,
+                pads.len()
+            );
         }
     }
 

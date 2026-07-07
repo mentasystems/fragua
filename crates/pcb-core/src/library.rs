@@ -218,10 +218,7 @@ impl PlacementMargin {
     /// common case.
     #[must_use]
     pub fn is_zero(self) -> bool {
-        self.top_mm <= 0.0
-            && self.right_mm <= 0.0
-            && self.bottom_mm <= 0.0
-            && self.left_mm <= 0.0
+        self.top_mm <= 0.0 && self.right_mm <= 0.0 && self.bottom_mm <= 0.0 && self.left_mm <= 0.0
     }
 
     /// Pack the margin as the placer's `[top, right, bottom, left]`
@@ -548,11 +545,7 @@ impl Library {
 
     /// Overwrite the per-side placement margin on an entry. Returns
     /// `true` if the entry was found.
-    pub fn set_placement_margin(
-        &self,
-        key: &str,
-        margin: PlacementMargin,
-    ) -> Result<bool, String> {
+    pub fn set_placement_margin(&self, key: &str, margin: PlacementMargin) -> Result<bool, String> {
         let mut inner = self.inner.write().expect("library lock poisoned");
         let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) else {
             return Err(format!("library: no entry with key {key}"));

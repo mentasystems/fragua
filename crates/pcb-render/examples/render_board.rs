@@ -9,8 +9,12 @@ use pcb_core::Project;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let file = args.next().expect("usage: render_board <file> <out.png> [width_px]");
-    let out = args.next().expect("usage: render_board <file> <out.png> [width_px]");
+    let file = args
+        .next()
+        .expect("usage: render_board <file> <out.png> [width_px]");
+    let out = args
+        .next()
+        .expect("usage: render_board <file> <out.png> [width_px]");
     let width: u32 = args.next().map_or(2400, |w| w.parse().expect("width_px"));
 
     let proj = Project::load_from_path(Path::new(&file)).expect("load project");

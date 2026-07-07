@@ -203,9 +203,7 @@ fn pad_is_isolated<S: std::hash::BuildHasher>(
         has_pour = true;
         match pour.thermal_relief {
             crate::board::ThermalRelief::Solid => return false, // pour floods the pad
-            crate::board::ThermalRelief::Spokes4 {
-                spoke_width_mm, ..
-            } => {
+            crate::board::ThermalRelief::Spokes4 { spoke_width_mm, .. } => {
                 let spoke_half = Length::from_mm(spoke_width_mm) / 2;
                 let spokes = select_spokes(
                     center,
@@ -246,14 +244,15 @@ fn same_net_trace_or_via_touches(
 ) -> bool {
     let hx = pw.0 / 2;
     let hy = ph.0 / 2;
-    let inside = |p: Point| {
-        (p.x.0 - center.x.0).abs() <= hx && (p.y.0 - center.y.0).abs() <= hy
-    };
+    let inside = |p: Point| (p.x.0 - center.x.0).abs() <= hx && (p.y.0 - center.y.0).abs() <= hy;
     board
         .traces
         .iter()
         .any(|t| t.net == net && (inside(t.start) || inside(t.end)))
-        || board.vias.iter().any(|v| v.net == net && inside(v.position))
+        || board
+            .vias
+            .iter()
+            .any(|v| v.net == net && inside(v.position))
 }
 
 /// Plan stitching vias for every isolated plane pad on the board.
@@ -352,8 +351,7 @@ fn find_via_spot<S: std::hash::BuildHasher>(
     // phase 2 (no degenerate stub inside the pad).
     let hx = pad_w.0 / 2 + via_radius.0;
     let hy = pad_h.0 / 2 + via_radius.0;
-    let outside_pad =
-        |p: Point| (p.x.0 - center.x.0).abs() > hx || (p.y.0 - center.y.0).abs() > hy;
+    let outside_pad = |p: Point| (p.x.0 - center.x.0).abs() > hx || (p.y.0 - center.y.0).abs() > hy;
     // Phase 1: a via offset from the pad, reachable by a stub clear of
     // foreign copper on the pad's layer. Scan rings outward; nearest wins.
     let step = 100_000_i64; // 0.1 mm
@@ -381,7 +379,14 @@ fn find_via_spot<S: std::hash::BuildHasher>(
             ) {
                 continue;
             }
-            if !ties_to_a_pour(board, pos, net, params.clearance, orphan_traces, orphan_vias) {
+            if !ties_to_a_pour(
+                board,
+                pos,
+                net,
+                params.clearance,
+                orphan_traces,
+                orphan_vias,
+            ) {
                 continue;
             }
             // The stub from the pad to the via must clear foreign copper
@@ -418,8 +423,14 @@ fn find_via_spot<S: std::hash::BuildHasher>(
         net,
         orphan_traces,
         orphan_vias,
-    ) && ties_to_a_pour(board, center, net, params.clearance, orphan_traces, orphan_vias)
-    {
+    ) && ties_to_a_pour(
+        board,
+        center,
+        net,
+        params.clearance,
+        orphan_traces,
+        orphan_vias,
+    ) {
         return Some((center, true));
     }
     None
@@ -543,7 +554,12 @@ mod tests {
             Point::new(Length::from_mm(40.0), Length::from_mm(20.0)),
         ));
         // Isolated GND pad at board centre.
-        b.add_footprint(fp("U1", 20.0, 10.0, vec![pad("10", 0.0, 0.0, 1.5, 1.5, "GND")]));
+        b.add_footprint(fp(
+            "U1",
+            20.0,
+            10.0,
+            vec![pad("10", 0.0, 0.0, 1.5, 1.5, "GND")],
+        ));
         // Four 3 mm foreign pads at 2.4 mm — they overlap at the corners,
         // leaving only a ~0.15 mm ring around the GND pad (no spoke,
         // diagonal or fine-sweep direction escapes).
@@ -578,7 +594,10 @@ mod tests {
 
         let plan = plan_stitches(&b, StitchParams::default());
         assert_eq!(plan.proposals.len(), 1, "expected one stitch");
-        assert!(plan.unreachable.is_empty(), "should be reachable via Bottom");
+        assert!(
+            plan.unreachable.is_empty(),
+            "should be reachable via Bottom"
+        );
         let s = &plan.proposals[0];
         assert_eq!(s.pad_ref, "U1.10");
         assert!(s.via_in_pad, "fully boxed → via-in-pad");
@@ -602,7 +621,12 @@ mod tests {
             Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
             Point::new(Length::from_mm(40.0), Length::from_mm(20.0)),
         ));
-        b.add_footprint(fp("U1", 20.0, 10.0, vec![pad("1", 0.0, 0.0, 1.5, 1.5, "GND")]));
+        b.add_footprint(fp(
+            "U1",
+            20.0,
+            10.0,
+            vec![pad("1", 0.0, 0.0, 1.5, 1.5, "GND")],
+        ));
         b.add_pour(Pour {
             net: "GND".into(),
             layer: Layer::TOP,

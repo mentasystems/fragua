@@ -123,10 +123,7 @@ fn flip_h_mirrors_pad_x_at_palette_spawn() {
 
     // The original library entry should still have its native coords —
     // index.json must not change behind the user's back.
-    let entry = project
-        .library()
-        .find("test_flip_h")
-        .expect("entry stored");
+    let entry = project.library().find("test_flip_h").expect("entry stored");
     assert_eq!(entry.pads[0].x_mm, 2.0, "library entry stays native");
     assert_eq!(entry.pads[1].x_mm, -2.0, "library entry stays native");
 

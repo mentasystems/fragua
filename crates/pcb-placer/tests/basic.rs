@@ -62,8 +62,13 @@ fn placer_reduces_hpwl_on_two_far_apart_resistors() {
         seed: 42,
         ..PlaceOptions::default()
     };
-    let report = place(&mut board, &["R1".to_string(), "R2".to_string()], &opts, &MarginMap::new())
-        .expect("placer should succeed");
+    let report = place(
+        &mut board,
+        &["R1".to_string(), "R2".to_string()],
+        &opts,
+        &MarginMap::new(),
+    )
+    .expect("placer should succeed");
     assert!(
         report.final_hpwl_mm < report.initial_hpwl_mm,
         "expected HPWL to drop, got {:.2} → {:.2}",

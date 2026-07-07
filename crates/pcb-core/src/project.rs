@@ -319,11 +319,7 @@ impl Project {
 
     /// Declare or replace a port on the named sub-sheet (or the
     /// top-level schematic when `sheet_ref` is empty).
-    pub fn set_sheet_port(
-        &self,
-        sheet_ref: &str,
-        port: crate::Port,
-    ) -> Result<(), String> {
+    pub fn set_sheet_port(&self, sheet_ref: &str, port: crate::Port) -> Result<(), String> {
         let mut inner = self.inner.write().expect("project lock poisoned");
         if sheet_ref.is_empty() {
             inner.schematic.set_port(port);
@@ -378,10 +374,7 @@ impl Project {
 
     /// Adopt a fab profile. `None` clears it.
     pub fn set_fab_profile(&self, profile: Option<FabProfileHandle>) {
-        *self
-            .fab_profile
-            .write()
-            .expect("fab_profile lock poisoned") = profile;
+        *self.fab_profile.write().expect("fab_profile lock poisoned") = profile;
     }
 
     /// Flatten the schematic's sheet tree into a single namespace.
@@ -463,10 +456,7 @@ impl Project {
     /// Lives on `Project` rather than `tools.rs` so other consumers (UI,
     /// future scripting layers) can reuse the same structure.
     #[allow(dead_code)]
-    pub fn delete_footprint_by_ref(
-        &self,
-        reference: &str,
-    ) -> Result<DeletedFootprint, String> {
+    pub fn delete_footprint_by_ref(&self, reference: &str) -> Result<DeletedFootprint, String> {
         let outcome = {
             let mut inner = self.inner.write().expect("project lock poisoned");
             let id = inner
@@ -919,7 +909,10 @@ impl Project {
         }
         // See comment in `place_from_palette`: body-off-board is a
         // hard reject regardless of `edge_mounted`.
-        if let Some(reason) = inner.board.body_outline_violation(&probe, margin_for(&probe)) {
+        if let Some(reason) = inner
+            .board
+            .body_outline_violation(&probe, margin_for(&probe))
+        {
             return Err(format!(
                 "{reference} rotated to {rotation_deg:.0}°: {reason}"
             ));
@@ -983,7 +976,10 @@ impl Project {
         }
         // See comment in `place_from_palette`: body-off-board is a
         // hard reject regardless of `edge_mounted`.
-        if let Some(reason) = inner.board.body_outline_violation(&probe, margin_for(&probe)) {
+        if let Some(reason) = inner
+            .board
+            .body_outline_violation(&probe, margin_for(&probe))
+        {
             return Err(format!(
                 "moving {reference} to ({:.2}, {:.2}) mm: {reason}",
                 position.x.to_mm(),

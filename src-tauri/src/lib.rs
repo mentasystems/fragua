@@ -424,10 +424,7 @@ fn library_set_placement_margin(
         bottom_mm: bottom_mm.max(0.0),
         left_mm: left_mm.max(0.0),
     };
-    state
-        .project
-        .library()
-        .set_placement_margin(&key, margin)?;
+    state.project.library().set_placement_margin(&key, margin)?;
     state.project.notify_library_changed();
     Ok(())
 }
@@ -862,22 +859,26 @@ fn start_autoroute(
         // Progress text always fires so the user sees evaluation count
         // tick up between commits.
         let mut last_commit = std::time::Instant::now();
-        let result = pcb_router_tune::run_search(&board, &config, &drc_opts, &stop_flag, |p, trial_board| {
-            let now = std::time::Instant::now();
-            if p.improved || now.duration_since(last_commit).as_millis() >= 500 {
-                // Sync rotations first so the SVG re-render the
-                // RoutingChanged event triggers picks up the GA's
-                // current orientation pick alongside the new traces.
-                progress_project.sync_footprint_rotations(trial_board);
-                progress_project.replace_routing(
-                    trial_board.traces.clone(),
-                    trial_board.vias.clone(),
-                );
-                last_commit = now;
-            }
-            let payload: AutorouteProgressPayload = p.into();
-            let _ = progress_app.emit("autoroute:progress", &payload);
-        });
+        let result = pcb_router_tune::run_search(
+            &board,
+            &config,
+            &drc_opts,
+            &stop_flag,
+            |p, trial_board| {
+                let now = std::time::Instant::now();
+                if p.improved || now.duration_since(last_commit).as_millis() >= 500 {
+                    // Sync rotations first so the SVG re-render the
+                    // RoutingChanged event triggers picks up the GA's
+                    // current orientation pick alongside the new traces.
+                    progress_project.sync_footprint_rotations(trial_board);
+                    progress_project
+                        .replace_routing(trial_board.traces.clone(), trial_board.vias.clone());
+                    last_commit = now;
+                }
+                let payload: AutorouteProgressPayload = p.into();
+                let _ = progress_app.emit("autoroute:progress", &payload);
+            },
+        );
 
         match result {
             Ok((best_board, outcome)) => {
@@ -1496,8 +1497,15 @@ mod http {
                 );
                 write_status(sock, 200, "OK", "image/png", &bytes).await
             }
-            Err(e) => write_text(sock, 500, "Internal Server Error", &format!("render: {e}\n"))
-                .await,
+            Err(e) => {
+                write_text(
+                    sock,
+                    500,
+                    "Internal Server Error",
+                    &format!("render: {e}\n"),
+                )
+                .await
+            }
         }
     }
 

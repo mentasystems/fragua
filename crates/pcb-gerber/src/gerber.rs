@@ -363,14 +363,14 @@ pub fn write_copper(board: &Board, side: Side, w: &mut impl Write) -> io::Result
                         let Some(net) = pad_net else { continue };
                         let spoke_half = Length::from_mm(spoke_width_mm) / 2;
                         let reach = Length(gap.0 + 100_000); // gap + 0.1 mm overshoot
-                        // Spokes are *dark* copper bars emitted after the
-                        // clearance-void pass, so one that crosses a
-                        // foreign net's void would re-deposit copper over
-                        // it and short pad/pour ↔ that net. `select_spokes`
-                        // keeps only the spokes that stay clear of all
-                        // foreign copper, and falls back to 45° diagonals
-                        // so a pad boxed in on all four axes still bonds
-                        // to its plane instead of floating.
+                                                             // Spokes are *dark* copper bars emitted after the
+                                                             // clearance-void pass, so one that crosses a
+                                                             // foreign net's void would re-deposit copper over
+                                                             // it and short pad/pour ↔ that net. `select_spokes`
+                                                             // keeps only the spokes that stay clear of all
+                                                             // foreign copper, and falls back to 45° diagonals
+                                                             // so a pad boxed in on all four axes still bonds
+                                                             // to its plane instead of floating.
                         for (sa, sb) in pcb_core::thermal::select_spokes(
                             center,
                             pw,

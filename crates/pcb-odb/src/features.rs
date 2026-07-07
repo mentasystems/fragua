@@ -90,14 +90,11 @@ fn emit_copper_layer(out: &mut String, board: &Board, layer: CopperLayer) {
         if trace.layer != layer {
             continue;
         }
-        let net_id = net_idx
-            .get(trace.net.as_str())
-            .copied()
-            .unwrap_or_else(|| {
-                let n = net_idx.len();
-                net_idx.insert(trace.net.clone(), n);
-                n
-            });
+        let net_id = net_idx.get(trace.net.as_str()).copied().unwrap_or_else(|| {
+            let n = net_idx.len();
+            net_idx.insert(trace.net.clone(), n);
+            n
+        });
         out.push_str(&format!(
             "L {x1:.4} {y1:.4} {x2:.4} {y2:.4} 1 P NET={net} ID={id}\n",
             x1 = trace.start.x.to_mm(),

@@ -109,18 +109,13 @@ pub fn length_match_pass(board: &mut Board, schematic: &Schematic) -> Vec<Length
             continue;
         }
         // Find the longest segment on this net.
-        let Some(longest_idx) = by_net
-            .get(&net)
-            .and_then(|idxs| {
-                idxs.iter()
-                    .copied()
-                    .max_by(|a, b| {
-                        trace_length_mm(&board.traces[*a])
-                            .partial_cmp(&trace_length_mm(&board.traces[*b]))
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
+        let Some(longest_idx) = by_net.get(&net).and_then(|idxs| {
+            idxs.iter().copied().max_by(|a, b| {
+                trace_length_mm(&board.traces[*a])
+                    .partial_cmp(&trace_length_mm(&board.traces[*b]))
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
-        else {
+        }) else {
             out.push(LengthAdjustment {
                 net,
                 original_mm: current,
@@ -259,7 +254,11 @@ pub fn length_match_pass(board: &mut Board, schematic: &Schematic) -> Vec<Length
         for _ in 0..n_cycles {
             for _ in 0..2 {
                 t_along += cycle_len / 2.0;
-                let sign = if half_idx.is_multiple_of(2) { 1.0 } else { -1.0 };
+                let sign = if half_idx.is_multiple_of(2) {
+                    1.0
+                } else {
+                    -1.0
+                };
                 let wx = sx + ux * t_along + sign * amp_mm * nx;
                 let wy = sy + uy * t_along + sign * amp_mm * ny;
                 waypoints.push((wx, wy));

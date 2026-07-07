@@ -109,8 +109,8 @@ const POWER_MIN_TRACE_WIDTH_MM: f64 = 0.50;
 pub fn is_power_net(net: &str) -> bool {
     let u = net.to_ascii_uppercase();
     const RAILS: &[&str] = &[
-        "GND", "VBUS", "+3V3", "3V3", "+5V", "5V", "+1V", "1V", "VCC", "VDD", "VDDA", "VIN", "VSYS",
-        "VBAT", "PWR", "+12V", "12V",
+        "GND", "VBUS", "+3V3", "3V3", "+5V", "5V", "+1V", "1V", "VCC", "VDD", "VDDA", "VIN",
+        "VSYS", "VBAT", "PWR", "+12V", "12V",
     ];
     RAILS.iter().any(|p| u == *p || u.starts_with(p))
 }
@@ -187,9 +187,7 @@ fn resolve_from_overrides(opts: &RouteOptions, net: &str) -> (Length, Length, bo
     let ov = opts.net_overrides.get(net);
     let w = ov.and_then(|o| o.trace_width);
     let explicit = w.is_some();
-    let c = ov
-        .and_then(|o| o.clearance)
-        .unwrap_or(opts.clearance);
+    let c = ov.and_then(|o| o.clearance).unwrap_or(opts.clearance);
     (w.unwrap_or(opts.trace_width), c, explicit)
 }
 
@@ -352,7 +350,10 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     if !fanout.through_pads.is_empty() {
         let fanned_nets: HashSet<String> = nets
             .iter()
-            .filter(|(_, pads)| pads.iter().any(|p| fanout.through_pads.contains(&p.pad_ref)))
+            .filter(|(_, pads)| {
+                pads.iter()
+                    .any(|p| fanout.through_pads.contains(&p.pad_ref))
+            })
             .map(|(n, _)| n.clone())
             .collect();
         if !fanned_nets.is_empty() {
@@ -724,8 +725,7 @@ fn route_pass(
         // The fanout via is the JLCPCB-minimum 0.30 mm; its copper radius
         // in cells, floored at one cell so the landing is always at least
         // a single reachable DrilledPad cell.
-        let fanout_via_copper_cells =
-            ceil_cells(Length::from_mm(0.15).0, opts.cell.0).max(1);
+        let fanout_via_copper_cells = ceil_cells(Length::from_mm(0.15).0, opts.cell.0).max(1);
         for fp in board.footprints_in_order() {
             for pad in &fp.pads {
                 let key = format!("{}.{}", fp.reference, pad.number);
@@ -920,231 +920,228 @@ fn route_one_net(
     via_copper_cells: i32,
     pour_nets: &std::collections::HashSet<String>,
 ) -> NetRoute {
-        if pour_nets.contains(net_name) {
-            return NetRoute::Ok {
-                trace_segments: 0,
-                vias: 0,
-                length_mm: 0.0,
-                lower_bound_mm: 0.0,
-            };
-        }
-        if pad_points.len() < 2 {
-            return NetRoute::Ok {
-                trace_segments: 0,
-                vias: 0,
-                length_mm: 0.0,
-                lower_bound_mm: 0.0,
-            };
-        }
-
-        // Differential-pair follow attempt. If this net's class names
-        // a partner that already has traces, try to lay parallel
-        // geometry first. On success we skip the normal Theta* loop
-        // for this net; on failure we log and fall through.
-        let (net_trace_width_early, _) = effective_net_rules(opts, net_name);
-        if let Some(partner) = diff_pair_partner(opts, net_name) {
-            let partner_traces: Vec<Trace> = board
-                .traces
-                .iter()
-                .filter(|t| t.net == partner)
-                .cloned()
-                .collect();
-            if !partner_traces.is_empty() {
-                let gap_mm = opts
-                    .schematic
-                    .as_ref()
-                    .and_then(|s| s.class_for(net_name).diff_gap_mm)
-                    .unwrap_or(0.2);
-                match try_diff_pair_follow(
-                    board,
-                    grid,
-                    pad_points,
-                    &partner_traces,
-                    net_name,
-                    net_id,
-                    net_trace_width_early,
-                    gap_mm,
-                    opts,
-                    via_copper_cells,
-                    cost_map,
-                ) {
-                    Ok((segs, vias, length_mm)) => {
-                        return NetRoute::Ok {
-                            trace_segments: segs,
-                            vias,
-                            length_mm,
-                            lower_bound_mm: hpwl_mm(pad_points),
-                        };
-                    }
-                    Err(reason) => {
-                        eprintln!(
-                            "diff_pair.fallback: net={net_name} reason={reason}"
-                        );
-                    }
-                }
-            }
-        }
-
-        // Lower bound = HPWL: half-perimeter of the pad bounding box,
-        // mm. The minimum wire length any tree connecting these pads
-        // can use, regardless of topology. Same metric the DRC reports
-        // so router and DRC agree on what "optimal" means.
-        let net_lower_bound_mm = hpwl_mm(pad_points);
-
-        // Pick the geographically central pad as the seed: minimum sum
-        // of Manhattan distances to every other pad. With multi-source
-        // A* the hub is no longer mandatory — any same-net cell is a
-        // search source — but the spoke ordering "closest to seed
-        // first" still helps build a tight Prim-style tree.
-        // Prefer a NON-fanned-out pad as the seed when one exists: the
-        // seed anchors the trunk, and a wide trunk emanating from a
-        // fine-pitch fanout pad would short its neighbours. Among the
-        // eligible pads pick the geographically central one.
-        let eligible: Vec<usize> = {
-            let non_fanout: Vec<usize> = (0..pad_points.len())
-                .filter(|&i| !fanout.through_pads.contains(&pad_points[i].pad_ref))
-                .collect();
-            if non_fanout.is_empty() {
-                (0..pad_points.len()).collect()
-            } else {
-                non_fanout
-            }
+    if pour_nets.contains(net_name) {
+        return NetRoute::Ok {
+            trace_segments: 0,
+            vias: 0,
+            length_mm: 0.0,
+            lower_bound_mm: 0.0,
         };
-        let seed_idx = *eligible
-            .iter()
-            .min_by_key(|&&i| {
-                pad_points
-                    .iter()
-                    .enumerate()
-                    .filter(|(j, _)| *j != i)
-                    .map(|(_, q)| {
-                        let p = pad_points[i].center;
-                        let q = q.center;
-                        (p.x.0 - q.x.0).unsigned_abs() + (p.y.0 - q.y.0).unsigned_abs()
-                    })
-                    .sum::<u64>()
-            })
-            .unwrap_or(&0);
-        let seed = pad_points[seed_idx].clone();
-        // For a fanned-out pad, aim at the via-in-pad, not the pad centre:
-        // the via (possibly slid along the pad) is the only point where the
-        // inner-layer copper exists, so it is where the search must land.
-        let route_point = |p: &NetPadInfo| -> Point {
-            fanout
-                .via_positions
-                .get(&p.pad_ref)
-                .copied()
-                .unwrap_or(p.center)
+    }
+    if pad_points.len() < 2 {
+        return NetRoute::Ok {
+            trace_segments: 0,
+            vias: 0,
+            length_mm: 0.0,
+            lower_bound_mm: 0.0,
         };
-        let seed_grid = grid.snap(route_point(&seed), seed.layer);
-        let seed_is_fanout = fanout.through_pads.contains(&seed.pad_ref);
+    }
 
-        // Resolve this net's trace width and clearance: schematic class
-        // first, then per-net override, then the global default.
-        let (net_trace_width, net_clearance) = effective_net_rules(opts, net_name);
-        // Via-safety radius is per net (via geometry is fixed; only the
-        // net's clearance varies). A via's copper extends `via_diameter/2`
-        // and must keep `clearance` to foreign copper — whose own
-        // half-width is already baked into its bare stamp, so no extra
-        // term is needed here.
-        let via_safe_radius =
-            ceil_cells(opts.via_diameter.0 / 2 + net_clearance.0, opts.cell.0).max(1);
-
-        let mut net_segments = 0usize;
-        let mut net_vias = 0usize;
-        let mut net_length_mm = 0.0_f64;
-        // The net's already-laid trace cells, accumulated as each spoke
-        // is routed. Seeds the multi-source search (Prim/Steiner growth)
-        // without rescanning the whole grid — the key to fine-grid speed.
-        let mut net_trace_cells: Vec<GridPoint> = Vec::new();
-        // Spokes ordered by distance to seed (closest first). After
-        // each spoke is laid, multi-source A* will pick whichever
-        // existing same-net cell is closest to the next spoke — so the
-        // tree grows Prim-style, not star.
-        let mut spokes_sorted: Vec<NetPadInfo> = pad_points
+    // Differential-pair follow attempt. If this net's class names
+    // a partner that already has traces, try to lay parallel
+    // geometry first. On success we skip the normal Theta* loop
+    // for this net; on failure we log and fall through.
+    let (net_trace_width_early, _) = effective_net_rules(opts, net_name);
+    if let Some(partner) = diff_pair_partner(opts, net_name) {
+        let partner_traces: Vec<Trace> = board
+            .traces
             .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != seed_idx)
-            .map(|(_, p)| p.clone())
+            .filter(|t| t.net == partner)
+            .cloned()
             .collect();
-        spokes_sorted.sort_by_key(|q| {
-            (seed.center.x.0 - q.center.x.0).unsigned_abs()
-                + (seed.center.y.0 - q.center.y.0).unsigned_abs()
-        });
-        for spoke in spokes_sorted {
-            let spoke_grid = grid.snap(route_point(&spoke), spoke.layer);
-            // Neck a spoke down to the default (signal) width when either
-            // end is a fanned-out fine-pitch pad. A 0.5 mm power trace
-            // can't physically enter a 0.30 mm connector pin without
-            // shorting the 0.5 mm-pitch neighbour, so the entry necks —
-            // exactly what a hand layout does. The trunk between regular
-            // pads keeps the full power width.
-            let spoke_is_fanout = fanout.through_pads.contains(&spoke.pad_ref);
-            let spoke_width = if seed_is_fanout || spoke_is_fanout {
-                Length(net_trace_width.0.min(opts.trace_width.0))
-            } else {
-                net_trace_width
-            };
-            // Per-trace clearance + copper radii, from this spoke's
-            // (possibly necked) width. `clr_cells` drives the search-time
-            // clearance disk; `copper_cells` the bare-copper stamp.
-            let clr_cells = (ceil_cells(net_clearance.0 + spoke_width.0 / 2, opts.cell.0)
-                + CLEARANCE_GUARD_CELLS)
-                .max(1);
-            let copper_cells = ceil_cells(spoke_width.0 / 2, opts.cell.0).max(0);
-            let Some(result) = search(
-                grid,
-                seed_grid,
-                net_id,
-                opts.via_cost,
-                spoke_grid,
-                via_safe_radius,
-                clr_cells,
-                cost_map,
-                &net_trace_cells,
-                opts.heuristic_weight,
-            ) else {
-                return NetRoute::Failed {
-                    reason: format!(
-                        "no path to pad {} at ({:.2}, {:.2}) mm",
-                        spoke.pad_ref,
-                        spoke.center.x.to_mm(),
-                        spoke.center.y.to_mm(),
-                    ),
-                    corridor: Some((seed_grid, spoke_grid, clr_cells)),
-                };
-            };
-            let (segs, vias, length_mm) = lay_path(
+        if !partner_traces.is_empty() {
+            let gap_mm = opts
+                .schematic
+                .as_ref()
+                .and_then(|s| s.class_for(net_name).diff_gap_mm)
+                .unwrap_or(0.2);
+            match try_diff_pair_follow(
                 board,
                 grid,
-                &result.path,
+                pad_points,
+                &partner_traces,
                 net_name,
                 net_id,
+                net_trace_width_early,
+                gap_mm,
                 opts,
-                copper_cells,
                 via_copper_cells,
-                spoke_width,
-                Some(route_point(&spoke)),
-            );
-            net_segments += segs;
-            net_vias += vias;
-            net_length_mm += length_mm;
-            // Record this spoke's path cells as future search sources so
-            // the next spoke branches off the nearest point of the tree.
-            for w in result.path.windows(2) {
-                if w[0].layer == w[1].layer {
-                    net_trace_cells.extend(grid.line_cells(w[0], w[1]));
+                cost_map,
+            ) {
+                Ok((segs, vias, length_mm)) => {
+                    return NetRoute::Ok {
+                        trace_segments: segs,
+                        vias,
+                        length_mm,
+                        lower_bound_mm: hpwl_mm(pad_points),
+                    };
+                }
+                Err(reason) => {
+                    eprintln!("diff_pair.fallback: net={net_name} reason={reason}");
                 }
             }
-            // The spoke's own pad cell joins the tree too.
-            net_trace_cells.push(spoke_grid);
         }
-        NetRoute::Ok {
-            trace_segments: net_segments,
-            vias: net_vias,
-            length_mm: net_length_mm,
-            lower_bound_mm: net_lower_bound_mm,
+    }
+
+    // Lower bound = HPWL: half-perimeter of the pad bounding box,
+    // mm. The minimum wire length any tree connecting these pads
+    // can use, regardless of topology. Same metric the DRC reports
+    // so router and DRC agree on what "optimal" means.
+    let net_lower_bound_mm = hpwl_mm(pad_points);
+
+    // Pick the geographically central pad as the seed: minimum sum
+    // of Manhattan distances to every other pad. With multi-source
+    // A* the hub is no longer mandatory — any same-net cell is a
+    // search source — but the spoke ordering "closest to seed
+    // first" still helps build a tight Prim-style tree.
+    // Prefer a NON-fanned-out pad as the seed when one exists: the
+    // seed anchors the trunk, and a wide trunk emanating from a
+    // fine-pitch fanout pad would short its neighbours. Among the
+    // eligible pads pick the geographically central one.
+    let eligible: Vec<usize> = {
+        let non_fanout: Vec<usize> = (0..pad_points.len())
+            .filter(|&i| !fanout.through_pads.contains(&pad_points[i].pad_ref))
+            .collect();
+        if non_fanout.is_empty() {
+            (0..pad_points.len()).collect()
+        } else {
+            non_fanout
         }
+    };
+    let seed_idx = *eligible
+        .iter()
+        .min_by_key(|&&i| {
+            pad_points
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, q)| {
+                    let p = pad_points[i].center;
+                    let q = q.center;
+                    (p.x.0 - q.x.0).unsigned_abs() + (p.y.0 - q.y.0).unsigned_abs()
+                })
+                .sum::<u64>()
+        })
+        .unwrap_or(&0);
+    let seed = pad_points[seed_idx].clone();
+    // For a fanned-out pad, aim at the via-in-pad, not the pad centre:
+    // the via (possibly slid along the pad) is the only point where the
+    // inner-layer copper exists, so it is where the search must land.
+    let route_point = |p: &NetPadInfo| -> Point {
+        fanout
+            .via_positions
+            .get(&p.pad_ref)
+            .copied()
+            .unwrap_or(p.center)
+    };
+    let seed_grid = grid.snap(route_point(&seed), seed.layer);
+    let seed_is_fanout = fanout.through_pads.contains(&seed.pad_ref);
+
+    // Resolve this net's trace width and clearance: schematic class
+    // first, then per-net override, then the global default.
+    let (net_trace_width, net_clearance) = effective_net_rules(opts, net_name);
+    // Via-safety radius is per net (via geometry is fixed; only the
+    // net's clearance varies). A via's copper extends `via_diameter/2`
+    // and must keep `clearance` to foreign copper — whose own
+    // half-width is already baked into its bare stamp, so no extra
+    // term is needed here.
+    let via_safe_radius = ceil_cells(opts.via_diameter.0 / 2 + net_clearance.0, opts.cell.0).max(1);
+
+    let mut net_segments = 0usize;
+    let mut net_vias = 0usize;
+    let mut net_length_mm = 0.0_f64;
+    // The net's already-laid trace cells, accumulated as each spoke
+    // is routed. Seeds the multi-source search (Prim/Steiner growth)
+    // without rescanning the whole grid — the key to fine-grid speed.
+    let mut net_trace_cells: Vec<GridPoint> = Vec::new();
+    // Spokes ordered by distance to seed (closest first). After
+    // each spoke is laid, multi-source A* will pick whichever
+    // existing same-net cell is closest to the next spoke — so the
+    // tree grows Prim-style, not star.
+    let mut spokes_sorted: Vec<NetPadInfo> = pad_points
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != seed_idx)
+        .map(|(_, p)| p.clone())
+        .collect();
+    spokes_sorted.sort_by_key(|q| {
+        (seed.center.x.0 - q.center.x.0).unsigned_abs()
+            + (seed.center.y.0 - q.center.y.0).unsigned_abs()
+    });
+    for spoke in spokes_sorted {
+        let spoke_grid = grid.snap(route_point(&spoke), spoke.layer);
+        // Neck a spoke down to the default (signal) width when either
+        // end is a fanned-out fine-pitch pad. A 0.5 mm power trace
+        // can't physically enter a 0.30 mm connector pin without
+        // shorting the 0.5 mm-pitch neighbour, so the entry necks —
+        // exactly what a hand layout does. The trunk between regular
+        // pads keeps the full power width.
+        let spoke_is_fanout = fanout.through_pads.contains(&spoke.pad_ref);
+        let spoke_width = if seed_is_fanout || spoke_is_fanout {
+            Length(net_trace_width.0.min(opts.trace_width.0))
+        } else {
+            net_trace_width
+        };
+        // Per-trace clearance + copper radii, from this spoke's
+        // (possibly necked) width. `clr_cells` drives the search-time
+        // clearance disk; `copper_cells` the bare-copper stamp.
+        let clr_cells = (ceil_cells(net_clearance.0 + spoke_width.0 / 2, opts.cell.0)
+            + CLEARANCE_GUARD_CELLS)
+            .max(1);
+        let copper_cells = ceil_cells(spoke_width.0 / 2, opts.cell.0).max(0);
+        let Some(result) = search(
+            grid,
+            seed_grid,
+            net_id,
+            opts.via_cost,
+            spoke_grid,
+            via_safe_radius,
+            clr_cells,
+            cost_map,
+            &net_trace_cells,
+            opts.heuristic_weight,
+        ) else {
+            return NetRoute::Failed {
+                reason: format!(
+                    "no path to pad {} at ({:.2}, {:.2}) mm",
+                    spoke.pad_ref,
+                    spoke.center.x.to_mm(),
+                    spoke.center.y.to_mm(),
+                ),
+                corridor: Some((seed_grid, spoke_grid, clr_cells)),
+            };
+        };
+        let (segs, vias, length_mm) = lay_path(
+            board,
+            grid,
+            &result.path,
+            net_name,
+            net_id,
+            opts,
+            copper_cells,
+            via_copper_cells,
+            spoke_width,
+            Some(route_point(&spoke)),
+        );
+        net_segments += segs;
+        net_vias += vias;
+        net_length_mm += length_mm;
+        // Record this spoke's path cells as future search sources so
+        // the next spoke branches off the nearest point of the tree.
+        for w in result.path.windows(2) {
+            if w[0].layer == w[1].layer {
+                net_trace_cells.extend(grid.line_cells(w[0], w[1]));
+            }
+        }
+        // The spoke's own pad cell joins the tree too.
+        net_trace_cells.push(spoke_grid);
+    }
+    NetRoute::Ok {
+        trace_segments: net_segments,
+        vias: net_vias,
+        length_mm: net_length_mm,
+        lower_bound_mm: net_lower_bound_mm,
+    }
 }
 
 /// Byte-exact snapshot of the routing-mutable state, used to make a
@@ -1268,7 +1265,15 @@ fn try_ripup_route(
 
         // Route A through the freed corridor.
         let a_res = route_one_net(
-            board, grid, a_name, a_id, a_pads, opts, cost_map, fanout, via_copper_cells,
+            board,
+            grid,
+            a_name,
+            a_id,
+            a_pads,
+            opts,
+            cost_map,
+            fanout,
+            via_copper_cells,
             pour_nets,
         );
         let NetRoute::Ok { .. } = a_res else {
@@ -1285,7 +1290,15 @@ fn try_ripup_route(
             };
             let snap_r = Snapshot::take(board, grid);
             let mut r_res = route_one_net(
-                board, grid, rname, rid, r_pads, opts, cost_map, fanout, via_copper_cells,
+                board,
+                grid,
+                rname,
+                rid,
+                r_pads,
+                opts,
+                cost_map,
+                fanout,
+                via_copper_cells,
                 pour_nets,
             );
             if let NetRoute::Failed {
@@ -1299,8 +1312,22 @@ fn try_ripup_route(
                     // starts from a clean corridor.
                     Snapshot::restore(board, grid, &snap_r);
                     r_res = try_ripup_route(
-                        board, grid, rname, rid, r_pads, rcc, nets, net_id_of, opts, cost_map,
-                        fanout, via_copper_cells, pour_nets, routed_ids, taboo, outcomes,
+                        board,
+                        grid,
+                        rname,
+                        rid,
+                        r_pads,
+                        rcc,
+                        nets,
+                        net_id_of,
+                        opts,
+                        cost_map,
+                        fanout,
+                        via_copper_cells,
+                        pour_nets,
+                        routed_ids,
+                        taboo,
+                        outcomes,
                         depth + 1,
                     );
                 }
@@ -1331,7 +1358,15 @@ fn try_ripup_route(
     *taboo = taboo0;
     *outcomes = outcomes0;
     route_one_net(
-        board, grid, a_name, a_id, a_pads, opts, cost_map, fanout, via_copper_cells,
+        board,
+        grid,
+        a_name,
+        a_id,
+        a_pads,
+        opts,
+        cost_map,
+        fanout,
+        via_copper_cells,
         pour_nets,
     )
 }
@@ -1579,9 +1614,7 @@ fn check_diff_corridor_clear(
     // connector. Only unrelated copper demands full clearance.
     for fp in board.footprints_in_order() {
         for pad in &fp.pads {
-            if pad.net.as_deref() == Some(self_net)
-                || pad.net.as_deref() == Some(partner_net)
-            {
+            if pad.net.as_deref() == Some(self_net) || pad.net.as_deref() == Some(partner_net) {
                 continue;
             }
             if pad.layer != t.layer {
@@ -1708,9 +1741,8 @@ fn try_diff_pair_follow(
     // Per-trace clearance / copper / via-safe radii for net B, from its
     // own width and clearance — mirrors the spoke loop in `route_pass`.
     let (_, net_b_clearance) = effective_net_rules(opts, net_b);
-    let clr_cells_b = (ceil_cells(net_b_clearance.0 + width_b.0 / 2, opts.cell.0)
-        + CLEARANCE_GUARD_CELLS)
-        .max(1);
+    let clr_cells_b =
+        (ceil_cells(net_b_clearance.0 + width_b.0 / 2, opts.cell.0) + CLEARANCE_GUARD_CELLS).max(1);
     let copper_cells_b = ceil_cells(width_b.0 / 2, opts.cell.0).max(0);
     let via_safe_radius =
         ceil_cells(opts.via_diameter.0 / 2 + net_b_clearance.0, opts.cell.0).max(1);
@@ -1757,14 +1789,8 @@ fn try_diff_pair_follow(
         let sign = if pos_d <= neg_d { 1.0 } else { -1.0 };
         let ox = sign * offset_mm * nx;
         let oy = sign * offset_mm * ny;
-        let p_start = Point::new(
-            Length::from_mm(sx + ox),
-            Length::from_mm(sy + oy),
-        );
-        let p_end = Point::new(
-            Length::from_mm(ex + ox),
-            Length::from_mm(ey + oy),
-        );
+        let p_start = Point::new(Length::from_mm(sx + ox), Length::from_mm(sy + oy));
+        let p_end = Point::new(Length::from_mm(ex + ox), Length::from_mm(ey + oy));
         emitted.push(Trace {
             id: pcb_core::Id::new(),
             layer,
