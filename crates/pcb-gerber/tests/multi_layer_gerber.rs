@@ -31,13 +31,21 @@ fn footprint(reference: &str, x_mm: f64, y_mm: f64) -> Footprint {
 }
 
 fn tempdir() -> std::path::PathBuf {
+    // Cargo runs this binary's tests on parallel threads. `nanos` alone
+    // is not a reliable discriminator — on coarse-resolution clocks
+    // (observed on macOS) two near-simultaneous calls can read the same
+    // value and collide on one shared dir, so one test reads back a file
+    // another test has not written yet. A per-process atomic counter
+    // guarantees every call gets its own directory.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut p = std::env::temp_dir();
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    p.push(format!("pcb-gerber-mlt-{pid}-{nanos}"));
+    p.push(format!("pcb-gerber-mlt-{pid}-{nanos}-{seq}"));
     p
 }
 
@@ -113,7 +121,12 @@ fn pth_pad_emits_copper_and_mask_on_every_layer() {
 
     // Every copper gerber (top, both inners, bottom) must contain at
     // least one pad flash (`D03*`).
-    for name in ["pth-F_Cu.gbr", "pth-In1_Cu.gbr", "pth-In2_Cu.gbr", "pth-B_Cu.gbr"] {
+    for name in [
+        "pth-F_Cu.gbr",
+        "pth-In1_Cu.gbr",
+        "pth-In2_Cu.gbr",
+        "pth-B_Cu.gbr",
+    ] {
         let body = fs::read_to_string(dir.join(name)).unwrap();
         assert!(
             body.contains("D03*"),

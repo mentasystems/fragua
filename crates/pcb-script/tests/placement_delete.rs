@@ -8,11 +8,25 @@
 //! step executor pattern as `library_silk.rs`.
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 
 use pcb_core::Project;
 use serde_json::{json, Value};
+
+/// Every test in this file sandboxes the on-disk library by mutating the
+/// process-global `HOME` env var. Cargo runs a binary's tests on parallel
+/// threads, so without serialisation one test's `set_var("HOME", ...)` can
+/// land mid-flight through another's library save and the `index.json`
+/// rename resolves to a sibling test's (not-yet-created) `.pcb-library/`.
+/// Serialise behind a single mutex instead of forcing `--test-threads=1`.
+/// Same guard shape as `placement_margin_validation.rs`.
+fn test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
 
 struct NoopWake;
 impl Wake for NoopWake {
@@ -41,6 +55,7 @@ fn run_script(project: &Project, script: &str) -> Value {
 
 #[test]
 fn delete_ref_removes_footprint_and_connected_traces() {
+    let _guard = test_lock();
     // Sandbox the on-disk library to a temp HOME so the test does not
     // touch `~/.pcb-library/`.
     let tmp = std::env::temp_dir().join(format!("pcb-test-delete-{}", std::process::id()));
@@ -113,6 +128,7 @@ fn delete_ref_removes_footprint_and_connected_traces() {
 
 #[test]
 fn delete_unknown_ref_errors() {
+    let _guard = test_lock();
     let tmp = std::env::temp_dir().join(format!("pcb-test-delete-err-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("mkdir tmp HOME");
@@ -139,6 +155,7 @@ fn delete_unknown_ref_errors() {
 
 #[test]
 fn clear_board_drops_every_placement() {
+    let _guard = test_lock();
     let tmp = std::env::temp_dir().join(format!("pcb-test-clear-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("mkdir tmp HOME");
