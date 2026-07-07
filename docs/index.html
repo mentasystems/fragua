@@ -31,10 +31,17 @@
     <span>fragua</span>
   </div>
   <nav class="topbar-links">
-    <a href="#how">how it works</a>
-    <a href="#install">install</a>
-    <a href="#status">status</a>
+    <a href="#how" data-i18n="nav.how">how it works</a>
+    <a href="#install" data-i18n="nav.install">install</a>
+    <a href="#status" data-i18n="nav.status">status</a>
     <a class="github-link" href="https://github.com/mentasystems/fragua">GitHub →</a>
+    <!-- Language toggle. Auto-detects browser language on first visit
+         (es-* → Spanish, everything else → English) and persists the
+         explicit choice in localStorage. -->
+    <span class="lang-toggle" role="group" aria-label="language">
+      <button type="button" data-lang="en">EN</button>
+      <button type="button" data-lang="es">ES</button>
+    </span>
   </nav>
 </header>
 
@@ -42,16 +49,16 @@
 
 <section class="hero">
   <div class="hero-text">
-    <h1>Your AI agent designs the PCB.<br>You watch and steer.</h1>
-    <p class="lede">
+    <h1 data-i18n="hero.h1">Your AI agent designs the PCB.<br>You watch and steer.</h1>
+    <p class="lede" data-i18n="hero.lede">
       Fragua is a desktop tool that exposes a small, deterministic API for AI agents.
       The agent drives the schematic, the placement, the auto-router, the rule
       checks, and ships a fab-ready zip in a single loop. The human watches,
       redirects when needed, and clicks "order".
     </p>
     <div class="hero-cta">
-      <a class="btn primary" href="https://github.com/mentasystems/fragua">Get the source</a>
-      <a class="btn ghost" href="#install">Run it locally</a>
+      <a class="btn primary" href="https://github.com/mentasystems/fragua" data-i18n="hero.cta1">Get the source</a>
+      <a class="btn ghost" href="#install" data-i18n="hero.cta2">Run it locally</a>
     </div>
   </div>
   <div class="hero-image" aria-hidden="true">
@@ -63,12 +70,12 @@
 </section>
 
 <section class="bullets" id="how">
-  <h2>What it does</h2>
+  <h2 data-i18n="bullets.h2">What it does</h2>
   <div class="bullet-grid">
 
     <div class="bullet">
-      <h3>One small surface for the agent</h3>
-      <p>
+      <h3 data-i18n="b1.h3">One small surface for the agent</h3>
+      <p data-i18n="b1.p">
         A line-oriented script DSL on a stateless local HTTP API. The agent
         sends multi-line scripts; each verb is one tool call. The full
         reference is printed at startup and at <code>GET /</code> — no SDK,
@@ -77,8 +84,8 @@
     </div>
 
     <div class="bullet">
-      <h3>Real router, not a wrapper</h3>
-      <p>
+      <h3 data-i18n="b2.h3">Real router, not a wrapper</h3>
+      <p data-i18n="b2.p">
         Two-layer A* with rip-up-and-reroute, negotiated congestion bias,
         and Steiner-style multi-source construction. Per-net trace widths
         and clearances honoured from <code>NetClass</code> declarations. No
@@ -87,8 +94,8 @@
     </div>
 
     <div class="bullet">
-      <h3>Real placer too</h3>
-      <p>
+      <h3 data-i18n="b3.h3">Real placer too</h3>
+      <p data-i18n="b3.p">
         Simulated annealing on HPWL plus a soft body-to-body gap penalty
         plus a rasterised pad-bbox congestion proxy. The agent passes the
         list of refs that may move; everything else stays where the human
@@ -97,8 +104,8 @@
     </div>
 
     <div class="bullet">
-      <h3>Validation at every step</h3>
-      <p>
+      <h3 data-i18n="b4.h3">Validation at every step</h3>
+      <p data-i18n="b4.p">
         ERC catches netlist bugs (multiple drivers, unpowered power rails,
         missing decoupling caps). DRC catches geometry bugs (clearance,
         annular ring, narrow trace). Manufacturing-DRC catches what your
@@ -107,8 +114,8 @@
     </div>
 
     <div class="bullet">
-      <h3>Fab-ready zip in one verb</h3>
-      <p>
+      <h3 data-i18n="b5.h3">Fab-ready zip in one verb</h3>
+      <p data-i18n="b5.p">
         <code>pack fab=jlcpcb</code> runs the whole validation pipeline,
         emits Gerbers + Excellon drills + provider-specific BOM and CPL,
         bundles them with a README, and drops a single
@@ -119,8 +126,8 @@
     </div>
 
     <div class="bullet">
-      <h3>Human stays in the loop</h3>
-      <p>
+      <h3 data-i18n="b6.h3">Human stays in the loop</h3>
+      <p data-i18n="b6.p">
         The desktop app shows the live state — every footprint placement,
         every routed trace, every DRC violation. Click a component, drag
         it, watch the agent re-plan. Nobody is locked out by either side.
@@ -131,8 +138,8 @@
 </section>
 
 <section class="recipe" id="recipe">
-  <h2>End-to-end, in 25 lines</h2>
-  <p class="recipe-lead">
+  <h2 data-i18n="recipe.h2">End-to-end, in 25 lines</h2>
+  <p class="recipe-lead" data-i18n="recipe.lead">
     What the agent might send to <code>POST /script</code>. Every line is
     one verb; each verb commits to the project state and emits an event the
     UI repaints from. The full pipeline — ERC, placement, routing, fab pack —
@@ -177,8 +184,8 @@ pack fab=jlcpcb out=~/Downloads</pre>
 </section>
 
 <section class="install" id="install">
-  <h2>Install &amp; run</h2>
-  <p>Fragua is a Rust workspace + a TypeScript frontend hosted in a Tauri 2 shell. Build it from source for now — pre-built binaries will follow.</p>
+  <h2 data-i18n="install.h2">Install &amp; run</h2>
+  <p data-i18n="install.p1">Fragua is a Rust workspace + a TypeScript frontend hosted in a Tauri 2 shell. Build it from source for now — pre-built binaries will follow.</p>
 
 <pre class="snippet">git clone https://github.com/mentasystems/fragua.git
 cd fragua
@@ -193,7 +200,7 @@ cargo run --release --bin fragua
 <span class="c"># …or open an existing project file.</span>
 cargo run --release --bin fragua /path/to/board.fragua</pre>
 
-  <p>
+  <p data-i18n="install.p2">
     The window opens, and a stateless local HTTP API starts on
     <code>127.0.0.1:7878</code>. Point any agent that can make HTTP
     calls at it:
@@ -207,12 +214,12 @@ curl -s http://127.0.0.1:7878/script \
   -H 'content-type: application/json' \
   -d '{"script":"outline 80 30 radius=2\nstatus"}'</pre>
 
-  <p>Replies are <code>text/plain</code>: per-line outcomes, plus an unsaved-session warning if the project isn't bound to a file yet.</p>
+  <p data-i18n="install.p3">Replies are <code>text/plain</code>: per-line outcomes, plus an unsaved-session warning if the project isn't bound to a file yet.</p>
 </section>
 
 <section class="status" id="status">
-  <h2>Status</h2>
-  <p class="status-lead">
+  <h2 data-i18n="status.h2">Status</h2>
+  <p class="status-lead" data-i18n="status.lead">
     Pre-1.0. Every bullet below works in the current
     <a href="https://github.com/mentasystems/fragua">master</a>; the
     "what's next" list is what the maintainers are most likely to
@@ -221,41 +228,41 @@ curl -s http://127.0.0.1:7878/script \
 
   <div class="status-grid">
     <div>
-      <h3>Today</h3>
+      <h3 data-i18n="status.today">Today</h3>
       <ul>
-        <li>Schematic with symbols, pins (with electrical roles), nets, and net classes.</li>
-        <li>Library of footprints with photos, datasheets, LCSC IDs and MPNs.</li>
-        <li>Auto-placer (SA on HPWL + gap penalty + congestion proxy).</li>
-        <li>Auto-router (RR&amp;R + negotiated congestion + Steiner-style multi-source A*).</li>
-        <li>ERC, DRC, manufacturing-DRC; per-fab rules for JLCPCB / PCBWay / generic.</li>
-        <li>Auto-pour from net classes (GND-on-both-layers in one declaration).</li>
-        <li>Rounded board outlines (renderer + router inset + Gerber arcs).</li>
-        <li>One-shot <code>pack</code> verb producing a ready-to-upload zip.</li>
-        <li>Live SVG canvas with pan/zoom and click-to-inspect.</li>
+        <li data-i18n="today.1">Schematic with symbols, pins (with electrical roles), nets, and net classes.</li>
+        <li data-i18n="today.2">Library of footprints with photos, datasheets, LCSC IDs and MPNs.</li>
+        <li data-i18n="today.3">Auto-placer (SA on HPWL + gap penalty + congestion proxy).</li>
+        <li data-i18n="today.4">Auto-router (RR&amp;R + negotiated congestion + Steiner-style multi-source A*).</li>
+        <li data-i18n="today.5">ERC, DRC, manufacturing-DRC; per-fab rules for JLCPCB / PCBWay / generic.</li>
+        <li data-i18n="today.6">Auto-pour from net classes (GND-on-both-layers in one declaration).</li>
+        <li data-i18n="today.7">Rounded board outlines (renderer + router inset + Gerber arcs).</li>
+        <li data-i18n="today.8">One-shot <code>pack</code> verb producing a ready-to-upload zip.</li>
+        <li data-i18n="today.9">Live SVG canvas with pan/zoom and click-to-inspect.</li>
       </ul>
     </div>
     <div>
-      <h3>What's next</h3>
+      <h3 data-i18n="status.next">What's next</h3>
       <ul>
-        <li>An embedded LCSC catalogue subset so the agent doesn't have to look up part numbers by hand.</li>
-        <li>Heuristic ERC: "USB without ESD", "MCU without crystal load caps".</li>
-        <li>3D / mechanical preview (component heights → STEP export).</li>
-        <li>Real-time cost estimation against the chosen fab's pricing tier.</li>
-        <li>More fab providers (OSHPark, Aisler, Eurocircuits).</li>
-        <li>Frontend interactivity: click a net to highlight it, jump-to from the DRC violation list.</li>
+        <li data-i18n="next.1">An embedded LCSC catalogue subset so the agent doesn't have to look up part numbers by hand.</li>
+        <li data-i18n="next.2">Heuristic ERC: "USB without ESD", "MCU without crystal load caps".</li>
+        <li data-i18n="next.3">3D / mechanical preview (component heights → STEP export).</li>
+        <li data-i18n="next.4">Real-time cost estimation against the chosen fab's pricing tier.</li>
+        <li data-i18n="next.5">More fab providers (OSHPark, Aisler, Eurocircuits).</li>
+        <li data-i18n="next.6">Frontend interactivity: click a net to highlight it, jump-to from the DRC violation list.</li>
       </ul>
     </div>
   </div>
 </section>
 
 <section class="oss">
-  <h2>Open source</h2>
-  <p>
+  <h2 data-i18n="oss.h2">Open source</h2>
+  <p data-i18n="oss.p1">
     MIT licensed. See <a href="https://github.com/mentasystems/fragua/blob/master/CONTRIBUTING.md">CONTRIBUTING.md</a> for what's in scope. Issues
     and PRs welcome — especially adding fab providers, library
     parts, and bug fixes from real-world designs.
   </p>
-  <p class="quiet">
+  <p class="quiet" data-i18n="oss.p2">
     Built in Rust + Tauri 2 + TypeScript. No <code>kicad-cli</code>, no
     FreeRouting wrapper, no shell-out. Every file format read or written
     is implemented in the workspace.
@@ -268,13 +275,126 @@ curl -s http://127.0.0.1:7878/script \
   <div>
     <a href="https://github.com/mentasystems/fragua">github.com/mentasystems/fragua</a>
     <span class="dot">·</span>
-    MIT license
+    <span data-i18n="footer.license">MIT license</span>
     <span class="dot">·</span>
-    <a href="https://github.com/mentasystems/fragua/blob/master/VISION.md">vision</a>
+    <a href="https://github.com/mentasystems/fragua/blob/master/VISION.md" data-i18n="footer.vision">vision</a>
     <span class="dot">·</span>
-    <a href="https://github.com/mentasystems/fragua/blob/master/ARCHITECTURE.md">architecture</a>
+    <a href="https://github.com/mentasystems/fragua/blob/master/ARCHITECTURE.md" data-i18n="footer.architecture">architecture</a>
   </div>
 </footer>
+
+<script>
+// Client-side i18n for the static landing. Prose only — code snippets stay
+// in English (they are code). English is the source/default; Spanish is
+// served when the browser prefers it. An explicit toggle overrides the
+// detection and is remembered in localStorage.
+(function () {
+  "use strict";
+
+  // Spanish overrides, keyed by the same data-i18n names used in the markup.
+  // Any key absent here falls back to the English already in the DOM.
+  var ES = {
+    "nav.how": "cómo funciona",
+    "nav.install": "instalación",
+    "nav.status": "estado",
+
+    "hero.h1": "Tu agente de IA diseña la PCB.<br>Tú observas y diriges.",
+    "hero.lede": "Fragua es una herramienta de escritorio que expone una API pequeña y determinista para agentes de IA. El agente conduce el esquemático, el emplazamiento, el auto-router, las comprobaciones de reglas y entrega un zip listo para fabricar en un solo bucle. El humano observa, redirige cuando hace falta y hace clic en «pedir».",
+    "hero.cta1": "Consigue el código",
+    "hero.cta2": "Ejecútalo en local",
+
+    "bullets.h2": "Qué hace",
+    "b1.h3": "Una superficie pequeña para el agente",
+    "b1.p": "Un DSL de scripts orientado a líneas sobre una API HTTP local sin estado. El agente envía scripts multilínea; cada verbo es una llamada de herramienta. La referencia completa se imprime al arrancar y en <code>GET /</code> — sin SDK, sin negociación de protocolo, sin estado oculto.",
+    "b2.h3": "Un router de verdad, no un envoltorio",
+    "b2.p": "A* de dos capas con rip-up-and-reroute, sesgo de congestión negociado y construcción multi-fuente estilo Steiner. Anchos de pista y separaciones por red respetados desde las declaraciones <code>NetClass</code>. Sin FreeRouting, sin <code>kicad-cli</code>.",
+    "b3.h3": "Un placer de verdad también",
+    "b3.p": "Recocido simulado sobre HPWL más una penalización blanda de separación cuerpo-a-cuerpo más un proxy de congestión por bounding-box de pads rasterizado. El agente pasa la lista de referencias que pueden moverse; todo lo demás se queda donde lo puso el humano.",
+    "b4.h3": "Validación en cada paso",
+    "b4.p": "El ERC detecta bugs de netlist (varios drivers, raíles de alimentación sin alimentar, condensadores de desacoplo que faltan). El DRC detecta bugs de geometría (separación, anillo anular, pista estrecha). El DRC de fabricación detecta lo que tu fábrica elegida rechazará antes de que lo subas.",
+    "b5.h3": "Zip listo para fabricar en un verbo",
+    "b5.p": "<code>pack fab=jlcpcb</code> ejecuta toda la pipeline de validación, emite Gerbers + taladros Excellon + BOM y CPL específicos del proveedor, los empaqueta con un README y suelta un único <code>&lt;proyecto&gt;-jlcpcb.zip</code> listo para subir. JLCPCB, PCBWay y un formato genérico vienen integrados; añadir nuevas fábricas es un match arm más.",
+    "b6.h3": "El humano sigue en el bucle",
+    "b6.p": "La app de escritorio muestra el estado en vivo — cada emplazamiento de footprint, cada pista enrutada, cada violación de DRC. Haz clic en un componente, arrástralo y mira cómo el agente re-planifica. Ninguna de las dos partes queda bloqueada.",
+
+    "recipe.h2": "De principio a fin, en 25 líneas",
+    "recipe.lead": "Lo que el agente podría enviar a <code>POST /script</code>. Cada línea es un verbo; cada verbo confirma en el estado del proyecto y emite un evento desde el que la UI se repinta. La pipeline completa — ERC, emplazamiento, enrutado, empaquetado de fabricación — ocurre en el servidor en milisegundos-a-segundos.",
+
+    "install.h2": "Instalación y ejecución",
+    "install.p1": "Fragua es un workspace de Rust + un frontend TypeScript alojado en un shell Tauri 2. De momento compílalo desde el código — habrá binarios precompilados más adelante.",
+    "install.p2": "La ventana se abre y arranca una API HTTP local sin estado en <code>127.0.0.1:7878</code>. Apunta hacia ella cualquier agente que pueda hacer llamadas HTTP:",
+    "install.p3": "Las respuestas son <code>text/plain</code>: resultados línea a línea, más un aviso de sesión sin guardar si el proyecto aún no está ligado a un fichero.",
+
+    "status.h2": "Estado",
+    "status.lead": "Pre-1.0. Cada punto de abajo funciona en la <a href=\"https://github.com/mentasystems/fragua\">master</a> actual; la lista de «qué viene» es en lo que es más probable que trabajen los mantenedores, no un compromiso.",
+    "status.today": "Hoy",
+    "today.1": "Esquemático con símbolos, pines (con roles eléctricos), redes y clases de red.",
+    "today.2": "Librería de footprints con fotos, datasheets, IDs de LCSC y MPNs.",
+    "today.3": "Auto-placer (SA sobre HPWL + penalización de separación + proxy de congestión).",
+    "today.4": "Auto-router (RR&amp;R + congestión negociada + A* multi-fuente estilo Steiner).",
+    "today.5": "ERC, DRC, DRC de fabricación; reglas por fábrica para JLCPCB / PCBWay / genérico.",
+    "today.6": "Auto-pour desde clases de red (GND en ambas capas en una sola declaración).",
+    "today.7": "Contornos de placa redondeados (renderer + inset del router + arcos Gerber).",
+    "today.8": "Verbo <code>pack</code> de un solo paso que produce un zip listo para subir.",
+    "today.9": "Lienzo SVG en vivo con pan/zoom y clic-para-inspeccionar.",
+    "status.next": "Qué viene",
+    "next.1": "Un subconjunto embebido del catálogo LCSC para que el agente no tenga que buscar part numbers a mano.",
+    "next.2": "ERC heurístico: «USB sin ESD», «MCU sin condensadores de carga de cristal».",
+    "next.3": "Vista previa 3D / mecánica (alturas de componentes → export STEP).",
+    "next.4": "Estimación de coste en tiempo real contra el tramo de precios de la fábrica elegida.",
+    "next.5": "Más proveedores de fabricación (OSHPark, Aisler, Eurocircuits).",
+    "next.6": "Interactividad en el frontend: clic en una red para resaltarla, salto desde la lista de violaciones de DRC.",
+
+    "oss.h2": "Código abierto",
+    "oss.p1": "Con licencia MIT. Consulta <a href=\"https://github.com/mentasystems/fragua/blob/master/CONTRIBUTING.md\">CONTRIBUTING.md</a> para ver qué entra en el alcance. Issues y PRs bienvenidos — especialmente añadir proveedores de fabricación, piezas de librería y arreglos de bugs de diseños reales.",
+    "oss.p2": "Construido en Rust + Tauri 2 + TypeScript. Sin <code>kicad-cli</code>, sin envoltorio de FreeRouting, sin shell-out. Cada formato de fichero leído o escrito está implementado en el workspace.",
+
+    "footer.license": "licencia MIT",
+    "footer.vision": "visión",
+    "footer.architecture": "arquitectura"
+  };
+
+  var TITLE = { en: "fragua — AI-native PCB design", es: "fragua — diseño de PCB nativo de IA" };
+
+  // Snapshot the shipped English so toggling back is lossless.
+  var EN = {};
+  var nodes = document.querySelectorAll("[data-i18n]");
+  nodes.forEach(function (el) { EN[el.getAttribute("data-i18n")] = el.innerHTML; });
+
+  function apply(lang) {
+    var dict = lang === "es" ? ES : null;
+    nodes.forEach(function (el) {
+      var key = el.getAttribute("data-i18n");
+      var val = dict && dict[key] != null ? dict[key] : EN[key];
+      if (val != null) el.innerHTML = val;
+    });
+    document.documentElement.lang = lang;
+    document.title = TITLE[lang] || TITLE.en;
+    document.querySelectorAll(".lang-toggle button").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-lang") === lang));
+    });
+  }
+
+  function detect() {
+    try {
+      var saved = localStorage.getItem("fragua_lang");
+      if (saved === "en" || saved === "es") return saved;
+    } catch (e) { /* private mode */ }
+    var nav = (navigator.language || (navigator.languages && navigator.languages[0]) || "en").toLowerCase();
+    return nav.indexOf("es") === 0 ? "es" : "en";
+  }
+
+  document.querySelectorAll(".lang-toggle button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var lang = b.getAttribute("data-lang");
+      try { localStorage.setItem("fragua_lang", lang); } catch (e) { /* ignore */ }
+      apply(lang);
+    });
+  });
+
+  apply(detect());
+})();
+</script>
 
 </body>
 </html>

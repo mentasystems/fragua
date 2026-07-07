@@ -96,6 +96,30 @@ code {
   border-bottom-color: var(--accent);
 }
 
+/* Language toggle: two small segmented buttons matching the mono topbar. */
+.lang-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.lang-toggle button {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.lang-toggle button:hover { color: var(--text); }
+.lang-toggle button[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
 @media (max-width: 720px) {
   .topbar { padding: 12px 16px; }
   .topbar-links { gap: 16px; font-size: 12px; }
