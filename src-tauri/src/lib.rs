@@ -698,8 +698,17 @@ fn library_delete_entry(state: State<'_, AppState>, key: String) -> Result<bool,
 /// follow-up fetches needed.
 #[tauri::command]
 fn pending_library_entries(state: State<'_, AppState>) -> serde_json::Value {
+    pending_entries_json(&state.project)
+}
+
+/// Build the JSON payload the confirmation modal renders from. Split out
+/// of the Tauri command so it can be exercised in tests without a live
+/// `State`/`AppHandle` — the modal render is fragile enough (see the
+/// pending-entry regression test) that the payload shape is worth
+/// pinning down directly.
+pub fn pending_entries_json(project: &pcb_core::Project) -> serde_json::Value {
     use base64::Engine;
-    let pending = state.project.pending_library_entries();
+    let pending = project.pending_library_entries();
     let items: Vec<serde_json::Value> = pending
         .iter()
         .map(|p| {

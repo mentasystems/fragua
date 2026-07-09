@@ -1817,75 +1817,126 @@ async function openConfirmModal() {
     return;
   }
   confirmModalOpen = true;
-  // Show the first pending entry; once confirmed/discarded the
-  // PendingLibraryChanged event will re-trigger this and either
-  // surface the next entry or close the modal.
-  const entry = data.entries[0];
-  const photo = entry.attachments.find((a) => a.mime.startsWith("image/"));
-  const remaining = data.entries.length;
-  const gndBadge = entry.ground_pad_count > 0
-    ? `<span class="gnd-badge">${entry.ground_pad_count} GND pad${entry.ground_pad_count === 1 ? "" : "s"}</span>`
-    : `<span class="gnd-badge none">no GND pads detected</span>`;
+  // Render EVERY pending entry, each as its own review card with its
+  // own pinout, photo and confirm/discard controls. (Previously only
+  // entries[0] was shown "one at a time"; combined with a dead discard
+  // button that left the reviewer stuck on the first of N entries.)
+  //
+  // Every field is read defensively: an entry that lacks an optional
+  // field (calibration, body_rect, lcsc/mpn) or a malformed attachment
+  // must never throw and abort the whole render — a single bad entry
+  // would otherwise blank the modal and strand every other one.
+  const entries = data.entries;
+  const total = entries.length;
+
+  const entryBlocks = entries
+    .map((entry) => {
+      const key = entry?.key ?? "";
+      const attachments = Array.isArray(entry?.attachments) ? entry.attachments : [];
+      const photo = attachments.find(
+        (a) => typeof a?.mime === "string" && a.mime.startsWith("image/") && typeof a?.data_uri === "string",
+      );
+      const padCount = typeof entry?.pad_count === "number" ? entry.pad_count : (entry?.pads?.length ?? 0);
+      const gndCount = typeof entry?.ground_pad_count === "number" ? entry.ground_pad_count : 0;
+      const gndBadge = gndCount > 0
+        ? `<span class="gnd-badge">${gndCount} GND pad${gndCount === 1 ? "" : "s"}</span>`
+        : `<span class="gnd-badge none">no GND pads detected</span>`;
+      const reviewSvg = typeof entry?.review_svg === "string" ? entry.review_svg : "";
+      return `
+      <section class="confirm-entry" data-entry-key="${esc(key)}">
+        <div class="confirm-entry-head">
+          <div class="confirm-key">${esc(key)}</div>
+          <div class="confirm-meta">
+            <span>${padCount} pad${padCount === 1 ? "" : "s"}</span>
+            ${gndBadge}
+            ${entry?.edge_mounted ? `<span class="edge-badge">edge-mounted</span>` : ""}
+            ${entry?.lcsc_id ? `<span class="lcsc-badge">${esc(String(entry.lcsc_id))}</span>` : ""}
+            ${entry?.mpn ? `<span class="mpn-badge">${esc(String(entry.mpn))}</span>` : ""}
+          </div>
+        </div>
+        ${entry?.description ? `<p class="confirm-desc">${esc(String(entry.description))}</p>` : ""}
+        <div class="confirm-body">
+          <div class="confirm-photo">
+            ${photo ? `<img src="${esc(photo.data_uri)}" alt="component photo" />` : `<div class="photo-empty">no photo attached — ask the agent to <code>library.attach</code> a photo before confirming</div>`}
+            <div class="confirm-caption">photo</div>
+          </div>
+          <div class="confirm-footprint">
+            ${reviewSvg || `<div class="photo-empty">no footprint preview</div>`}
+            <div class="confirm-caption">footprint (TOP view, GND in magenta)</div>
+          </div>
+        </div>
+        <footer class="confirm-foot">
+          <button class="btn-discard" data-key="${esc(key)}" data-armed="0">Discard</button>
+          ${photo
+            ? `<button class="btn-confirm" data-key="${esc(key)}">Save to library</button>`
+            : `<span class="btn-confirm-wrap" title="attach a photo with library.attach before saving"><button class="btn-confirm" data-key="${esc(key)}" disabled aria-disabled="true">Save to library</button><span class="btn-confirm-hint">attach a photo first</span></span>`}
+        </footer>
+      </section>`;
+    })
+    .join("");
+
   els.confirmCard.innerHTML = `
     <header class="confirm-head">
       <div>
-        <h2>confirm new library entry</h2>
-        <div class="confirm-key">${esc(entry.key)}</div>
-        <div class="confirm-sub">${remaining > 1 ? `${remaining} pending — review one at a time` : "1 pending"}</div>
+        <h2>confirm new library ${total === 1 ? "entry" : "entries"}</h2>
+        <div class="confirm-sub">${total} pending — verify each before saving</div>
       </div>
       <div class="confirm-warning">
         <strong>verify the pinout vs. the photo.</strong>
         a mirrored footprint = unsolderable PCB.
       </div>
     </header>
-    <div class="confirm-meta">
-      <span>${entry.pad_count} pads</span>
-      ${gndBadge}
-      ${entry.edge_mounted ? `<span class="edge-badge">edge-mounted</span>` : ""}
-      ${entry.lcsc_id ? `<span class="lcsc-badge">${esc(entry.lcsc_id)}</span>` : ""}
-      ${entry.mpn ? `<span class="mpn-badge">${esc(entry.mpn)}</span>` : ""}
+    <div class="confirm-entries">
+      ${entryBlocks}
     </div>
-    ${entry.description ? `<p class="confirm-desc">${esc(entry.description)}</p>` : ""}
-    <div class="confirm-body">
-      <div class="confirm-photo">
-        ${photo ? `<img src="${photo.data_uri}" alt="component photo" />` : `<div class="photo-empty">no photo attached — ask the agent to <code>library.attach</code> a photo before confirming</div>`}
-        <div class="confirm-caption">photo</div>
-      </div>
-      <div class="confirm-footprint">
-        ${entry.review_svg}
-        <div class="confirm-caption">footprint (TOP view, GND in magenta)</div>
-      </div>
-    </div>
-    <footer class="confirm-foot">
-      <button class="btn-discard" data-key="${esc(entry.key)}">Discard</button>
-      ${photo
-        ? `<button class="btn-confirm" data-key="${esc(entry.key)}">Save to library</button>`
-        : `<span class="btn-confirm-wrap" title="attach a photo with library.attach before saving"><button class="btn-confirm" data-key="${esc(entry.key)}" disabled aria-disabled="true">Save to library</button><span class="btn-confirm-hint">attach a photo first</span></span>`}
-    </footer>
   `;
   els.confirmModal.removeAttribute("hidden");
-  els.confirmCard.querySelector(".btn-confirm")?.addEventListener("click", async (ev) => {
-    const btn = ev.currentTarget as HTMLButtonElement;
-    const key = btn.dataset.key ?? "";
-    btn.disabled = true;
-    try {
-      await invoke<boolean>("confirm_pending_library_entry", { key });
-    } catch (err) {
-      appendActivity("error", `confirm ${key}: ${err}`);
-      btn.disabled = false;
-    }
+
+  els.confirmCard.querySelectorAll<HTMLButtonElement>(".btn-confirm:not([disabled])").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const key = btn.dataset.key ?? "";
+      btn.disabled = true;
+      try {
+        await invoke<boolean>("confirm_pending_library_entry", { key });
+      } catch (err) {
+        appendActivity("error", `confirm ${key}: ${err}`);
+        btn.disabled = false;
+      }
+    });
   });
-  els.confirmCard.querySelector(".btn-discard")?.addEventListener("click", async (ev) => {
-    const btn = ev.currentTarget as HTMLButtonElement;
-    const key = btn.dataset.key ?? "";
-    if (!confirm(`Discard pending entry "${key}"? The agent will have to recreate it.`)) return;
-    btn.disabled = true;
-    try {
-      await invoke<boolean>("discard_pending_library_entry", { key });
-    } catch (err) {
-      appendActivity("error", `discard ${key}: ${err}`);
-      btn.disabled = false;
-    }
+
+  // Discard uses an inline two-step confirmation rather than the native
+  // `window.confirm()`: wry's WKUIDelegate does not implement the JS
+  // confirm panel, so `window.confirm()` silently returns false on macOS
+  // and the discard would never fire. First click arms the button; a
+  // second click within 4s actually discards.
+  els.confirmCard.querySelectorAll<HTMLButtonElement>(".btn-discard").forEach((btn) => {
+    let armTimer: number | undefined;
+    const disarm = () => {
+      btn.dataset.armed = "0";
+      btn.textContent = "Discard";
+      btn.classList.remove("armed");
+      if (armTimer !== undefined) window.clearTimeout(armTimer);
+      armTimer = undefined;
+    };
+    btn.addEventListener("click", async () => {
+      const key = btn.dataset.key ?? "";
+      if (btn.dataset.armed !== "1") {
+        btn.dataset.armed = "1";
+        btn.textContent = "Click again to discard";
+        btn.classList.add("armed");
+        armTimer = window.setTimeout(disarm, 4000);
+        return;
+      }
+      disarm();
+      btn.disabled = true;
+      try {
+        await invoke<boolean>("discard_pending_library_entry", { key });
+      } catch (err) {
+        appendActivity("error", `discard ${key}: ${err}`);
+        btn.disabled = false;
+      }
+    });
   });
 }
 
