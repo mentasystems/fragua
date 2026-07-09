@@ -2689,6 +2689,7 @@ name = "pcb-script"
 version = "1.0.5"
 dependencies = [
  "base64 0.22.1",
+ "imagesize",
  "pcb-core",
  "pcb-drc",
  "pcb-erc",

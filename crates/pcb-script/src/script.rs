@@ -71,6 +71,8 @@ pub(crate) const VERBS: &[&str] = &[
     "reset",
     "attach",
     "detach",
+    "calibrate-photo",
+    "body-rect",
     "find-lib",
     "list-lib",
     "delete-lib",
@@ -968,6 +970,67 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                 tool: "library.attach".into(),
                 args,
             })
+        }
+        "calibrate-photo" => {
+            // calibrate-photo KEY ATT AX AY BX BY PAD_A PAD_B
+            need_args(
+                line,
+                tokens,
+                8,
+                "calibrate-photo KEY ATT AX AY BX BY PAD_A PAD_B",
+            )?;
+            let a_px_x = parse_num(&tokens[3], line, "AX")?;
+            let a_px_y = parse_num(&tokens[4], line, "AY")?;
+            let b_px_x = parse_num(&tokens[5], line, "BX")?;
+            let b_px_y = parse_num(&tokens[6], line, "BY")?;
+            Ok(Cmd {
+                line,
+                tool: "library.calibrate_photo".into(),
+                args: json!({
+                    "key": tokens[1],
+                    "att": tokens[2],
+                    "a_px_x": a_px_x,
+                    "a_px_y": a_px_y,
+                    "b_px_x": b_px_x,
+                    "b_px_y": b_px_y,
+                    "a_pad": tokens[7],
+                    "b_pad": tokens[8],
+                }),
+            })
+        }
+        "body-rect" => {
+            // body-rect KEY MINX MINY MAXX MAXY   (footprint-local mm)
+            // body-rect KEY clear
+            need_args(
+                line,
+                tokens,
+                2,
+                "body-rect KEY MINX MINY MAXX MAXY | body-rect KEY clear",
+            )?;
+            if tokens.len() == 3 && tokens[2].eq_ignore_ascii_case("clear") {
+                Ok(Cmd {
+                    line,
+                    tool: "library.set_body_rect".into(),
+                    args: json!({ "key": tokens[1], "clear": true }),
+                })
+            } else {
+                need_args(line, tokens, 5, "body-rect KEY MINX MINY MAXX MAXY")?;
+                let min_x = parse_num(&tokens[2], line, "MINX")?;
+                let min_y = parse_num(&tokens[3], line, "MINY")?;
+                let max_x = parse_num(&tokens[4], line, "MAXX")?;
+                let max_y = parse_num(&tokens[5], line, "MAXY")?;
+                Ok(Cmd {
+                    line,
+                    tool: "library.set_body_rect".into(),
+                    args: json!({
+                        "key": tokens[1],
+                        "min_x_mm": min_x,
+                        "min_y_mm": min_y,
+                        "max_x_mm": max_x,
+                        "max_y_mm": max_y,
+                    }),
+                })
+            }
         }
 
         "palette" => {

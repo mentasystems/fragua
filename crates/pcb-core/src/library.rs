@@ -783,6 +783,37 @@ impl Library {
         Ok(true)
     }
 
+    /// Validate + store a two-point photo calibration on one attachment,
+    /// returning the derived photo→board transform. Centralises the
+    /// checks every caller (Tauri command, script verb) needs so nothing
+    /// bad reaches disk: the two pads must be distinct and present, the
+    /// two pixel marks must differ, the correspondences must yield a
+    /// valid transform, and the attachment must exist on the (confirmed)
+    /// entry. Errors describe exactly what failed.
+    pub fn calibrate_photo(
+        &self,
+        key: &str,
+        attachment_id: &str,
+        calibration: PhotoCalibration,
+    ) -> Result<SimilarityTransform, String> {
+        if calibration.a_pad == calibration.b_pad {
+            return Err("photo calibration: pick two different pads".into());
+        }
+        let entry = self
+            .find(key)
+            .ok_or_else(|| format!("no library entry with key {key}"))?;
+        // `photo_transform` checks pad existence, coincident marks and
+        // coincident pads, so we don't duplicate those guards here.
+        let transform = entry.photo_transform(&calibration)?;
+        if !entry.attachments.iter().any(|a| a.id == attachment_id) {
+            return Err(format!(
+                "photo calibration: no attachment {attachment_id} on {key}"
+            ));
+        }
+        self.set_photo_calibration(key, attachment_id, calibration)?;
+        Ok(transform)
+    }
+
     /// Drop the photo calibration from one attachment. Returns `true` if
     /// the attachment was found.
     pub fn clear_photo_calibration(&self, key: &str, attachment_id: &str) -> Result<bool, String> {

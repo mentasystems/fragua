@@ -154,6 +154,29 @@ LIBRARY (build first, reuse forever):\n\
   attach KEY KIND PATH                         — file from disk; mime auto-detected\n\
                                                  KIND is free text: photo / datasheet / note / ...\n\
   detach KEY ATTACHMENT_ID\n\
+  calibrate-photo KEY ATT AX AY BX BY PAD_A PAD_B\n\
+                                               — pin a top-down photo to the footprint via two\n\
+                                                 correspondences. ATT = attachment id (a unique id\n\
+                                                 prefix or the filename also work). AX AY / BX BY are\n\
+                                                 the RAW-image pixel coords (origin top-left, y-down)\n\
+                                                 of two pin-centre marks; PAD_A / PAD_B are the pad\n\
+                                                 numbers those marks sit on. Reports the derived scale\n\
+                                                 (mm/px) and the implied photo width in mm. Pick two\n\
+                                                 pads as far apart as possible for accuracy.\n\
+  body-rect KEY MINX MINY MAXX MAXY            — physical module body in footprint-local mm (Y-up,\n\
+                                                 same frame as `pad`). Stores the body rect AND\n\
+                                                 auto-derives the per-side placement margin (how far\n\
+                                                 the body overhangs the pad bbox) so placer/DRC/render\n\
+                                                 respect the true footprint. `body-rect KEY clear`\n\
+                                                 drops it.\n\
+  # calibrate-photo / body-rect target CONFIRMED entries only: a fresh\n\
+  #   `lib` sits in the review queue and its `attach`ed photos have no\n\
+  #   ids until a human confirms. Recipe for a photo-calibrated part:\n\
+  #     lib mymod ...pads...        # queue for review\n\
+  #     attach mymod photo top.jpg  # staged on the pending entry\n\
+  #   → confirm in the review pane, THEN:\n\
+  #     calibrate-photo mymod top.jpg 412 980 1631 980 1 8   # two pins one known pitch apart\n\
+  #     body-rect mymod -3.0 -2.5 3.0 2.5\n\
   delete-lib KEY\n\
   find-lib KEY                                 — full record + pads + silk\n\
   # Library example with body outline + pin 1 dot + auto-ref label:\n\
@@ -398,6 +421,8 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "library.find" => tool_library_find(project, args),
         "library.create" => tool_library_create(project, args),
         "library.attach" => tool_library_attach(project, args),
+        "library.calibrate_photo" => tool_library_calibrate_photo(project, args),
+        "library.set_body_rect" => tool_library_set_body_rect(project, args),
         "library.delete_attachment" => tool_library_delete_attachment(project, args),
         "library.delete" => tool_library_delete(project, args),
         "placement.place_from_palette" => tool_place_from_palette(project, args),
@@ -1616,7 +1641,15 @@ fn library_entry_summary(e: &pcb_core::LibraryEntry) -> Value {
             "filename": a.filename,
             "mime": a.mime,
             "added_at": a.added_at,
+            "calibrated": a.calibration.is_some(),
         })).collect::<Vec<_>>(),
+        "has_body_rect": e.body_rect.is_some(),
+        "body_rect": e.body_rect.map(|b| json!({
+            "min_x_mm": b.min_x_mm,
+            "min_y_mm": b.min_y_mm,
+            "max_x_mm": b.max_x_mm,
+            "max_y_mm": b.max_y_mm,
+        })),
         "created_at": e.created_at,
     })
 }
@@ -1937,7 +1970,7 @@ fn tool_library_create(project: &Project, args: &Value) -> Result<Value, ToolErr
         ),
     );
     Ok(text_result(format!(
-        "Queued {key} for review — open the library review pane (or the auto-popup) and confirm before it lands in the on-disk library. Attach the component photo via `library.attach` before confirming so the reviewer can compare pinout vs. reality."
+        "Queued {key} for review — open the library review pane (or the auto-popup) and confirm before it lands in the on-disk library. Attach the component photo via `library.attach` before confirming so the reviewer can compare pinout vs. reality; once confirmed you can `calibrate-photo` that photo and set a `body-rect`."
     ))
     .with_data(library_entry_full(&entry)))
 }
@@ -2048,6 +2081,226 @@ fn tool_library_delete_attachment(project: &Project, args: &Value) -> Result<Val
         .to_string(),
     )
     .with_data(json!({ "removed": removed })))
+}
+
+/// Both `calibrate-photo` and `body-rect` mutate an entry that already
+/// lives in the on-disk library. A freshly-`lib`'d entry sits in the
+/// pending-review buffer (its staged photos have no ids yet, and its
+/// body rect isn't persisted until confirm), so refuse clearly and tell
+/// the agent to confirm it first instead of silently doing nothing.
+fn ensure_confirmed(
+    project: &Project,
+    verb: &str,
+    key: &str,
+) -> Result<pcb_core::LibraryEntry, ToolError> {
+    if let Some(entry) = project.library().find(key) {
+        return Ok(entry);
+    }
+    if project.find_pending_library_entry(key).is_some() {
+        return Err(ToolError::invalid_params(format!(
+            "{verb}: {key} is still pending review — confirm it in the library review pane first \
+             (attachments only get ids, and calibration/body rects only persist, once the entry lands on disk)"
+        )));
+    }
+    Err(ToolError::invalid_params(format!(
+        "{verb}: no library entry with key {key}"
+    )))
+}
+
+/// Resolve a user-supplied attachment token to a full attachment id.
+/// Accepts an exact id, a unique id prefix, or an (unambiguous) filename.
+/// Errors listing the candidates when the token is ambiguous or matches
+/// nothing, so the agent can pick the right one.
+fn resolve_attachment_id(entry: &pcb_core::LibraryEntry, token: &str) -> Result<String, String> {
+    if entry.attachments.is_empty() {
+        return Err(format!(
+            "{} has no attachments — `attach {} photo <path>` and confirm the entry first",
+            entry.key, entry.key
+        ));
+    }
+    // An exact id match wins outright.
+    if let Some(a) = entry.attachments.iter().find(|a| a.id == token) {
+        return Ok(a.id.clone());
+    }
+    let matches: Vec<&pcb_core::Attachment> = entry
+        .attachments
+        .iter()
+        .filter(|a| a.id.starts_with(token) || a.filename == token)
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(one.id.clone()),
+        [] => Err(format!(
+            "no attachment on {} matches `{token}` — candidates: {}",
+            entry.key,
+            attachment_candidates(entry)
+        )),
+        many => Err(format!(
+            "`{token}` is ambiguous on {} ({} matches) — candidates: {}",
+            entry.key,
+            many.len(),
+            attachment_candidates(entry)
+        )),
+    }
+}
+
+/// `<id8> (filename)` list for the "no/ambiguous match" errors.
+fn attachment_candidates(entry: &pcb_core::LibraryEntry) -> String {
+    entry
+        .attachments
+        .iter()
+        .map(|a| format!("{} ({})", &a.id[..a.id.len().min(8)], a.filename))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[derive(Debug, Deserialize)]
+struct LibraryCalibratePhotoInput {
+    key: String,
+    att: String,
+    a_px_x: f64,
+    a_px_y: f64,
+    b_px_x: f64,
+    b_px_y: f64,
+    a_pad: String,
+    b_pad: String,
+}
+
+fn tool_library_calibrate_photo(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: LibraryCalibratePhotoInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("calibrate-photo: {e}")))?;
+    // Calibration needs a real attachment id, which only exists once the
+    // entry is confirmed to the on-disk library (pending entries stage
+    // photos without ids). Refuse clearly if it's still pending.
+    let entry = ensure_confirmed(project, "calibrate-photo", &input.key)?;
+    let att_id = resolve_attachment_id(&entry, &input.att).map_err(ToolError::invalid_params)?;
+    let calibration = pcb_core::PhotoCalibration {
+        a_px: (input.a_px_x, input.a_px_y),
+        b_px: (input.b_px_x, input.b_px_y),
+        a_pad: input.a_pad,
+        b_pad: input.b_pad,
+    };
+    // Shared core validation path (same one the Tauri command uses).
+    let transform = project
+        .library()
+        .calibrate_photo(&input.key, &att_id, calibration)
+        .map_err(ToolError::invalid_params)?;
+    project.notify_library_changed();
+
+    let att = entry.attachments.iter().find(|a| a.id == att_id);
+    let filename = att.map_or(att_id.as_str(), |a| a.filename.as_str());
+    // Implied photo width in mm = raw pixel width × scale. Read just the
+    // image header (imagesize) — best-effort, so a non-image or missing
+    // file only drops the width from the report.
+    let width_px = att
+        .and_then(|a| imagesize::size(project.library().attachment_path(a)).ok())
+        .map(|d| d.width);
+    let scale = transform.scale_mm_per_px;
+    let width_mm = width_px.map(|w| w as f64 * scale);
+    let msg = match width_mm {
+        Some(w) => format!(
+            "Calibrated {filename} on {}: scale {scale:.5} mm/px → photo ≈ {w:.2} mm wide",
+            input.key
+        ),
+        None => format!(
+            "Calibrated {filename} on {}: scale {scale:.5} mm/px",
+            input.key
+        ),
+    };
+    project.log(ActivityLevel::Info, msg.clone());
+    Ok(text_result(msg).with_data(json!({
+        "key": input.key,
+        "attachment_id": att_id,
+        "scale_mm_per_px": scale,
+        "rotation_deg": transform.rotation_deg,
+        "photo_width_px": width_px,
+        "photo_width_mm": width_mm,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct LibrarySetBodyRectInput {
+    key: String,
+    #[serde(default)]
+    min_x_mm: Option<f64>,
+    #[serde(default)]
+    min_y_mm: Option<f64>,
+    #[serde(default)]
+    max_x_mm: Option<f64>,
+    #[serde(default)]
+    max_y_mm: Option<f64>,
+    #[serde(default)]
+    clear: bool,
+}
+
+fn tool_library_set_body_rect(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: LibrarySetBodyRectInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("body-rect: {e}")))?;
+    ensure_confirmed(project, "body-rect", &input.key)?;
+
+    if input.clear {
+        project
+            .library()
+            .clear_body_rect(&input.key)
+            .map_err(ToolError::invalid_params)?;
+        project.notify_library_changed();
+        let msg = format!("Cleared body rect on {}", input.key);
+        project.log(ActivityLevel::Info, msg.clone());
+        return Ok(text_result(msg).with_data(json!({ "key": input.key, "cleared": true })));
+    }
+
+    let (Some(min_x), Some(min_y), Some(max_x), Some(max_y)) = (
+        input.min_x_mm,
+        input.min_y_mm,
+        input.max_x_mm,
+        input.max_y_mm,
+    ) else {
+        return Err(ToolError::invalid_params(
+            "body-rect: need MINX MINY MAXX MAXY (or `clear`)",
+        ));
+    };
+    // Normalise so min/max can be given in any order (matches the Tauri
+    // command). set_body_rect atomically derives the placement margin.
+    let body = pcb_core::BodyRect {
+        min_x_mm: min_x.min(max_x),
+        min_y_mm: min_y.min(max_y),
+        max_x_mm: min_x.max(max_x),
+        max_y_mm: min_y.max(max_y),
+    };
+    project
+        .library()
+        .set_body_rect(&input.key, body)
+        .map_err(ToolError::invalid_params)?;
+    project.notify_library_changed();
+
+    let margin = project
+        .library()
+        .find(&input.key)
+        .map(|e| e.placement_margin)
+        .unwrap_or_default();
+    let w = body.max_x_mm - body.min_x_mm;
+    let h = body.max_y_mm - body.min_y_mm;
+    let msg = format!(
+        "Body rect on {}: {w:.2}×{h:.2} mm → placement margin T{:.2} R{:.2} B{:.2} L{:.2} mm",
+        input.key, margin.top_mm, margin.right_mm, margin.bottom_mm, margin.left_mm
+    );
+    project.log(ActivityLevel::Info, msg.clone());
+    Ok(text_result(msg).with_data(json!({
+        "key": input.key,
+        "body_rect": {
+            "min_x_mm": body.min_x_mm,
+            "min_y_mm": body.min_y_mm,
+            "max_x_mm": body.max_x_mm,
+            "max_y_mm": body.max_y_mm,
+        },
+        "width_mm": w,
+        "height_mm": h,
+        "placement_margin": {
+            "top_mm": margin.top_mm,
+            "right_mm": margin.right_mm,
+            "bottom_mm": margin.bottom_mm,
+            "left_mm": margin.left_mm,
+        },
+    })))
 }
 
 #[derive(Debug, Deserialize)]

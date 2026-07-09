@@ -611,36 +611,20 @@ fn library_set_photo_calibration(
     a_pad: String,
     b_pad: String,
 ) -> Result<(), String> {
-    if a_pad == b_pad {
-        return Err("photo calibration: pick two different pads".into());
-    }
-    let entry = state
-        .project
-        .library()
-        .find(&key)
-        .ok_or_else(|| format!("no library entry with key {key}"))?;
-    if entry.pad_center_mm(&a_pad).is_none() {
-        return Err(format!("photo calibration: pad {a_pad} not found"));
-    }
-    if entry.pad_center_mm(&b_pad).is_none() {
-        return Err(format!("photo calibration: pad {b_pad} not found"));
-    }
-    if (a_px_x - b_px_x).abs() < 1e-6 && (a_px_y - b_px_y).abs() < 1e-6 {
-        return Err("photo calibration: the two pin marks are at the same point".into());
-    }
     let calibration = pcb_core::PhotoCalibration {
         a_px: (a_px_x, a_px_y),
         b_px: (b_px_x, b_px_y),
         a_pad,
         b_pad,
     };
-    // Sanity-check that the correspondences yield a valid transform
-    // before persisting, so bad input never lands on disk.
-    entry.photo_transform(&calibration)?;
+    // `calibrate_photo` validates (distinct/present pads, distinct pixel
+    // marks, derivable transform, attachment exists) and only then
+    // persists, so bad input never lands on disk. Shared with the
+    // `calibrate-photo` script verb.
     state
         .project
         .library()
-        .set_photo_calibration(&key, &attachment_id, calibration)?;
+        .calibrate_photo(&key, &attachment_id, calibration)?;
     state.project.notify_library_changed();
     Ok(())
 }
