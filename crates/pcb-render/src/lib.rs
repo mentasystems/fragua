@@ -29,6 +29,15 @@ use pcb_core::{
 /// the board.
 pub type PlacementMarginMap = HashMap<String, PlacementMargin>;
 
+/// Library-key → physical body rectangle, in the PLACED footprint's
+/// local mm frame (i.e. the entry's `body_rect` already run through its
+/// `footprint_view_transform`, so it lines up with the view-transformed
+/// pads the board actually carries). When a footprint's key is present
+/// the renderer draws the dashed body outline straight from this true
+/// rectangle instead of reconstructing it from the per-side margin —
+/// more truthful when the body is inset relative to the pads.
+pub type BodyRectMap = HashMap<String, pcb_core::BodyRect>;
+
 /// Margin (in board nm) added around the content bounding box when no
 /// explicit outline is set, so footprints aren't flush against the edge.
 const FALLBACK_MARGIN_NM: i64 = 5_000_000; // 5 mm
@@ -53,6 +62,21 @@ pub fn render_svg(board: &Board) -> String {
 /// render identically to `render_svg`.
 #[must_use]
 pub fn render_svg_with_margins(board: &Board, margins: &PlacementMarginMap) -> String {
+    render_svg_with_margins_and_bodies(board, margins, &BodyRectMap::default())
+}
+
+/// As `render_svg_with_margins`, but also consults `bodies` (library-key
+/// → true body rectangle in placed-local mm) so footprints with an
+/// authored body draw their real body outline instead of the
+/// margin-inflated pad bbox. Also emits an empty `<g id="photo-underlay">`
+/// right after the substrate/outline layer; the webview fills it with
+/// real-scale component photos so they render UNDER the copper.
+#[must_use]
+pub fn render_svg_with_margins_and_bodies(
+    board: &Board,
+    margins: &PlacementMarginMap,
+    bodies: &BodyRectMap,
+) -> String {
     let view = view_rect(board);
     let view_w_mm = view.width().to_mm();
     let view_h_mm = view.height().to_mm();
@@ -98,6 +122,13 @@ pub fn render_svg_with_margins(board: &Board, margins: &PlacementMarginMap) -> S
         write_outline_dimensions(&mut svg, outline);
     }
 
+    // Placeholder for the webview's real-scale component-photo overlay.
+    // Emitted here — above the substrate, below copper/pads — so photos
+    // read as "what physically sits on the board" without hiding the
+    // routing. The Rust render leaves it empty; the frontend injects one
+    // <image> per calibrated footprint from `project_state`'s overlays.
+    svg.push_str(r#"<g id="photo-underlay"></g>"#);
+
     // Origin marker so (0,0) is always identifiable.
     write_origin_marker(&mut svg);
 
@@ -125,7 +156,12 @@ pub fn render_svg_with_margins(board: &Board, margins: &PlacementMarginMap) -> S
     write_ratsnest(&mut svg, board);
     for fp in board.footprints_in_order() {
         let margin = footprint_margin(fp, margins);
-        write_footprint(&mut svg, fp, &board.pours, margin);
+        let body = if fp.key.is_empty() {
+            None
+        } else {
+            bodies.get(&fp.key).copied()
+        };
+        write_footprint(&mut svg, fp, &board.pours, margin, body);
     }
     // Top traces drawn last so they sit visually on top.
     for trace in board
@@ -616,6 +652,7 @@ fn write_footprint(
     fp: &Footprint,
     pours: &[pcb_core::Pour],
     margin: PlacementMargin,
+    body: Option<pcb_core::BodyRect>,
 ) {
     // Wrap the whole footprint in a transform group so pads, body,
     // and label rotate together with the footprint. Read-only render:
@@ -659,7 +696,22 @@ fn write_footprint(
     // sticks out 2 mm to the right of the pads) is visible. Skipped
     // for zero/negative margins so an unannotated footprint looks
     // identical to the legacy render.
-    if !margin.is_zero() {
+    if let Some(body) = body {
+        // Authored body rectangle (already in placed-local mm) — the
+        // truthful physical extent, drawn even when it is inset relative
+        // to the pads.
+        let bx = body.min_x_mm;
+        let by = body.min_y_mm;
+        let bw = body.max_x_mm - body.min_x_mm;
+        let bh = body.max_y_mm - body.min_y_mm;
+        if bw > 0.0 && bh > 0.0 {
+            let _ = write!(
+                svg,
+                r##"<rect data-body-outline="{r}" x="{bx:.3}" y="{by:.3}" width="{bw:.3}" height="{bh:.3}" fill="none" stroke="#6e7681" stroke-width="0.08" stroke-dasharray="0.4 0.3" pointer-events="none"/>"##,
+                r = escape(&fp.reference),
+            );
+        }
+    } else if !margin.is_zero() {
         if let Some(pad_bbox) = local_pad_bbox(fp) {
             let bx = pad_bbox.min.x.to_mm() - margin.left_mm;
             let by = pad_bbox.min.y.to_mm() - margin.bottom_mm;
@@ -874,6 +926,15 @@ pub fn render_library_entry_svg(entry: &pcb_core::LibraryEntry) -> String {
         max_x = 5.0;
         max_y = 5.0;
     }
+    // Grow the view to contain an authored body rectangle so an overhang
+    // beyond the pads (screw-terminal shroud, ESP32 board edge) is not
+    // clipped out of the review cell.
+    if let Some(b) = entry.body_rect {
+        min_x = min_x.min(b.min_x_mm);
+        min_y = min_y.min(b.min_y_mm);
+        max_x = max_x.max(b.max_x_mm);
+        max_y = max_y.max(b.max_y_mm);
+    }
     let margin = ((max_x - min_x).max(max_y - min_y) * 0.15).max(1.0);
     min_x -= margin;
     min_y -= margin;
@@ -1051,6 +1112,25 @@ pub fn render_library_entry_svg(entry: &pcb_core::LibraryEntry) -> String {
         x = tag_x,
         y = -tag_y,
     );
+
+    // Authored physical body rectangle (footprint-local mm) — drawn in
+    // teal, distinct from the grey placement-margin keepout and the
+    // magenta GND highlight, so the reviewer sees the real module extent
+    // versus the pad footprint.
+    if let Some(b) = entry.body_rect {
+        let bw = b.max_x_mm - b.min_x_mm;
+        let bh = b.max_y_mm - b.min_y_mm;
+        if bw > 0.0 && bh > 0.0 {
+            let _ = write!(
+                svg,
+                r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="none" stroke="#2bd4c7" stroke-width="0.1" stroke-dasharray="0.5 0.35"/>"##,
+                x = b.min_x_mm,
+                y = b.min_y_mm,
+                w = bw,
+                h = bh,
+            );
+        }
+    }
 
     svg.push_str("</g></svg>");
     svg
@@ -1933,6 +2013,7 @@ mod tests {
             created_at: 0,
             footprint_view_transform: pcb_core::ViewTransform::default(),
             placement_margin: pcb_core::PlacementMargin::default(),
+            body_rect: None,
         };
         let svg = render_library_entry_svg(&entry);
         // GND highlight colour appears.
@@ -1963,6 +2044,7 @@ mod tests {
             created_at: 0,
             footprint_view_transform: pcb_core::ViewTransform::default(),
             placement_margin: pcb_core::PlacementMargin::default(),
+            body_rect: None,
         };
         let svg = render_library_entry_svg(&entry);
         assert!(svg.starts_with("<svg"));

@@ -30,6 +30,9 @@ tauri = { version = "2", features = ["devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+# Tiny pure-Rust image-header parser: read a photo's pixel dimensions
+# (for real-scale board overlays) without decoding the whole bitmap.
+imagesize = "0.13"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time"] }
 
 [lints]

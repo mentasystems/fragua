@@ -10,7 +10,7 @@ pcb-core = { path = "../pcb-core" }
 # SVG -> PNG rasterisation for the headless screenshot endpoint. resvg
 # never touches the OS windowing system, which is exactly what we need:
 # agents can hit `GET /screenshot` without macOS accessibility permission.
-resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
 usvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 tiny-skia = "0.11"
 

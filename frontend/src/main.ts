@@ -11,6 +11,20 @@ type PaletteItem = {
 
 type Outline = { x_mm: number; y_mm: number; w_mm: number; h_mm: number };
 
+type PhotoOverlay = {
+  reference: string;
+  key: string;
+  attachment_id: string;
+  x_mm: number;
+  y_mm: number;
+  rotation_deg: number;
+  side: string;
+  image_w_px: number;
+  image_h_px: number;
+  transform: { scale_mm_per_px: number; rotation_deg: number; tx_mm: number; ty_mm: number };
+  matrix: [number, number, number, number, number, number];
+};
+
 type ProjectState = {
   name: string;
   footprint_count: number;
@@ -22,6 +36,7 @@ type ProjectState = {
   board_svg: string;
   schematic_svg: string;
   outline: Outline | null;
+  photo_overlays: PhotoOverlay[];
 };
 
 type ActivityEvent = {
@@ -58,6 +73,13 @@ type PlacementMargin = {
   left_mm: number;
 };
 
+type PhotoCalibration = {
+  a_px: [number, number];
+  b_px: [number, number];
+  a_pad: string;
+  b_pad: string;
+};
+
 type LibraryAttachment = {
   id: string;
   kind: string;
@@ -65,7 +87,17 @@ type LibraryAttachment = {
   mime: string;
   added_at: number;
   view_transform?: ViewTransform;
+  calibration?: PhotoCalibration | null;
 };
+
+type BodyRect = {
+  min_x_mm: number;
+  min_y_mm: number;
+  max_x_mm: number;
+  max_y_mm: number;
+};
+
+type ReviewPad = { number: string; x_mm: number; y_mm: number };
 
 type LibraryEntry = {
   key: string;
@@ -94,6 +126,9 @@ type ReviewEntry = {
   review_svg: string;
   footprint_view_transform: ViewTransform;
   placement_margin: PlacementMargin;
+  body_rect: BodyRect | null;
+  pad_bbox: BodyRect | null;
+  pads: ReviewPad[];
 };
 
 type PendingPad = {
@@ -149,6 +184,7 @@ root.innerHTML = `
       <span class="label">mm</span>
     </span>
     <span class="spacer"></span>
+    <span class="tab" id="toggle-photos" title="show/hide real-scale component photos on the board" hidden>photos</span>
     <span class="tab" id="toggle-library" title="show/hide library panel">lib</span>
     <span class="tab" id="toggle-activity" title="show/hide activity log">log</span>
     <span class="label">api</span><span class="value accent" id="proj-api">—</span>
@@ -175,6 +211,9 @@ root.innerHTML = `
   </div>
   <div class="confirm-modal" id="confirm-modal" hidden>
     <div class="confirm-modal-card" id="confirm-modal-card"></div>
+  </div>
+  <div class="calib-modal" id="calib-modal" hidden>
+    <div class="calib-modal-card" id="calib-modal-card"></div>
   </div>
 `;
 
@@ -207,6 +246,9 @@ const els = {
   infoCard: document.getElementById("info-modal-card")!,
   confirmModal: document.getElementById("confirm-modal")!,
   confirmCard: document.getElementById("confirm-modal-card")!,
+  togglePhotos: document.getElementById("toggle-photos")!,
+  calibModal: document.getElementById("calib-modal")!,
+  calibCard: document.getElementById("calib-modal-card")!,
 };
 
 type DrcViolation = {
@@ -303,6 +345,7 @@ function paintCanvas(state: ProjectState) {
     attachPanZoom(svg);
   }
   if (view === "board") {
+    paintPhotoOverlays(state);
     paintDrcMarkers();
   }
 }
@@ -398,6 +441,129 @@ function attachPanZoom(svg: SVGSVGElement) {
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
+}
+
+// --- Photo calibration geometry (mirrors pcb-core::library) -----------
+// An SVG-style affine [a,b,c,d,e,f] maps (x,y) → (a·x+c·y+e, b·x+d·y+f).
+type Affine = [number, number, number, number, number, number];
+
+function applyAffine(m: Affine, x: number, y: number): [number, number] {
+  return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+}
+
+function invertAffine(m: Affine): Affine | null {
+  const det = m[0] * m[3] - m[1] * m[2];
+  if (Math.abs(det) < 1e-12) return null;
+  const a = m[3] / det;
+  const b = -m[1] / det;
+  const c = -m[2] / det;
+  const d = m[0] / det;
+  return [a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])];
+}
+
+type Similarity = { scale: number; rot: number; tx: number; ty: number };
+
+/// Derive the photo→board similarity (photo px, y-down → footprint-local
+/// mm, y-up) from two pin correspondences. Mirrors
+/// `pcb_core::derive_photo_transform`; returns null on degenerate input.
+function derivePhotoTransform(
+  aMm: [number, number],
+  bMm: [number, number],
+  aPx: [number, number],
+  bPx: [number, number],
+): Similarity | null {
+  const dmx = bMm[0] - aMm[0];
+  const dmy = bMm[1] - aMm[1];
+  const dpx = bPx[0] - aPx[0];
+  const dpy = -(bPx[1] - aPx[1]);
+  const den = dpx * dpx + dpy * dpy;
+  if (den < 1e-9) return null;
+  if (dmx * dmx + dmy * dmy < 1e-12) return null;
+  const cx = (dmx * dpx + dmy * dpy) / den;
+  const cy = (dmy * dpx - dmx * dpy) / den;
+  const scale = Math.hypot(cx, cy);
+  const rot = (Math.atan2(cy, cx) * 180) / Math.PI;
+  const ax = aPx[0];
+  const ay = -aPx[1];
+  return { scale, rot, tx: aMm[0] - (cx * ax - cy * ay), ty: aMm[1] - (cy * ax + cx * ay) };
+}
+
+/// Flatten a similarity to the px→mm affine (matches `to_affine`).
+function simToAffine(s: Similarity): Affine {
+  const r = (s.rot * Math.PI) / 180;
+  const cos = Math.cos(r);
+  const sin = Math.sin(r);
+  return [s.scale * cos, s.scale * sin, s.scale * sin, -s.scale * cos, s.tx, s.ty];
+}
+
+// --- Board real-scale photo overlay -----------------------------------
+const NS_SVG = "http://www.w3.org/2000/svg";
+const NS_XLINK = "http://www.w3.org/1999/xlink";
+// key/attachment → data URI (photos are big; fetch once, reuse across repaints).
+const photoOverlayUriCache = new Map<string, string>();
+
+function readPhotosPref(): boolean {
+  const s = localStorage.getItem("fragua.photos");
+  return s === null ? true : s === "1"; // default ON
+}
+let photosEnabled = readPhotosPref();
+
+function applyPhotosToggle(enabled: boolean) {
+  photosEnabled = enabled;
+  els.togglePhotos.classList.toggle("active", enabled);
+  localStorage.setItem("fragua.photos", enabled ? "1" : "0");
+  if (view === "board" && lastState) paintPhotoOverlays(lastState);
+}
+els.togglePhotos.addEventListener("click", () => applyPhotosToggle(!photosEnabled));
+
+/// Fill the board SVG's `#photo-underlay` group with one <image> per
+/// calibrated footprint, at real physical scale, UNDER the copper. The
+/// image is placed by nesting the calibration matrix (raw px → placed
+/// local mm) inside the footprint's own `translate(x,y) rotate(rot)` so
+/// it lands exactly on the pads. Data URIs are fetched lazily + cached.
+function paintPhotoOverlays(state: ProjectState) {
+  const svg = els.canvas.querySelector("svg") as SVGSVGElement | null;
+  if (!svg) return;
+  const group = svg.querySelector("#photo-underlay") as SVGGElement | null;
+  if (!group) return;
+  group.innerHTML = "";
+  if (!photosEnabled) return;
+  // v1: top-side footprints only. TODO: bottom-side needs a mirrored
+  // placement; this board is single-side, so skip them without crashing.
+  for (const ov of state.photo_overlays.filter((o) => o.side === "top")) {
+    const g = document.createElementNS(NS_SVG, "g");
+    const [a, b, c, d, e, f] = ov.matrix;
+    g.setAttribute(
+      "transform",
+      `translate(${ov.x_mm},${ov.y_mm}) rotate(${ov.rotation_deg}) matrix(${a} ${b} ${c} ${d} ${e} ${f})`,
+    );
+    const img = document.createElementNS(NS_SVG, "image");
+    img.setAttribute("width", String(ov.image_w_px));
+    img.setAttribute("height", String(ov.image_h_px));
+    img.setAttribute("preserveAspectRatio", "none");
+    img.setAttribute("opacity", "0.9");
+    g.appendChild(img);
+    group.appendChild(g);
+    const cacheKey = `${ov.key}/${ov.attachment_id}`;
+    const cached = photoOverlayUriCache.get(cacheKey);
+    const setHref = (uri: string) => {
+      img.setAttribute("href", uri);
+      img.setAttributeNS(NS_XLINK, "href", uri);
+    };
+    if (cached) {
+      setHref(cached);
+    } else {
+      invoke<string>("library_attachment_data_uri", {
+        key: ov.key,
+        attachmentId: ov.attachment_id,
+      })
+        .then((uri) => {
+          photoOverlayUriCache.set(cacheKey, uri);
+          setHref(uri);
+        })
+        .catch((err) => appendActivity("error", `photo overlay ${ov.key}: ${err}`));
+    }
+  }
 }
 
 type ComponentInfo = {
@@ -549,6 +715,508 @@ function viewTransformCss(t: ViewTransform | undefined): string {
   if (r === 0 && sx === 1 && sy === 1) return "";
   return `rotate(${r}deg) scaleX(${sx}) scaleY(${sy})`;
 }
+
+// --- Photo calibration modal ------------------------------------------
+// Two steps over one calibrated photo of the module:
+//   1. scale — mark two pin centres, say which pads they are; Fragua
+//      derives the photo→footprint-mm transform (no typed measurements).
+//   2. body — fit a rectangle to the physical body; Fragua stores it in
+//      footprint-local mm and derives the placement margin from it.
+// The photo is shown RAW (unrotated — the attachment view_transform is
+// deliberately ignored here) so the captured pixel coords are in the
+// image's own frame, matching how the backend derives the transform.
+type CalibStep = "calibrate" | "body";
+let calibKeydown: ((e: KeyboardEvent) => void) | null = null;
+
+function closeCalibModal() {
+  els.calibModal.setAttribute("hidden", "");
+  els.calibCard.innerHTML = "";
+  if (calibKeydown) {
+    document.removeEventListener("keydown", calibKeydown);
+    calibKeydown = null;
+  }
+}
+
+async function openCalibrateModal(entry: ReviewEntry, startStep: CalibStep) {
+  const photo = entry.attachments.find((a) => a.mime.startsWith("image/"));
+  if (!photo) return;
+  els.calibCard.innerHTML = `<div class="calib-loading">loading photo…</div>`;
+  els.calibModal.removeAttribute("hidden");
+  calibKeydown = (e: KeyboardEvent) => {
+    if (e.key === "Escape") closeCalibModal();
+  };
+  document.addEventListener("keydown", calibKeydown);
+
+  let uri: string;
+  try {
+    uri = await invoke<string>("library_attachment_data_uri", {
+      key: entry.key,
+      attachmentId: photo.id,
+    });
+  } catch (err) {
+    els.calibCard.innerHTML = `<div class="calib-error">photo: ${esc(String(err))}</div>`;
+    return;
+  }
+  // Natural pixel dimensions — the SVG viewBox and all captured coords
+  // live in this raw image-pixel space.
+  const dims = await new Promise<{ w: number; h: number }>((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => resolve({ w: im.naturalWidth, h: im.naturalHeight });
+    im.onerror = () => reject(new Error("decode failed"));
+    im.src = uri;
+  }).catch(() => null);
+  if (!dims || dims.w <= 0 || dims.h <= 0) {
+    els.calibCard.innerHTML = `<div class="calib-error">could not read image size</div>`;
+    return;
+  }
+  const imgW = dims.w;
+  const imgH = dims.h;
+  const pads = entry.pads;
+
+  // --- Modal state ----------------------------------------------------
+  const existing = photo.calibration ?? null;
+  let markerA: [number, number] = existing ? existing.a_px : [imgW / 3, imgH / 2];
+  let markerB: [number, number] = existing ? existing.b_px : [(2 * imgW) / 3, imgH / 2];
+  const defaultA = pads.find((p) => p.number === "1")?.number ?? pads[0]?.number ?? "";
+  let aPad = existing?.a_pad ?? defaultA;
+  let bPad = existing?.b_pad ?? farthestPad(pads, aPad);
+  let activeMarker: "A" | "B" = "A";
+  let step: CalibStep = startStep;
+  // Body rect (footprint-local mm). Seed from stored body, else pad bbox.
+  const seed = entry.body_rect ?? entry.pad_bbox;
+  const body: BodyRect = seed
+    ? { ...seed }
+    : { min_x_mm: -1, min_y_mm: -1, max_x_mm: 1, max_y_mm: 1 };
+
+  els.calibCard.innerHTML = `
+    <header class="calib-head">
+      <div class="calib-title">calibrate · ${esc(entry.key)}</div>
+      <div class="calib-steps">
+        <button type="button" class="calib-step-btn" data-step="calibrate">1 · scale</button>
+        <button type="button" class="calib-step-btn" data-step="body">2 · body</button>
+      </div>
+      <button type="button" class="calib-close" aria-label="close">×</button>
+    </header>
+    <div class="calib-body">
+      <div class="calib-stage">
+        <svg class="calib-svg" viewBox="0 0 ${imgW} ${imgH}" preserveAspectRatio="xMidYMid meet">
+          <image class="calib-photo" href="${uri}" x="0" y="0" width="${imgW}" height="${imgH}" preserveAspectRatio="none"></image>
+          <g class="calib-layer-markers"></g>
+          <g class="calib-layer-body"></g>
+        </svg>
+      </div>
+      <div class="calib-side"></div>
+    </div>
+  `;
+  const svg = els.calibCard.querySelector(".calib-svg") as SVGSVGElement;
+  const markerLayer = els.calibCard.querySelector(".calib-layer-markers") as SVGGElement;
+  const bodyLayer = els.calibCard.querySelector(".calib-layer-body") as SVGGElement;
+  const side = els.calibCard.querySelector(".calib-side") as HTMLElement;
+  els.calibCard.querySelector(".calib-close")?.addEventListener("click", closeCalibModal);
+
+  // Convert a client point to SVG (raw image-pixel) coords.
+  function toSvg(clientX: number, clientY: number): [number, number] {
+    const pt = svg.createSVGPoint();
+    pt.x = clientX;
+    pt.y = clientY;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return [0, 0];
+    const p = pt.matrixTransform(ctm.inverse());
+    return [p.x, p.y];
+  }
+
+  // Live similarity transform from the current marks + pads (native mm).
+  function currentSim(): Similarity | null {
+    const a = pads.find((p) => p.number === aPad);
+    const b = pads.find((p) => p.number === bPad);
+    if (!a || !b) return null;
+    return derivePhotoTransform([a.x_mm, a.y_mm], [b.x_mm, b.y_mm], markerA, markerB);
+  }
+
+  const markerR = Math.max(imgW, imgH) * 0.012;
+
+  function renderMarkers() {
+    markerLayer.innerHTML = "";
+    if (step !== "calibrate") return;
+    const mk = (label: string, p: [number, number]) => {
+      const g = document.createElementNS(NS_SVG, "g");
+      g.setAttribute("class", `calib-marker marker-${label.toLowerCase()}`);
+      g.dataset.marker = label;
+      const c = document.createElementNS(NS_SVG, "circle");
+      c.setAttribute("cx", String(p[0]));
+      c.setAttribute("cy", String(p[1]));
+      c.setAttribute("r", String(markerR));
+      const t = document.createElementNS(NS_SVG, "text");
+      t.setAttribute("x", String(p[0]));
+      t.setAttribute("y", String(p[1]));
+      t.setAttribute("text-anchor", "middle");
+      t.setAttribute("dominant-baseline", "central");
+      t.setAttribute("font-size", String(markerR * 1.2));
+      t.textContent = label;
+      g.appendChild(c);
+      g.appendChild(t);
+      markerLayer.appendChild(g);
+      wireMarkerDrag(g, label as "A" | "B");
+    };
+    mk("A", markerA);
+    mk("B", markerB);
+  }
+
+  function wireMarkerDrag(g: SVGGElement, which: "A" | "B") {
+    g.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      g.setPointerCapture(ev.pointerId);
+      const onMove = (mv: PointerEvent) => {
+        const p = toSvg(mv.clientX, mv.clientY);
+        if (which === "A") markerA = p;
+        else markerB = p;
+        renderMarkers();
+        renderSide();
+      };
+      const onUp = () => {
+        g.removeEventListener("pointermove", onMove);
+        g.removeEventListener("pointerup", onUp);
+        g.removeEventListener("pointercancel", onUp);
+      };
+      g.addEventListener("pointermove", onMove);
+      g.addEventListener("pointerup", onUp);
+      g.addEventListener("pointercancel", onUp);
+    });
+  }
+
+  function renderBody() {
+    bodyLayer.innerHTML = "";
+    if (step !== "body") return;
+    const sim = currentSim();
+    if (!sim) return;
+    const pxToMm = simToAffine(sim);
+    const mmToPx = invertAffine(pxToMm);
+    if (!mmToPx) return;
+    // Pad dots (native mm → px) — instant calibration sanity check.
+    for (const p of pads) {
+      const [x, y] = applyAffine(mmToPx, p.x_mm, p.y_mm);
+      const dot = document.createElementNS(NS_SVG, "circle");
+      dot.setAttribute("class", "calib-paddot");
+      dot.setAttribute("cx", String(x));
+      dot.setAttribute("cy", String(y));
+      dot.setAttribute("r", String(markerR * 0.5));
+      bodyLayer.appendChild(dot);
+    }
+    // Body rectangle as a quad (corners mm → px; the photo may be
+    // rotated so this reads as a tilted polygon).
+    const corners: [number, number][] = [
+      [body.min_x_mm, body.min_y_mm],
+      [body.max_x_mm, body.min_y_mm],
+      [body.max_x_mm, body.max_y_mm],
+      [body.min_x_mm, body.max_y_mm],
+    ];
+    const poly = document.createElementNS(NS_SVG, "polygon");
+    poly.setAttribute("class", "calib-bodyrect");
+    poly.setAttribute(
+      "points",
+      corners.map(([mx, my]) => applyAffine(mmToPx, mx, my).join(",")).join(" "),
+    );
+    bodyLayer.appendChild(poly);
+    // Edge handles at edge midpoints (in mm), dragged to move that edge.
+    const midY = (body.min_y_mm + body.max_y_mm) / 2;
+    const midX = (body.min_x_mm + body.max_x_mm) / 2;
+    const edges: { side: "top" | "right" | "bottom" | "left"; mm: [number, number] }[] = [
+      { side: "top", mm: [midX, body.max_y_mm] },
+      { side: "bottom", mm: [midX, body.min_y_mm] },
+      { side: "right", mm: [body.max_x_mm, midY] },
+      { side: "left", mm: [body.min_x_mm, midY] },
+    ];
+    for (const e of edges) {
+      const [hx, hy] = applyAffine(mmToPx, e.mm[0], e.mm[1]);
+      const h = document.createElementNS(NS_SVG, "circle");
+      h.setAttribute("class", `calib-bodyhandle handle-${e.side}`);
+      h.setAttribute("cx", String(hx));
+      h.setAttribute("cy", String(hy));
+      h.setAttribute("r", String(markerR * 0.8));
+      bodyLayer.appendChild(h);
+      wireBodyHandleDrag(h, e.side, pxToMm);
+    }
+  }
+
+  function wireBodyHandleDrag(
+    h: SVGCircleElement,
+    edge: "top" | "right" | "bottom" | "left",
+    pxToMm: Affine,
+  ) {
+    h.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      h.setPointerCapture(ev.pointerId);
+      const snap = (v: number) => Math.round(v / 0.1) * 0.1;
+      const onMove = (mv: PointerEvent) => {
+        const [px, py] = toSvg(mv.clientX, mv.clientY);
+        const [mmx, mmy] = applyAffine(pxToMm, px, py);
+        if (edge === "right") body.max_x_mm = Math.max(snap(mmx), body.min_x_mm + 0.1);
+        else if (edge === "left") body.min_x_mm = Math.min(snap(mmx), body.max_x_mm - 0.1);
+        else if (edge === "top") body.max_y_mm = Math.max(snap(mmy), body.min_y_mm + 0.1);
+        else body.min_y_mm = Math.min(snap(mmy), body.max_y_mm - 0.1);
+        renderBody();
+        renderSide();
+      };
+      const onUp = () => {
+        h.removeEventListener("pointermove", onMove);
+        h.removeEventListener("pointerup", onUp);
+        h.removeEventListener("pointercancel", onUp);
+      };
+      h.addEventListener("pointermove", onMove);
+      h.addEventListener("pointerup", onUp);
+      h.addEventListener("pointercancel", onUp);
+    });
+  }
+
+  function padOptions(selected: string): string {
+    return pads
+      .map(
+        (p) =>
+          `<option value="${esc(p.number)}" ${p.number === selected ? "selected" : ""}>${esc(p.number)}</option>`,
+      )
+      .join("");
+  }
+
+  function renderSide() {
+    if (step === "calibrate") {
+      const sim = currentSim();
+      const readout = sim
+        ? `<div class="calib-readout">
+             <div><span>scale</span><b>${(sim.scale * 1000).toFixed(3)} µm/px</b></div>
+             <div><span>photo width</span><b>${(imgW * sim.scale).toFixed(2)} mm</b></div>
+             <div><span>rotation</span><b>${sim.rot.toFixed(1)}°</b></div>
+           </div>`
+        : `<div class="calib-readout invalid">pick two different pads and place both marks</div>`;
+      side.innerHTML = `
+        <p class="calib-hint">Click the two pin centres on the photo (or drag the A / B marks), then say which pad each one is. Fragua works out the scale from the known distance between those pads.</p>
+        <div class="calib-active">
+          <span>placing:</span>
+          <button type="button" class="calib-ab ${activeMarker === "A" ? "active" : ""}" data-ab="A">A</button>
+          <button type="button" class="calib-ab ${activeMarker === "B" ? "active" : ""}" data-ab="B">B</button>
+        </div>
+        <label class="calib-field"><span>mark A = pad</span><select class="calib-pad-a">${padOptions(aPad)}</select></label>
+        <label class="calib-field"><span>mark B = pad</span><select class="calib-pad-b">${padOptions(bPad)}</select></label>
+        ${readout}
+        <div class="calib-actions">
+          <button type="button" class="calib-save" ${sim ? "" : "disabled"}>save calibration</button>
+          ${existing ? `<button type="button" class="calib-clear">clear</button>` : ""}
+        </div>
+      `;
+      side.querySelector(".calib-pad-a")?.addEventListener("change", (e) => {
+        aPad = (e.target as HTMLSelectElement).value;
+        renderSide();
+      });
+      side.querySelector(".calib-pad-b")?.addEventListener("change", (e) => {
+        bPad = (e.target as HTMLSelectElement).value;
+        renderSide();
+      });
+      for (const btn of Array.from(side.querySelectorAll(".calib-ab")) as HTMLButtonElement[]) {
+        btn.addEventListener("click", () => {
+          activeMarker = btn.dataset.ab as "A" | "B";
+          renderSide();
+        });
+      }
+      side.querySelector(".calib-save")?.addEventListener("click", saveCalibration);
+      side.querySelector(".calib-clear")?.addEventListener("click", clearCalibration);
+    } else {
+      const sim = currentSim();
+      const w = (body.max_x_mm - body.min_x_mm).toFixed(2);
+      const h = (body.max_y_mm - body.min_y_mm).toFixed(2);
+      side.innerHTML = sim
+        ? `<p class="calib-hint">Drag the four edge handles so the rectangle covers the physical body of the module. The white dots are where calibration says the pads are — they should sit on the real pads.</p>
+           <div class="calib-readout">
+             <div><span>body</span><b>${w} × ${h} mm</b></div>
+           </div>
+           <div class="calib-actions">
+             <button type="button" class="calib-save-body">save body + margin</button>
+             ${entry.body_rect ? `<button type="button" class="calib-clear-body">clear</button>` : ""}
+           </div>`
+        : `<p class="calib-hint invalid">This photo is not calibrated yet. Do step 1 first.</p>`;
+      side.querySelector(".calib-save-body")?.addEventListener("click", saveBody);
+      side.querySelector(".calib-clear-body")?.addEventListener("click", clearBody);
+    }
+  }
+
+  async function saveCalibration() {
+    const sim = currentSim();
+    if (!sim) return;
+    try {
+      await invoke("library_set_photo_calibration", {
+        key: entry.key,
+        attachmentId: photo!.id,
+        aPxX: markerA[0],
+        aPxY: markerA[1],
+        bPxX: markerB[0],
+        bPxY: markerB[1],
+        aPad,
+        bPad,
+      });
+      appendActivity("info", `calibrated photo for ${entry.key}`);
+      setStep("body");
+    } catch (err) {
+      appendActivity("error", `calibration save ${entry.key}: ${err}`);
+    }
+  }
+
+  async function clearCalibration() {
+    try {
+      await invoke("library_clear_photo_calibration", {
+        key: entry.key,
+        attachmentId: photo!.id,
+      });
+      appendActivity("info", `cleared calibration for ${entry.key}`);
+      closeCalibModal();
+    } catch (err) {
+      appendActivity("error", `calibration clear ${entry.key}: ${err}`);
+    }
+  }
+
+  async function saveBody() {
+    try {
+      await invoke("library_set_body_rect", {
+        key: entry.key,
+        minXMm: body.min_x_mm,
+        minYMm: body.min_y_mm,
+        maxXMm: body.max_x_mm,
+        maxYMm: body.max_y_mm,
+      });
+      appendActivity("info", `saved body + margin for ${entry.key}`);
+      closeCalibModal();
+    } catch (err) {
+      appendActivity("error", `body save ${entry.key}: ${err}`);
+    }
+  }
+
+  async function clearBody() {
+    try {
+      await invoke("library_clear_body_rect", { key: entry.key });
+      appendActivity("info", `cleared body for ${entry.key}`);
+      closeCalibModal();
+    } catch (err) {
+      appendActivity("error", `body clear ${entry.key}: ${err}`);
+    }
+  }
+
+  function setStep(s: CalibStep) {
+    step = s;
+    for (const b of Array.from(els.calibCard.querySelectorAll(".calib-step-btn")) as HTMLButtonElement[]) {
+      b.classList.toggle("active", b.dataset.step === s);
+    }
+    renderMarkers();
+    renderBody();
+    renderSide();
+  }
+  for (const b of Array.from(els.calibCard.querySelectorAll(".calib-step-btn")) as HTMLButtonElement[]) {
+    b.addEventListener("click", () => setStep(b.dataset.step as CalibStep));
+  }
+
+  // Background click (no drag) places the active marker; drag pans the
+  // photo; wheel zooms around the cursor. Marks / handles capture their
+  // own pointers first, so this only fires on the bare photo.
+  attachCalibPanZoom(svg, imgW, imgH, (p) => {
+    if (step !== "calibrate") return;
+    if (activeMarker === "A") markerA = p;
+    else markerB = p;
+    activeMarker = activeMarker === "A" ? "B" : "A";
+    renderMarkers();
+    renderSide();
+  });
+
+  setStep(step);
+}
+
+/// Nearest-neighbour default: the pad geometrically farthest from
+/// `fromNumber`, so the two default calibration pads are well separated
+/// (a long baseline gives a more accurate scale).
+function farthestPad(pads: ReviewPad[], fromNumber: string): string {
+  if (pads.length === 0) return "";
+  const from = pads.find((p) => p.number === fromNumber) ?? pads[0];
+  let best = pads[0];
+  let bestD = -1;
+  for (const p of pads) {
+    const dd = (p.x_mm - from.x_mm) ** 2 + (p.y_mm - from.y_mm) ** 2;
+    if (dd > bestD) {
+      bestD = dd;
+      best = p;
+    }
+  }
+  return best.number;
+}
+
+/// viewBox pan/zoom for the calibration photo SVG. A click without drag
+/// invokes `onClick` with the SVG-space (raw image px) point.
+function attachCalibPanZoom(
+  svg: SVGSVGElement,
+  imgW: number,
+  imgH: number,
+  onClick: (p: [number, number]) => void,
+) {
+  let vb = { x: 0, y: 0, w: imgW, h: imgH };
+  const apply = () => svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+  svg.style.cursor = "grab";
+  svg.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0) return;
+    // Ignore presses that land on a mark / handle (they stopPropagation,
+    // but guard anyway).
+    if ((ev.target as Element).closest(".calib-marker, .calib-bodyhandle")) return;
+    ev.preventDefault();
+    svg.setPointerCapture(ev.pointerId);
+    svg.style.cursor = "grabbing";
+    const rect = svg.getBoundingClientRect();
+    const sx = vb.w / rect.width;
+    const sy = vb.h / rect.height;
+    const px0 = ev.clientX;
+    const py0 = ev.clientY;
+    const start = { ...vb };
+    let panned = false;
+    const onMove = (e: PointerEvent) => {
+      if (!panned && Math.hypot(e.clientX - px0, e.clientY - py0) < 4) return;
+      panned = true;
+      vb = { x: start.x - (e.clientX - px0) * sx, y: start.y - (e.clientY - py0) * sy, w: vb.w, h: vb.h };
+      apply();
+    };
+    const onUp = (e: PointerEvent) => {
+      svg.removeEventListener("pointermove", onMove);
+      svg.removeEventListener("pointerup", onUp);
+      svg.removeEventListener("pointercancel", onUp);
+      svg.style.cursor = "grab";
+      if (!panned) {
+        const pt = svg.createSVGPoint();
+        pt.x = e.clientX;
+        pt.y = e.clientY;
+        const ctm = svg.getScreenCTM();
+        if (ctm) {
+          const p = pt.matrixTransform(ctm.inverse());
+          onClick([p.x, p.y]);
+        }
+      }
+    };
+    svg.addEventListener("pointermove", onMove);
+    svg.addEventListener("pointerup", onUp);
+    svg.addEventListener("pointercancel", onUp);
+  });
+  svg.addEventListener(
+    "wheel",
+    (ev) => {
+      ev.preventDefault();
+      const rect = svg.getBoundingClientRect();
+      const fx = vb.x + ((ev.clientX - rect.left) / rect.width) * vb.w;
+      const fy = vb.y + ((ev.clientY - rect.top) / rect.height) * vb.h;
+      const k = Math.exp(ev.deltaY * 0.0015);
+      const newW = clamp(vb.w * k, imgW * 0.05, imgW * 4);
+      const newH = clamp(vb.h * k, imgH * 0.05, imgH * 4);
+      vb = { x: fx - ((fx - vb.x) * newW) / vb.w, y: fy - ((fy - vb.y) * newH) / vb.h, w: newW, h: newH };
+      apply();
+    },
+    { passive: false },
+  );
+}
+
+els.calibModal.addEventListener("click", (ev) => {
+  if (ev.target === els.calibModal) closeCalibModal();
+});
 
 /// Two-step inline delete-entry confirmation. The first click flips
 /// the trash button into a "✓ confirm" state for `windowMs`; a second
@@ -917,6 +1585,15 @@ async function paintReview() {
             <button type="button" data-act="flip-h" title="flip horizontally">flip H</button>
             <button type="button" data-act="flip-v" title="flip vertically">flip V</button>
           </div>
+          ${
+            photo
+              ? `<div class="calib-controls">
+                   <span class="calib-badge ${photo.calibration ? "on" : "off"}">${photo.calibration ? "calibrated" : "not calibrated"}</span>
+                   <button type="button" class="btn-calibrate" title="mark two pins on the photo to set real scale">${photo.calibration ? "recalibrate" : "calibrate"}</button>
+                   <button type="button" class="btn-body" title="draw the physical body on the calibrated photo → auto placement margin" ${photo.calibration ? "" : "disabled"}>body${entry.body_rect ? " ✓" : ""}</button>
+                 </div>`
+              : ""
+          }
         </div>
         <div class="review-cell">
           <div class="review-footprint" title="drag the edge handles to set per-side placement margin (mm)">
@@ -1046,6 +1723,25 @@ async function paintReview() {
     const key = card.dataset.key ?? "";
     if (!key) continue;
     wireMarginHandles(card, key, localState);
+  }
+
+  // Wire up the per-card calibrate / body buttons → the photo
+  // calibration modal. Look the entry up by key so the modal gets the
+  // pads + pad bbox + current calibration/body it needs.
+  const entriesByKey = new Map(data.entries.map((e) => [e.key, e]));
+  for (const card of Array.from(els.canvas.querySelectorAll(".review-card")) as HTMLElement[]) {
+    const key = card.dataset.key ?? "";
+    const entry = entriesByKey.get(key);
+    if (!entry) continue;
+    card.querySelector(".btn-calibrate")?.addEventListener("click", () => {
+      void openCalibrateModal(entry, "calibrate");
+    });
+    const bodyBtn = card.querySelector(".btn-body") as HTMLButtonElement | null;
+    if (bodyBtn && !bodyBtn.disabled) {
+      bodyBtn.addEventListener("click", () => {
+        void openCalibrateModal(entry, "body");
+      });
+    }
   }
 
   // Wire up the trash buttons (two-step inline confirm). Remove the
@@ -1442,6 +2138,10 @@ async function refresh() {
     els.boardW.textContent = "—";
     els.boardH.textContent = "—";
   }
+  // Only surface the photos toggle when there is something to show.
+  const hasOverlays = state.photo_overlays.length > 0;
+  els.togglePhotos.toggleAttribute("hidden", !hasOverlays);
+  els.togglePhotos.classList.toggle("active", photosEnabled);
   paintPalette(state);
   paintCanvas(state);
 }

@@ -1915,6 +1915,7 @@ fn tool_library_create(project: &Project, args: &Value) -> Result<Value, ToolErr
         created_at: 0,
         footprint_view_transform: pcb_core::ViewTransform::default(),
         placement_margin: pcb_core::PlacementMargin::default(),
+        body_rect: None,
     };
     // HARD GUARD: a library entry the agent generates does NOT land in
     // the on-disk library until a human eyeballs the rendered footprint

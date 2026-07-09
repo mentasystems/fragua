@@ -194,6 +194,20 @@ impl ViewTransform {
         }
         a + f32::from(self.rotation_deg % 360)
     }
+
+    /// Flatten to an SVG-style affine `[a, b, c, d, 0, 0]` (no
+    /// translation) that maps a footprint-local mm point through this
+    /// view transform, matching `apply_point_mm`. Built from the images
+    /// of the basis vectors so it stays in lock-step with the tested
+    /// `apply_point_mm` logic. Used when composing the view transform
+    /// onto a calibrated photo overlay so the photo tracks the placed
+    /// (view-transformed) pads.
+    #[must_use]
+    pub fn to_affine_mm(self) -> [f64; 6] {
+        let (a, b) = self.apply_point_mm(1.0, 0.0);
+        let (c, d) = self.apply_point_mm(0.0, 1.0);
+        [a, b, c, d, 0.0, 0.0]
+    }
 }
 
 /// Per-side keep-out around a footprint, in mm, used by the placer's
@@ -229,6 +243,128 @@ impl PlacementMargin {
     }
 }
 
+/// Two-point photo calibration recorded in the review UI. The user
+/// marks two pin centres on a top-down photo of the module and says
+/// which pads they are; from those correspondences (plus the entry's
+/// own pad offsets) Fragua derives the similarity transform that maps
+/// raw image pixels → footprint-local mm. The correspondences are the
+/// source of truth — the transform is always re-derived, never stored —
+/// so re-numbering pads or nudging a pad offset keeps the photo aligned.
+///
+/// `a_px` / `b_px` are in RAW image pixel space (origin top-left, y
+/// growing downward), captured with the photo shown unrotated so the
+/// stored `Attachment::view_transform` never has to be undone here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PhotoCalibration {
+    /// Pixel coords of the first marked pin centre (x, y), y-down.
+    pub a_px: (f64, f64),
+    /// Pixel coords of the second marked pin centre (x, y), y-down.
+    pub b_px: (f64, f64),
+    /// Pad number the first mark corresponds to.
+    pub a_pad: String,
+    /// Pad number the second mark corresponds to.
+    pub b_pad: String,
+}
+
+/// Physical body extent of a module in footprint-local millimetres
+/// (Y-up, same frame as `LibraryPad`). Authored by fitting a rectangle
+/// to the calibrated photo; the placement margin is derived from it so
+/// the placer / DRC / renderer respect the true module footprint.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct BodyRect {
+    pub min_x_mm: f64,
+    pub min_y_mm: f64,
+    pub max_x_mm: f64,
+    pub max_y_mm: f64,
+}
+
+/// A derived photo→board similarity transform. Maps a raw image pixel
+/// `(px, py)` (y-down) to footprint-local mm via
+/// `mm = scale * Rot(rotation_deg) * (px, -py) + (tx, ty)`.
+/// The `(px, -py)` term flips the image's downward y into the board's
+/// upward y; the full map is therefore orientation-reversing (a
+/// reflection), which is exactly right for a top-down photo. Not
+/// serialised — always re-derived from `PhotoCalibration`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SimilarityTransform {
+    pub scale_mm_per_px: f64,
+    pub rotation_deg: f64,
+    pub tx_mm: f64,
+    pub ty_mm: f64,
+}
+
+impl SimilarityTransform {
+    /// Flatten to an SVG-style affine `[a, b, c, d, e, f]` mapping a raw
+    /// image pixel `(px, py)` to footprint-local mm:
+    /// `(a·px + c·py + e, b·px + d·py + f)`. The determinant is `-scale²`
+    /// (negative) because the y-flip makes this a reflection.
+    #[must_use]
+    pub fn to_affine(self) -> [f64; 6] {
+        let (sin, cos) = self.rotation_deg.to_radians().sin_cos();
+        let s = self.scale_mm_per_px;
+        [s * cos, s * sin, s * sin, -s * cos, self.tx_mm, self.ty_mm]
+    }
+}
+
+/// Derive the photo→board similarity transform from two pin
+/// correspondences: pad centres `a_mm` / `b_mm` in footprint-local mm
+/// (Y-up) and the marked pixel points `a_px` / `b_px` (Y-down). Solves
+/// for uniform scale + rotation + translation after flipping pixel y so
+/// both frames are Y-up. Rejects degenerate input (coincident marks or
+/// coincident pads).
+pub fn derive_photo_transform(
+    a_mm: (f64, f64),
+    b_mm: (f64, f64),
+    a_px: (f64, f64),
+    b_px: (f64, f64),
+) -> Result<SimilarityTransform, String> {
+    // Board-space delta.
+    let dmx = b_mm.0 - a_mm.0;
+    let dmy = b_mm.1 - a_mm.1;
+    // Pixel-space delta with y flipped to Y-up (d_px').
+    let dpx = b_px.0 - a_px.0;
+    let dpy = -(b_px.1 - a_px.1);
+    let den = dpx * dpx + dpy * dpy;
+    if den < 1e-9 {
+        return Err("photo calibration: the two pin marks are at the same point".into());
+    }
+    if dmx * dmx + dmy * dmy < 1e-12 {
+        return Err("photo calibration: the two pads are at the same position".into());
+    }
+    // c = d_mm / d_px' (complex division) = scale · e^{iθ}.
+    let cx = (dmx * dpx + dmy * dpy) / den;
+    let cy = (dmy * dpx - dmx * dpy) / den;
+    let scale = (cx * cx + cy * cy).sqrt();
+    let rotation_deg = cy.atan2(cx).to_degrees();
+    // t = a_mm − c · a'  where a' is the y-flipped first pixel point.
+    let ax = a_px.0;
+    let ay = -a_px.1;
+    let tx = a_mm.0 - (cx * ax - cy * ay);
+    let ty = a_mm.1 - (cy * ax + cx * ay);
+    Ok(SimilarityTransform {
+        scale_mm_per_px: scale,
+        rotation_deg,
+        tx_mm: tx,
+        ty_mm: ty,
+    })
+}
+
+/// Compose two SVG-style affines so the result applies `inner` first,
+/// then `outer`: `compose(outer, inner)(p) = outer(inner(p))`.
+#[must_use]
+pub fn affine_compose(outer: [f64; 6], inner: [f64; 6]) -> [f64; 6] {
+    let [a, b, c, d, e, f] = inner;
+    let [aa, bb, cc, dd, ee, ff] = outer;
+    [
+        aa * a + cc * b,
+        bb * a + dd * b,
+        aa * c + cc * d,
+        bb * c + dd * d,
+        aa * e + cc * f + ee,
+        bb * e + dd * f + ff,
+    ]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Attachment {
     /// `UUIDv4`. Also the on-disk basename (extension follows the mime).
@@ -246,6 +382,10 @@ pub struct Attachment {
     /// not change anything in the design pipeline. Default = identity.
     #[serde(default)]
     pub view_transform: ViewTransform,
+    /// Two-point photo→board calibration, if the user has calibrated
+    /// this photo. `None` for uncalibrated / non-photo attachments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<PhotoCalibration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -303,6 +443,69 @@ pub struct LibraryEntry {
     /// breathing room for the real component body. Default = all zeros.
     #[serde(default)]
     pub placement_margin: PlacementMargin,
+    /// Physical body rectangle in footprint-local mm, authored on a
+    /// calibrated photo. When set, `placement_margin` is derived from
+    /// it. `None` for entries the user hasn't drawn a body on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_rect: Option<BodyRect>,
+}
+
+impl LibraryEntry {
+    /// Centre of the pad with the given number, in footprint-local mm.
+    #[must_use]
+    pub fn pad_center_mm(&self, number: &str) -> Option<(f64, f64)> {
+        self.pads
+            .iter()
+            .find(|p| p.number == number)
+            .map(|p| (p.x_mm, p.y_mm))
+    }
+
+    /// Axis-aligned bounding box of every pad `(min_x, min_y, max_x,
+    /// max_y)` in footprint-local mm. `None` when the entry has no pads.
+    #[must_use]
+    pub fn pads_bbox_mm(&self) -> Option<(f64, f64, f64, f64)> {
+        let mut it = self.pads.iter();
+        let first = it.next()?;
+        let mut min_x = first.x_mm - first.w_mm / 2.0;
+        let mut min_y = first.y_mm - first.h_mm / 2.0;
+        let mut max_x = first.x_mm + first.w_mm / 2.0;
+        let mut max_y = first.y_mm + first.h_mm / 2.0;
+        for p in it {
+            min_x = min_x.min(p.x_mm - p.w_mm / 2.0);
+            min_y = min_y.min(p.y_mm - p.h_mm / 2.0);
+            max_x = max_x.max(p.x_mm + p.w_mm / 2.0);
+            max_y = max_y.max(p.y_mm + p.h_mm / 2.0);
+        }
+        Some((min_x, min_y, max_x, max_y))
+    }
+
+    /// Derive the photo→board transform for one calibration against this
+    /// entry's pad offsets. Errors if a referenced pad no longer exists.
+    pub fn photo_transform(&self, cal: &PhotoCalibration) -> Result<SimilarityTransform, String> {
+        let a = self
+            .pad_center_mm(&cal.a_pad)
+            .ok_or_else(|| format!("photo calibration: pad {} not found", cal.a_pad))?;
+        let b = self
+            .pad_center_mm(&cal.b_pad)
+            .ok_or_else(|| format!("photo calibration: pad {} not found", cal.b_pad))?;
+        derive_photo_transform(a, b, cal.a_px, cal.b_px)
+    }
+
+    /// Derive the per-side placement margin implied by `body`: how far
+    /// the body extends beyond the pad bounding box on each side (Y-up),
+    /// clamped to ≥ 0 so a body smaller than the pads yields no margin.
+    #[must_use]
+    pub fn margin_from_body_rect(&self, body: &BodyRect) -> PlacementMargin {
+        let Some((min_x, min_y, max_x, max_y)) = self.pads_bbox_mm() else {
+            return PlacementMargin::default();
+        };
+        PlacementMargin {
+            top_mm: (body.max_y_mm - max_y).max(0.0),
+            right_mm: (body.max_x_mm - max_x).max(0.0),
+            bottom_mm: (min_y - body.min_y_mm).max(0.0),
+            left_mm: (min_x - body.min_x_mm).max(0.0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -458,6 +661,7 @@ impl Library {
             mime,
             added_at: now_secs(),
             view_transform: ViewTransform::default(),
+            calibration: None,
         };
         let mut inner = self.inner.write().expect("library lock poisoned");
         let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) else {
@@ -551,6 +755,76 @@ impl Library {
             return Err(format!("library: no entry with key {key}"));
         };
         entry.placement_margin = margin;
+        let snapshot = inner.clone();
+        drop(inner);
+        self.save(&snapshot)?;
+        Ok(true)
+    }
+
+    /// Store (or overwrite) the two-point photo calibration on one
+    /// attachment. Returns `true` if the attachment was found.
+    pub fn set_photo_calibration(
+        &self,
+        key: &str,
+        attachment_id: &str,
+        calibration: PhotoCalibration,
+    ) -> Result<bool, String> {
+        let mut inner = self.inner.write().expect("library lock poisoned");
+        let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) else {
+            return Err(format!("library: no entry with key {key}"));
+        };
+        let Some(att) = entry.attachments.iter_mut().find(|a| a.id == attachment_id) else {
+            return Ok(false);
+        };
+        att.calibration = Some(calibration);
+        let snapshot = inner.clone();
+        drop(inner);
+        self.save(&snapshot)?;
+        Ok(true)
+    }
+
+    /// Drop the photo calibration from one attachment. Returns `true` if
+    /// the attachment was found.
+    pub fn clear_photo_calibration(&self, key: &str, attachment_id: &str) -> Result<bool, String> {
+        let mut inner = self.inner.write().expect("library lock poisoned");
+        let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) else {
+            return Err(format!("library: no entry with key {key}"));
+        };
+        let Some(att) = entry.attachments.iter_mut().find(|a| a.id == attachment_id) else {
+            return Ok(false);
+        };
+        att.calibration = None;
+        let snapshot = inner.clone();
+        drop(inner);
+        self.save(&snapshot)?;
+        Ok(true)
+    }
+
+    /// Store the physical body rectangle on an entry AND recompute the
+    /// derived per-side placement margin from it, in a single atomic
+    /// update. Returns `true` if the entry was found.
+    pub fn set_body_rect(&self, key: &str, body: BodyRect) -> Result<bool, String> {
+        let mut inner = self.inner.write().expect("library lock poisoned");
+        let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) else {
+            return Err(format!("library: no entry with key {key}"));
+        };
+        entry.placement_margin = entry.margin_from_body_rect(&body);
+        entry.body_rect = Some(body);
+        let snapshot = inner.clone();
+        drop(inner);
+        self.save(&snapshot)?;
+        Ok(true)
+    }
+
+    /// Drop the body rectangle from an entry. The derived placement
+    /// margin is left as-is so any manual override survives. Returns
+    /// `true` if the entry was found.
+    pub fn clear_body_rect(&self, key: &str) -> Result<bool, String> {
+        let mut inner = self.inner.write().expect("library lock poisoned");
+        let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) else {
+            return Err(format!("library: no entry with key {key}"));
+        };
+        entry.body_rect = None;
         let snapshot = inner.clone();
         drop(inner);
         self.save(&snapshot)?;
@@ -675,5 +949,213 @@ mod tests {
         let (x, y) = vt.apply_point_mm(1.0, 0.0);
         approx(x, 0.0);
         approx(y, -1.0);
+    }
+
+    /// Helper: run a derived transform's affine forward on a pixel point.
+    fn apply_affine(m: [f64; 6], px: f64, py: f64) -> (f64, f64) {
+        (m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5])
+    }
+
+    #[test]
+    fn photo_transform_round_trips_the_two_anchors() {
+        // Two pads 10 mm apart on X; pixel marks 100 px apart on X.
+        let t = derive_photo_transform((-5.0, 0.0), (5.0, 0.0), (100.0, 200.0), (200.0, 200.0))
+            .expect("derive");
+        approx(t.scale_mm_per_px, 10.0 / 100.0);
+        let m = t.to_affine();
+        let (ax, ay) = apply_affine(m, 100.0, 200.0);
+        approx(ax, -5.0);
+        approx(ay, 0.0);
+        let (bx, by) = apply_affine(m, 200.0, 200.0);
+        approx(bx, 5.0);
+        approx(by, 0.0);
+    }
+
+    #[test]
+    fn photo_transform_gets_the_y_flip_right_asymmetric() {
+        // Asymmetric triangle so a wrong y sign would not cancel out.
+        // Pad A at (0,0), B at (4,3) in mm (Y-up). In the photo, A is at
+        // (10,90) and B at (50,30) — B is UP and RIGHT of A on screen
+        // (smaller pixel-y = higher up). A correct y-flip must map that
+        // screen-up to board-up (+Y).
+        let a_mm = (0.0, 0.0);
+        let b_mm = (4.0, 3.0);
+        let a_px = (10.0, 90.0);
+        let b_px = (50.0, 30.0);
+        let t = derive_photo_transform(a_mm, b_mm, a_px, b_px).expect("derive");
+        let m = t.to_affine();
+        // Anchors land exactly.
+        let (ax, ay) = apply_affine(m, a_px.0, a_px.1);
+        approx(ax, 0.0);
+        approx(ay, 0.0);
+        let (bx, by) = apply_affine(m, b_px.0, b_px.1);
+        approx(bx, 4.0);
+        approx(by, 3.0);
+        // A pixel BELOW A on screen (larger y) must map to NEGATIVE board
+        // Y — proving the flip, not just the anchors, is correct.
+        let (_, below_y) = apply_affine(m, 10.0, 140.0);
+        assert!(below_y < 0.0, "screen-down should be board-down: {below_y}");
+        // Determinant is negative (reflection).
+        let det = m[0] * m[3] - m[1] * m[2];
+        assert!(det < 0.0, "photo→board map must be a reflection: {det}");
+    }
+
+    #[test]
+    fn photo_transform_handles_a_rotated_photo() {
+        // Photo taken rotated 90°: pads on the board X axis appear along
+        // the photo's y axis. A at mm(0,0)→px(50,50), B at mm(10,0)→
+        // px(50,150) (B is 100 px DOWN from A on screen). Scale should be
+        // 10 mm / 100 px = 0.1, and a board +X step must follow the
+        // photo's downward y.
+        let t = derive_photo_transform((0.0, 0.0), (10.0, 0.0), (50.0, 50.0), (50.0, 150.0))
+            .expect("derive");
+        approx(t.scale_mm_per_px, 0.1);
+        let m = t.to_affine();
+        let (bx, by) = apply_affine(m, 50.0, 150.0);
+        approx(bx, 10.0);
+        approx(by, 0.0);
+    }
+
+    #[test]
+    fn photo_transform_rejects_degenerate_input() {
+        // Coincident pixel marks.
+        assert!(
+            derive_photo_transform((0.0, 0.0), (5.0, 0.0), (10.0, 10.0), (10.0, 10.0)).is_err()
+        );
+        // Coincident pads.
+        assert!(derive_photo_transform((1.0, 1.0), (1.0, 1.0), (0.0, 0.0), (30.0, 0.0)).is_err());
+    }
+
+    fn entry_with_pads(pads: Vec<LibraryPad>) -> LibraryEntry {
+        LibraryEntry {
+            key: "e".into(),
+            description: String::new(),
+            default_value: String::new(),
+            default_rotation_deg: 0.0,
+            edge_mounted: false,
+            pads,
+            silk: Vec::new(),
+            lcsc_id: None,
+            mpn: None,
+            attachments: Vec::new(),
+            created_at: 0,
+            footprint_view_transform: ViewTransform::default(),
+            placement_margin: PlacementMargin::default(),
+            body_rect: None,
+        }
+    }
+
+    fn pad(number: &str, x: f64, y: f64, w: f64, h: f64) -> LibraryPad {
+        LibraryPad {
+            number: number.into(),
+            name: String::new(),
+            x_mm: x,
+            y_mm: y,
+            w_mm: w,
+            h_mm: h,
+            drill_mm: None,
+        }
+    }
+
+    #[test]
+    fn margin_from_body_smaller_than_pads_is_all_zero() {
+        // Pads span x∈[-2,2], y∈[-2,2]; body is inside that → no margin.
+        let e = entry_with_pads(vec![
+            pad("1", -1.5, 0.0, 1.0, 4.0),
+            pad("2", 1.5, 0.0, 1.0, 4.0),
+        ]);
+        let m = e.margin_from_body_rect(&BodyRect {
+            min_x_mm: -1.0,
+            min_y_mm: -1.0,
+            max_x_mm: 1.0,
+            max_y_mm: 1.0,
+        });
+        approx(m.top_mm, 0.0);
+        approx(m.right_mm, 0.0);
+        approx(m.bottom_mm, 0.0);
+        approx(m.left_mm, 0.0);
+    }
+
+    #[test]
+    fn margin_from_asymmetric_body_is_per_side() {
+        // Pad bbox: x∈[-1,1], y∈[-1,1]. Body overhangs 3 right, 0.5 left,
+        // 2 top, 0 bottom (bottom body edge inside pads → clamps to 0).
+        let e = entry_with_pads(vec![pad("1", 0.0, 0.0, 2.0, 2.0)]);
+        let m = e.margin_from_body_rect(&BodyRect {
+            min_x_mm: -1.5,
+            min_y_mm: 0.0,
+            max_x_mm: 4.0,
+            max_y_mm: 3.0,
+        });
+        approx(m.left_mm, 0.5);
+        approx(m.right_mm, 3.0);
+        approx(m.top_mm, 2.0);
+        approx(m.bottom_mm, 0.0);
+    }
+
+    #[test]
+    fn view_transform_affine_matches_apply_point() {
+        for vt in [
+            ViewTransform {
+                rotation_deg: 90,
+                flip_h: false,
+                flip_v: false,
+            },
+            ViewTransform {
+                rotation_deg: 0,
+                flip_h: true,
+                flip_v: false,
+            },
+            ViewTransform {
+                rotation_deg: 270,
+                flip_h: false,
+                flip_v: true,
+            },
+        ] {
+            let m = vt.to_affine_mm();
+            for (x, y) in [(1.0, 0.0), (0.0, 1.0), (2.5, -3.5)] {
+                let (ex, ey) = vt.apply_point_mm(x, y);
+                let (ax, ay) = apply_affine(m, x, y);
+                approx(ax, ex);
+                approx(ay, ey);
+            }
+        }
+    }
+
+    #[test]
+    fn affine_compose_applies_inner_first() {
+        // inner: scale by 2; outer: translate by (10, 20).
+        let inner = [2.0, 0.0, 0.0, 2.0, 0.0, 0.0];
+        let outer = [1.0, 0.0, 0.0, 1.0, 10.0, 20.0];
+        let m = affine_compose(outer, inner);
+        let (x, y) = apply_affine(m, 3.0, 4.0);
+        approx(x, 16.0); // 3*2 + 10
+        approx(y, 28.0); // 4*2 + 20
+    }
+
+    #[test]
+    fn old_index_json_loads_without_new_fields() {
+        // An entry + attachment saved before body_rect / calibration
+        // existed must still deserialize (serde defaults fill the gap).
+        let json = r#"{
+            "entries": [{
+                "key": "legacy",
+                "description": "old part",
+                "pads": [],
+                "created_at": 123,
+                "attachments": [{
+                    "id": "abc",
+                    "kind": "photo",
+                    "filename": "p.jpg",
+                    "mime": "image/jpeg",
+                    "added_at": 5
+                }]
+            }]
+        }"#;
+        let idx: LibraryIndex = serde_json::from_str(json).expect("parse legacy index");
+        assert_eq!(idx.entries.len(), 1);
+        assert!(idx.entries[0].body_rect.is_none());
+        assert!(idx.entries[0].attachments[0].calibration.is_none());
+        assert!(idx.entries[0].placement_margin.is_zero());
     }
 }

@@ -93,6 +93,44 @@ struct ProjectStatePayload {
     board_svg: String,
     schematic_svg: String,
     outline: Option<OutlinePayload>,
+    /// Real-scale photo overlays, one per placed footprint whose library
+    /// entry has a calibrated photo. The frontend fetches each image
+    /// lazily (via `library_attachment_data_uri`) and paints it into the
+    /// board SVG's `#photo-underlay` group at real physical scale.
+    photo_overlays: Vec<PhotoOverlayPayload>,
+}
+
+#[derive(Serialize)]
+struct PhotoTransformPayload {
+    scale_mm_per_px: f64,
+    rotation_deg: f64,
+    tx_mm: f64,
+    ty_mm: f64,
+}
+
+#[derive(Serialize)]
+struct PhotoOverlayPayload {
+    reference: String,
+    key: String,
+    attachment_id: String,
+    /// Placed footprint origin + rotation (the outer transform the
+    /// overlay shares with the footprint's own pads).
+    x_mm: f64,
+    y_mm: f64,
+    rotation_deg: f32,
+    /// "top" or "bottom" — which side the footprint sits on.
+    side: String,
+    image_w_px: u32,
+    image_h_px: u32,
+    /// Raw photo→native-local-mm calibration transform (for labels /
+    /// inspection).
+    transform: PhotoTransformPayload,
+    /// SVG affine `[a,b,c,d,e,f]` mapping a raw image pixel to the
+    /// PLACED footprint's local mm frame (calibration composed with the
+    /// entry's `footprint_view_transform`). The frontend nests this
+    /// under `translate(x_mm,y_mm) rotate(rotation_deg)` so the photo
+    /// lands exactly where the footprint's pads do.
+    matrix: [f64; 6],
 }
 
 #[derive(Serialize)]
@@ -114,6 +152,8 @@ struct OutlinePayload {
 #[tauri::command]
 fn project_state(state: State<'_, AppState>) -> ProjectStatePayload {
     let margins = collect_placement_margins(&state.project);
+    let bodies = collect_body_rects(&state.project);
+    let photo_overlays = collect_photo_overlays(&state.project);
     let snap = state.project.read();
     let palette: Vec<PalettePayload> = snap
         .palette()
@@ -139,10 +179,109 @@ fn project_state(state: State<'_, AppState>) -> ProjectStatePayload {
         palette_count: palette.len(),
         palette,
         api_addr: state.api_addr.clone(),
-        board_svg: pcb_render::render_svg_with_margins(snap.board(), &margins),
+        board_svg: pcb_render::render_svg_with_margins_and_bodies(snap.board(), &margins, &bodies),
         schematic_svg: pcb_render::render_schematic_svg(snap.schematic()),
         outline,
+        photo_overlays,
     }
+}
+
+/// Snapshot library-key → true body rectangle, each already run through
+/// the entry's `footprint_view_transform` so it lands in the placed
+/// footprint's local frame. Consumed by the renderer's body outline.
+fn collect_body_rects(project: &pcb_core::Project) -> pcb_render::BodyRectMap {
+    let mut out = pcb_render::BodyRectMap::default();
+    for entry in project.library().list() {
+        let Some(body) = entry.body_rect else {
+            continue;
+        };
+        let vt = entry.footprint_view_transform;
+        let corners = [
+            (body.min_x_mm, body.min_y_mm),
+            (body.max_x_mm, body.min_y_mm),
+            (body.max_x_mm, body.max_y_mm),
+            (body.min_x_mm, body.max_y_mm),
+        ];
+        let mut it = corners.into_iter().map(|(x, y)| vt.apply_point_mm(x, y));
+        let (fx, fy) = it.next().expect("4 corners");
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (fx, fy, fx, fy);
+        for (x, y) in it {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+        out.insert(
+            entry.key,
+            pcb_core::BodyRect {
+                min_x_mm: min_x,
+                min_y_mm: min_y,
+                max_x_mm: max_x,
+                max_y_mm: max_y,
+            },
+        );
+    }
+    out
+}
+
+/// Build one real-scale photo overlay per placed footprint whose
+/// library entry has a calibrated image attachment (first one wins).
+/// Data URIs are NOT inlined — the frontend fetches each photo lazily
+/// and caches it; here we only ship the placement geometry + pixel
+/// dimensions (read cheaply from the file header via `imagesize`).
+fn collect_photo_overlays(project: &pcb_core::Project) -> Vec<PhotoOverlayPayload> {
+    let library = project.library();
+    let snap = project.read();
+    let mut out = Vec::new();
+    for fp in snap.board().footprints_in_order() {
+        if fp.key.is_empty() {
+            continue;
+        }
+        let Some(entry) = library.find(&fp.key) else {
+            continue;
+        };
+        // First image attachment that carries a calibration.
+        let Some(att) = entry
+            .attachments
+            .iter()
+            .find(|a| a.mime.starts_with("image/") && a.calibration.is_some())
+        else {
+            continue;
+        };
+        let cal = att.calibration.as_ref().expect("checked is_some");
+        let Ok(transform) = entry.photo_transform(cal) else {
+            continue;
+        };
+        let path = library.attachment_path(att);
+        let Ok(dim) = imagesize::size(&path) else {
+            continue;
+        };
+        // Compose the calibration (px → native local mm) with the
+        // entry's view transform (native → placed local mm).
+        let matrix = pcb_core::affine_compose(
+            entry.footprint_view_transform.to_affine_mm(),
+            transform.to_affine(),
+        );
+        out.push(PhotoOverlayPayload {
+            reference: fp.reference.clone(),
+            key: fp.key.clone(),
+            attachment_id: att.id.clone(),
+            x_mm: fp.position.x.to_mm(),
+            y_mm: fp.position.y.to_mm(),
+            rotation_deg: fp.rotation,
+            side: if fp.layer.is_top() { "top" } else { "bottom" }.to_string(),
+            image_w_px: u32::try_from(dim.width).unwrap_or(0),
+            image_h_px: u32::try_from(dim.height).unwrap_or(0),
+            transform: PhotoTransformPayload {
+                scale_mm_per_px: transform.scale_mm_per_px,
+                rotation_deg: transform.rotation_deg,
+                tx_mm: transform.tx_mm,
+                ty_mm: transform.ty_mm,
+            },
+            matrix,
+        });
+    }
+    out
 }
 
 /// Snapshot the library-key → placement-margin lookup the renderer
@@ -339,6 +478,12 @@ fn library_review_state(state: State<'_, AppState>) -> serde_json::Value {
                         "flip_h": a.view_transform.flip_h,
                         "flip_v": a.view_transform.flip_v,
                     },
+                    "calibration": a.calibration.as_ref().map(|c| serde_json::json!({
+                        "a_px": [c.a_px.0, c.a_px.1],
+                        "b_px": [c.b_px.0, c.b_px.1],
+                        "a_pad": c.a_pad,
+                        "b_pad": c.b_pad,
+                    })),
                 })).collect::<Vec<_>>(),
                 "created_at": e.created_at,
                 "review_svg": pcb_render::render_library_entry_svg(e),
@@ -353,6 +498,27 @@ fn library_review_state(state: State<'_, AppState>) -> serde_json::Value {
                     "bottom_mm": e.placement_margin.bottom_mm,
                     "left_mm": e.placement_margin.left_mm,
                 },
+                "body_rect": e.body_rect.map(|b| serde_json::json!({
+                    "min_x_mm": b.min_x_mm,
+                    "min_y_mm": b.min_y_mm,
+                    "max_x_mm": b.max_x_mm,
+                    "max_y_mm": b.max_y_mm,
+                })),
+                // Pad bbox + per-pad centres in footprint-local mm so the
+                // calibration UI can run its geometry (project pads into
+                // photo space, convert a drawn body rect to mm) without
+                // duplicating the pad model on the frontend.
+                "pad_bbox": e.pads_bbox_mm().map(|(min_x, min_y, max_x, max_y)| serde_json::json!({
+                    "min_x_mm": min_x,
+                    "min_y_mm": min_y,
+                    "max_x_mm": max_x,
+                    "max_y_mm": max_y,
+                })),
+                "pads": e.pads.iter().map(|p| serde_json::json!({
+                    "number": p.number,
+                    "x_mm": p.x_mm,
+                    "y_mm": p.y_mm,
+                })).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -425,6 +591,103 @@ fn library_set_placement_margin(
         left_mm: left_mm.max(0.0),
     };
     state.project.library().set_placement_margin(&key, margin)?;
+    state.project.notify_library_changed();
+    Ok(())
+}
+
+/// Store a two-point photo calibration on one attachment. Validates
+/// that both pads exist and are distinct and that the marked pixel
+/// points differ before persisting.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn library_set_photo_calibration(
+    state: State<'_, AppState>,
+    key: String,
+    attachment_id: String,
+    a_px_x: f64,
+    a_px_y: f64,
+    b_px_x: f64,
+    b_px_y: f64,
+    a_pad: String,
+    b_pad: String,
+) -> Result<(), String> {
+    if a_pad == b_pad {
+        return Err("photo calibration: pick two different pads".into());
+    }
+    let entry = state
+        .project
+        .library()
+        .find(&key)
+        .ok_or_else(|| format!("no library entry with key {key}"))?;
+    if entry.pad_center_mm(&a_pad).is_none() {
+        return Err(format!("photo calibration: pad {a_pad} not found"));
+    }
+    if entry.pad_center_mm(&b_pad).is_none() {
+        return Err(format!("photo calibration: pad {b_pad} not found"));
+    }
+    if (a_px_x - b_px_x).abs() < 1e-6 && (a_px_y - b_px_y).abs() < 1e-6 {
+        return Err("photo calibration: the two pin marks are at the same point".into());
+    }
+    let calibration = pcb_core::PhotoCalibration {
+        a_px: (a_px_x, a_px_y),
+        b_px: (b_px_x, b_px_y),
+        a_pad,
+        b_pad,
+    };
+    // Sanity-check that the correspondences yield a valid transform
+    // before persisting, so bad input never lands on disk.
+    entry.photo_transform(&calibration)?;
+    state
+        .project
+        .library()
+        .set_photo_calibration(&key, &attachment_id, calibration)?;
+    state.project.notify_library_changed();
+    Ok(())
+}
+
+/// Drop the photo calibration from one attachment.
+#[tauri::command]
+fn library_clear_photo_calibration(
+    state: State<'_, AppState>,
+    key: String,
+    attachment_id: String,
+) -> Result<(), String> {
+    state
+        .project
+        .library()
+        .clear_photo_calibration(&key, &attachment_id)?;
+    state.project.notify_library_changed();
+    Ok(())
+}
+
+/// Store the physical body rectangle on an entry. This also recomputes
+/// and persists the derived per-side placement margin in one atomic
+/// update, so the placer / DRC / render immediately see the real size.
+#[tauri::command]
+fn library_set_body_rect(
+    state: State<'_, AppState>,
+    key: String,
+    min_x_mm: f64,
+    min_y_mm: f64,
+    max_x_mm: f64,
+    max_y_mm: f64,
+) -> Result<(), String> {
+    let body = pcb_core::BodyRect {
+        min_x_mm: min_x_mm.min(max_x_mm),
+        min_y_mm: min_y_mm.min(max_y_mm),
+        max_x_mm: min_x_mm.max(max_x_mm),
+        max_y_mm: min_y_mm.max(max_y_mm),
+    };
+    state.project.library().set_body_rect(&key, body)?;
+    state.project.notify_library_changed();
+    Ok(())
+}
+
+/// Drop the body rectangle from an entry. The derived placement margin
+/// is left as-is (a later manual tweak survives).
+#[tauri::command]
+fn library_clear_body_rect(state: State<'_, AppState>, key: String) -> Result<(), String> {
+    state.project.library().clear_body_rect(&key)?;
     state.project.notify_library_changed();
     Ok(())
 }
@@ -1201,6 +1464,10 @@ pub fn run() {
             library_set_attachment_view_transform,
             library_set_footprint_view_transform,
             library_set_placement_margin,
+            library_set_photo_calibration,
+            library_clear_photo_calibration,
+            library_set_body_rect,
+            library_clear_body_rect,
             library_delete_entry,
             component_info,
             pending_library_entries,

@@ -27,7 +27,8 @@ pub use board::{
 pub use event::{ActivityLevel, Event, EventBus};
 pub use geometry::{Point, Rect};
 pub use library::{
-    Attachment, Library, LibraryEntry, LibraryPad, LibrarySilk, PlacementMargin, ViewTransform,
+    affine_compose, derive_photo_transform, Attachment, BodyRect, Library, LibraryEntry,
+    LibraryPad, LibrarySilk, PhotoCalibration, PlacementMargin, SimilarityTransform, ViewTransform,
 };
 pub use project::{
     DeletedFootprint, FabProfileHandle, PendingAttachment, PendingLibraryEntry, Project,
