@@ -394,11 +394,11 @@ impl Block {
                 Ok(())
             }
             ("lib", "pad") => {
-                // `pad NUMBER X Y W H [name=NAME]`
+                // `pad NUMBER X Y W H [name=NAME] [drill=MM]`
                 if tokens.len() < 6 {
                     return Err(ParseError::at(
                         line,
-                        "pad needs: pad NUMBER X Y W H [name=NAME]",
+                        "pad needs: pad NUMBER X Y W H [name=NAME] [drill=MM]",
                     ));
                 }
                 let number = tokens[1].clone();
@@ -407,9 +407,40 @@ impl Block {
                 let w = parse_num(&tokens[4], line, "w")?;
                 let h = parse_num(&tokens[5], line, "h")?;
                 let mut name = String::new();
+                let mut drill: Option<f64> = None;
                 for t in &tokens[6..] {
                     if let Some(rest) = t.strip_prefix("name=") {
                         name = rest.to_string();
+                    } else if let Some(rest) = t.strip_prefix("drill=") {
+                        drill = Some(parse_num(rest, line, "drill")?);
+                    }
+                }
+                // A drill turns the pad into a plated through-hole. Reject
+                // geometry that can't physically exist: a hole must be
+                // positive and leave copper on every side (smaller than
+                // both pad dimensions, else there's no annular ring). The
+                // fab-profile minimum (`min_drill`, default 0.2 mm) is
+                // enforced later by DRC, but 0.2 mm is the sanity floor.
+                if let Some(d) = drill {
+                    if d <= 0.0 {
+                        return Err(ParseError::at(
+                            line,
+                            format!("drill: must be > 0, got `{d}`"),
+                        ));
+                    }
+                    if d >= w || d >= h {
+                        return Err(ParseError::at(
+                            line,
+                            format!(
+                                "drill {d} mm must be smaller than both pad dimensions ({w} x {h} mm) to leave an annular ring"
+                            ),
+                        ));
+                    }
+                    if d < 0.2 {
+                        return Err(ParseError::at(
+                            line,
+                            format!("drill {d} mm is below the 0.2 mm fab minimum (DRC min_drill)"),
+                        ));
                     }
                 }
                 let mut pad = json!({
@@ -420,6 +451,11 @@ impl Block {
                     pad.as_object_mut()
                         .unwrap()
                         .insert("name".into(), Value::String(name));
+                }
+                if let Some(d) = drill {
+                    pad.as_object_mut()
+                        .unwrap()
+                        .insert("drill_mm".into(), json!(d));
                 }
                 self.pads.push(pad);
                 Ok(())
@@ -1857,5 +1893,34 @@ mod tests {
         let cmds = parse(script).expect("parse");
         let silk = cmds[0].args.get("silk").unwrap().as_array().unwrap();
         assert!(silk.is_empty());
+    }
+
+    #[test]
+    fn lib_block_pad_drill_round_trips() {
+        // A 2.54 mm header: two pads, pad 1 a plated through-hole with a
+        // 1.0 mm drill, pad 2 a plain SMD pad (no drill).
+        let script = "lib hdr\n  pad 1 0 0 1.7 1.7 name=VCC drill=1.0\n  pad 2 2.54 0 1.7 1.7\n";
+        let cmds = parse(script).expect("parse");
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].tool, "library.create");
+        let pads = cmds[0].args.get("pads").unwrap().as_array().unwrap();
+        assert_eq!(pads.len(), 2);
+        // Drilled pad carries drill_mm and the name.
+        assert!((pads[0]["drill_mm"].as_f64().unwrap() - 1.0).abs() < 1e-6);
+        assert_eq!(pads[0]["name"], "VCC");
+        // SMD pad has no drill key at all (None => SMD).
+        assert!(pads[1].get("drill_mm").is_none());
+    }
+
+    #[test]
+    fn lib_block_pad_drill_rejects_nonsensical_values() {
+        // Non-positive drill.
+        assert!(parse("lib b\n  pad 1 0 0 1.7 1.7 drill=0\n").is_err());
+        // Drill not smaller than the pad (no annular ring).
+        assert!(parse("lib b\n  pad 1 0 0 1.0 1.0 drill=1.0\n").is_err());
+        // Below the 0.2 mm fab minimum.
+        assert!(parse("lib b\n  pad 1 0 0 1.7 1.7 drill=0.1\n").is_err());
+        // A sane drill parses fine.
+        assert!(parse("lib b\n  pad 1 0 0 1.7 1.7 drill=1.0\n").is_ok());
     }
 }

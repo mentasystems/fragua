@@ -136,7 +136,11 @@ BOARD:\n\
 \n\
 LIBRARY (build first, reuse forever):\n\
   lib KEY [value=V] [rot=N] [edge=true|false] [desc=\"...\"] [lcsc=Cxxxx] [mpn=...]\n\
-    pad NUMBER X Y W H [name=NAME]             — repeat for every pad\n\
+    pad NUMBER X Y W H [name=NAME] [drill=MM]  — repeat for every pad\n\
+    # `drill` = presence makes the pad a plated through-hole (a bare pad\n\
+    #   with no `drill` is SMD). Value is the hole diameter in mm; it must\n\
+    #   be > 0, below both pad dimensions (annular ring), and >= 0.2 (fab\n\
+    #   min). A 2.54 mm header pin is typically drill=1.0.\n\
     # `lcsc` = LCSC catalogue ID (e.g. C25804 for 10k 0603). Required\n\
     #   for JLCPCB SMT assembly to know what part to load. Optional\n\
     #   but strongly recommended once the part is real.\n\
