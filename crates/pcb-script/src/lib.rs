@@ -6,5 +6,6 @@
 //! `tools::catalog()`. The Tauri host exposes this via a tiny local
 //! HTTP API; this crate itself is transport-agnostic.
 
+pub mod compact;
 pub mod script;
 pub mod tools;

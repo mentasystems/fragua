@@ -36,6 +36,7 @@ pub(crate) const VERBS: &[&str] = &[
     "delete",
     "clear-board",
     "auto-place",
+    "compact",
     "route",
     "clear-route",
     "clear-net",
@@ -1217,6 +1218,31 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
             Ok(Cmd {
                 line,
                 tool: "placement.auto".into(),
+                args,
+            })
+        }
+
+        "compact" => {
+            // compact [min_w=MM] [min_h=MM] [step=MM] [seed=N] [iters=N]
+            //         [aspect=keep|free] [min_gap=MM]
+            let mut args = json!({});
+            apply_kv(
+                &mut args,
+                &tokens[1..],
+                line,
+                &[
+                    ("min_w", AttrType::NumInto("min_w_mm")),
+                    ("min_h", AttrType::NumInto("min_h_mm")),
+                    ("step", AttrType::NumInto("step_mm")),
+                    ("seed", AttrType::Num),
+                    ("iters", AttrType::Num),
+                    ("aspect", AttrType::Str),
+                    ("min_gap", AttrType::NumInto("min_gap_mm")),
+                ],
+            )?;
+            Ok(Cmd {
+                line,
+                tool: "compact.run".into(),
                 args,
             })
         }

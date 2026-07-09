@@ -230,12 +230,28 @@ PALETTE / PLACEMENT:\n\
                                                  congestion=1, congestion_res=32. Bump congestion\n\
                                                  if SA produces tight HPWL but the router struggles;\n\
                                                  set congestion_res=0 to disable the proxy.\n\
+  compact [min_w=MM] [min_h=MM] [step=MM] [seed=N] [iters=N] [aspect=keep|free] [min_gap=MM]\n\
+                                               — shrink the board outline / pack parts as tightly as\n\
+                                                 the design allows while staying manufacturable. For\n\
+                                                 every candidate size it re-places ALL footprints,\n\
+                                                 re-routes and re-runs DRC; a size is kept ONLY when\n\
+                                                 it routes with 0 failed nets AND 0 DRC errors. Binary-\n\
+                                                 searches a uniform scale (aspect=keep, default), then\n\
+                                                 greedily trims each axis (aspect=free trims axes\n\
+                                                 independently). Never shrinks below the geometric\n\
+                                                 floor (widest/tallest part + edge clearance) or the\n\
+                                                 min_w/min_h you set. Keeps the corner radius; snaps\n\
+                                                 edge_mounted parts to the new edge; pulls board silk\n\
+                                                 inside. Defaults: step=1.0 mm, seed=1, iters=8000,\n\
+                                                 aspect=keep. Same seed → same result. Run it AFTER\n\
+                                                 auto-place + route; if no smaller size is feasible\n\
+                                                 the board is left untouched.\n\
 \n\
 ROUTING:\n\
   route [trace_width=N] [clearance=N] [via_drill=N] [via_diameter=N] [via_cost=N] [cell=N]\n\
                                                — auto-route every net (A* on 2 layers); defaults\n\
                                                  trace_width=0.25, clearance=0.20, via_drill=0.30,\n\
-                                                 via_diameter=0.60, cell=0.25, via_cost=8\n\
+                                                 via_diameter=0.60, cell=0.20, via_cost=8\n\
   clear-route                                  — drop all traces and vias\n\
   clear-net NET                                — clear one net's traces/vias\n\
   trace top|bottom NET X1 Y1 X2 Y2 [width=N]   — manual trace segment\n\
@@ -327,6 +343,12 @@ straight to `route` and debugging the failures.\n\
    warnings naming the outlier component on every detoured/failed\n\
    net — that's the part to move next.\n\
 \n\
+5. `compact` — once ERC/route/DRC are clean, shrink the board:\n\
+   ERC → power planes → auto-place → route → compact → pack. It only\n\
+   commits a smaller outline that still routes clean at 0 DRC errors,\n\
+   so it is safe to run right before `pack`. Untouched if nothing\n\
+   smaller is feasible.\n\
+\n\
 When `route` still reports failures or hint warnings:\n\
   a. Read the hints — each one names the outlier component and its\n\
      coords. Move that part toward the rest of its net.\n\
@@ -392,6 +414,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "route.stitch_isolated_pads" => tool_route_stitch_isolated_pads(project),
         "route.clear" => tool_route_clear(project),
         "placement.auto" => tool_placement_auto(project, args),
+        "compact.run" => tool_compact_run(project, args),
         "route.run" => tool_route_run(project, args),
         "pour.add" => tool_pour_add(project, args),
         "pour.remove" => tool_pour_remove(project, args),
@@ -3165,6 +3188,205 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
         "skipped": report.skipped,
         "errors": errors,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+struct CompactInput {
+    #[serde(default)]
+    min_w_mm: Option<f64>,
+    #[serde(default)]
+    min_h_mm: Option<f64>,
+    #[serde(default)]
+    step_mm: Option<f64>,
+    #[serde(default)]
+    seed: Option<f64>,
+    #[serde(default)]
+    iters: Option<f64>,
+    /// `keep` (default) or `free`.
+    #[serde(default)]
+    aspect: Option<String>,
+    #[serde(default)]
+    min_gap_mm: Option<f64>,
+}
+
+/// Build the `pcb_drc::FabProfile` the compaction DRC gate should use,
+/// mirroring the conversion in `tool_drc_run` so the gate matches the
+/// real `drc` verb.
+fn drc_fab_profile(project: &Project) -> Option<pcb_drc::FabProfile> {
+    project.fab_profile().map(|p| pcb_drc::FabProfile {
+        name: p.name,
+        min_trace_width_mm: p.min_trace_width_mm,
+        min_clearance_mm: p.min_clearance_mm,
+        min_drill_mm: p.min_drill_mm,
+        min_annular_ring_mm: p.min_annular_ring_mm,
+        min_via_diameter_mm: p.min_via_diameter_mm,
+        min_edge_clearance_mm: p.min_edge_clearance_mm,
+        max_board_size_mm: p.max_board_size_mm,
+    })
+}
+
+fn tool_compact_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: CompactInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("compact: {e}")))?;
+
+    // Materialise any class-declared pours before we clone the board, so
+    // the compaction router sees the same plane-vs-signal picture the
+    // `route` verb does (idempotent).
+    let _ = materialize_class_pours(project);
+
+    let mut opts = compact_options_from(&input);
+    // Aspect flag: `free` shrinks each dimension independently.
+    if let Some(a) = input.aspect.as_deref() {
+        match a {
+            "free" => opts.aspect_free = true,
+            "keep" => opts.aspect_free = false,
+            other => {
+                return Err(ToolError::invalid_params(format!(
+                    "compact: aspect must be `keep` or `free`, got `{other}`"
+                )))
+            }
+        }
+    }
+
+    // Work on a clone so the project lock is released quickly.
+    let board = project.read().board().clone();
+    let schematic = {
+        let snap = project.read();
+        std::sync::Arc::new(snap.schematic().clone())
+    };
+    // Placer body-to-body margins from the library (same map auto-place
+    // builds); DRC placement margins from the same source `drc` uses.
+    let place_margins: pcb_placer::MarginMap = board
+        .footprints_in_order()
+        .filter_map(|fp| {
+            if fp.key.is_empty() {
+                return None;
+            }
+            let entry = project.library().find(&fp.key)?;
+            let m = entry.placement_margin;
+            if m.top_mm <= 0.0 && m.right_mm <= 0.0 && m.bottom_mm <= 0.0 && m.left_mm <= 0.0 {
+                return None;
+            }
+            Some((fp.id, [m.top_mm, m.right_mm, m.bottom_mm, m.left_mm]))
+        })
+        .collect();
+    let drc_margins = build_drc_margin_map(project);
+    let fab_profile = drc_fab_profile(project);
+
+    let outcome = crate::compact::compact(
+        &board,
+        &schematic,
+        &place_margins,
+        &drc_margins,
+        fab_profile.as_ref(),
+        &opts,
+    )
+    .map_err(|e| ToolError::invalid_params(format!("compact: {e}")))?;
+
+    let m = &outcome.metrics;
+    if !outcome.shrunk {
+        project.log(
+            ActivityLevel::Info,
+            format!(
+                "compact: no smaller feasible outline found ({:.1} × {:.1} mm, floor {:.1} × {:.1} mm, {} checks)",
+                m.old_w_mm, m.old_h_mm, m.lower_bound_w_mm, m.lower_bound_h_mm, m.checks,
+            ),
+        );
+        return Ok(text_result(format!(
+            "compact: no shrink feasible — board left at {:.1} × {:.1} mm ({:.0} mm²); tried {} candidate size(s)",
+            m.old_w_mm, m.old_h_mm, m.old_area_mm2, m.checks,
+        ))
+        .with_data(compact_data(m, false)));
+    }
+
+    // Apply the best feasible board back to the live project via the
+    // granular APIs (outline, positions/rotations, routing, silk).
+    let new_outline = outcome
+        .board
+        .outline
+        .expect("compacted board has an outline");
+    project.set_outline_with_radius(new_outline, outcome.board.outline_corner_radius);
+
+    let live_id_of_ref: HashMap<String, pcb_core::Id> = project
+        .read()
+        .board()
+        .footprints_in_order()
+        .map(|fp| (fp.reference.clone(), fp.id))
+        .collect();
+    let mut applied_moves = 0usize;
+    for fp in outcome.board.footprints_in_order() {
+        let Some(&id) = live_id_of_ref.get(&fp.reference) else {
+            continue;
+        };
+        if project.move_footprint(id, fp.position) {
+            applied_moves += 1;
+        }
+        project.set_footprint_rotation(id, fp.rotation);
+    }
+    project.replace_routing(outcome.board.traces.clone(), outcome.board.vias.clone());
+    project.set_silk_texts(outcome.board.silk_texts.clone());
+
+    project.log(
+        ActivityLevel::Info,
+        format!(
+            "compact: {:.1} × {:.1} mm ({:.0} mm²) → {:.1} × {:.1} mm ({:.0} mm²), −{:.1}% area; {} traces, {} vias, 0 failed nets, 0 DRC errors; {} checks, moved {}",
+            m.old_w_mm, m.old_h_mm, m.old_area_mm2,
+            m.new_w_mm, m.new_h_mm, m.new_area_mm2,
+            m.area_reduction_pct, m.trace_count, m.via_count, m.checks, applied_moves,
+        ),
+    );
+
+    Ok(text_result(format!(
+        "Compacted: {:.1} × {:.1} mm → {:.1} × {:.1} mm ({:.0} → {:.0} mm², −{:.1}% area); {} traces, {} vias, 0 failed nets, 0 DRC errors (tried {} candidate size(s))",
+        m.old_w_mm, m.old_h_mm, m.new_w_mm, m.new_h_mm,
+        m.old_area_mm2, m.new_area_mm2, m.area_reduction_pct,
+        m.trace_count, m.via_count, m.checks,
+    ))
+    .with_data(compact_data(m, true)))
+}
+
+/// Translate the parsed `CompactInput` into `CompactOptions`, keeping the
+/// defaults defined by the compaction core.
+fn compact_options_from(input: &CompactInput) -> crate::compact::CompactOptions {
+    let mut opts = crate::compact::CompactOptions {
+        min_w_mm: input.min_w_mm,
+        min_h_mm: input.min_h_mm,
+        min_gap_mm: input.min_gap_mm,
+        ..crate::compact::CompactOptions::default()
+    };
+    if let Some(v) = input.step_mm {
+        if v > 0.0 {
+            opts.step_mm = v;
+        }
+    }
+    if let Some(v) = input.seed {
+        opts.seed = v.max(0.0) as u64;
+    }
+    if let Some(v) = input.iters {
+        opts.place_iters = v.max(0.0) as usize;
+    }
+    opts
+}
+
+fn compact_data(m: &crate::compact::CompactMetrics, shrunk: bool) -> Value {
+    json!({
+        "shrunk": shrunk,
+        "old_w_mm": round2(m.old_w_mm),
+        "old_h_mm": round2(m.old_h_mm),
+        "old_area_mm2": round2(m.old_area_mm2),
+        "new_w_mm": round2(m.new_w_mm),
+        "new_h_mm": round2(m.new_h_mm),
+        "new_area_mm2": round2(m.new_area_mm2),
+        "area_reduction_pct": round2(m.area_reduction_pct),
+        "trace_count": m.trace_count,
+        "via_count": m.via_count,
+        "total_length_mm": round2(m.total_length_mm),
+        "failed_nets": m.failed_nets,
+        "drc_errors": m.drc_errors,
+        "lower_bound_w_mm": round2(m.lower_bound_w_mm),
+        "lower_bound_h_mm": round2(m.lower_bound_h_mm),
+        "checks": m.checks,
+    })
 }
 
 fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {

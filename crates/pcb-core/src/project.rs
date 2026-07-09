@@ -608,6 +608,21 @@ impl Project {
         });
     }
 
+    /// Replace every board-level silk text wholesale. Used by the
+    /// compaction pass to commit labels that were pulled inside a
+    /// shrunk outline. Publishes a single `SilkChanged` event.
+    pub fn set_silk_texts(&self, texts: Vec<SilkText>) {
+        let (line_count, text_count) = {
+            let mut inner = self.inner.write().expect("project lock poisoned");
+            inner.board.silk_texts = texts;
+            (inner.board.silk_lines.len(), inner.board.silk_texts.len())
+        };
+        self.bus.publish(Event::SilkChanged {
+            line_count,
+            text_count,
+        });
+    }
+
     /// Update the thermal relief style of every existing pour on
     /// `net`. Returns the number of pours updated. No-op if the net
     /// has no pours.
