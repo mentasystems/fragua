@@ -268,7 +268,7 @@ PALETTE / PLACEMENT:\n\
                                                  Useful after editing a library entry: clear-board\n\
                                                  then re-spawn from the palette to pick up the\n\
                                                  updated geometry.\n\
-  auto-place REF [REF...] [iters=N] [seed=N] [max_step=N] [min_step=N] [min_gap=N] [gap_penalty=N] [congestion=N] [congestion_res=N]\n\
+  auto-place REF [REF...] [iters=N] [seed=N] [max_step=N] [min_step=N] [min_gap=N] [solder_gap=N] [gap_penalty=N] [congestion=N] [congestion_res=N]\n\
                                                — simulated-annealing placer over the listed refs.\n\
                                                  Pinned refs (everything not listed) stay put.\n\
                                                  Optimises HPWL + a soft body-to-body gap penalty\n\
@@ -277,10 +277,13 @@ PALETTE / PLACEMENT:\n\
                                                  edge_mounted; hard-rejects pad overlap. Defaults:\n\
                                                  iters=8000 (~3 s for ~20 components), seed=clock,\n\
                                                  max_step=20 mm, min_gap=2.0 mm, gap_penalty=16,\n\
-                                                 congestion=1, congestion_res=32. Bump congestion\n\
-                                                 if SA produces tight HPWL but the router struggles;\n\
-                                                 set congestion_res=0 to disable the proxy.\n\
-  compact [min_w=MM] [min_h=MM] [step=MM] [seed=N] [iters=N] [aspect=keep|free] [min_gap=MM]\n\
+                                                 congestion=1, congestion_res=32. solder_gap=1.0 mm\n\
+                                                 is the HARD floor: parts never end up closer than\n\
+                                                 this so you can get a soldering iron between them\n\
+                                                 (set solder_gap=0 for the old 0.5 mm floor).\n\
+                                                 Bump congestion if SA produces tight HPWL but the\n\
+                                                 router struggles; set congestion_res=0 to disable.\n\
+  compact [min_w=MM] [min_h=MM] [step=MM] [seed=N] [iters=N] [aspect=keep|free] [min_gap=MM] [solder_gap=MM]\n\
                                                — shrink the board outline / pack parts as tightly as\n\
                                                  the design allows while staying manufacturable. For\n\
                                                  every candidate size it re-places ALL footprints,\n\
@@ -293,7 +296,9 @@ PALETTE / PLACEMENT:\n\
                                                  min_w/min_h you set. Keeps the corner radius; snaps\n\
                                                  edge_mounted parts to the new edge; pulls board silk\n\
                                                  inside. Defaults: step=1.0 mm, seed=1, iters=8000,\n\
-                                                 aspect=keep. Same seed → same result. Run it AFTER\n\
+                                                 aspect=keep, solder_gap=1.0 mm (hard hand-solder\n\
+                                                 access floor — bodies never pack closer than this).\n\
+                                                 Same seed → same result. Run it AFTER\n\
                                                  auto-place + route; if no smaller size is feasible\n\
                                                  the board is left untouched.\n\
 \n\
@@ -3398,6 +3403,8 @@ struct AutoPlaceInput {
     #[serde(default)]
     min_gap_mm: Option<f64>,
     #[serde(default)]
+    solder_gap_mm: Option<f64>,
+    #[serde(default)]
     gap_penalty_factor: Option<f64>,
     #[serde(default)]
     congestion_penalty_factor: Option<f64>,
@@ -3424,6 +3431,9 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
     }
     if let Some(v) = input.min_gap_mm {
         opts.min_gap_mm = v;
+    }
+    if let Some(v) = input.solder_gap_mm {
+        opts.solder_gap_mm = v;
     }
     if let Some(v) = input.gap_penalty_factor {
         opts.gap_penalty_factor = v;
@@ -3568,6 +3578,8 @@ struct CompactInput {
     aspect: Option<String>,
     #[serde(default)]
     min_gap_mm: Option<f64>,
+    #[serde(default)]
+    solder_gap_mm: Option<f64>,
 }
 
 /// Build the `pcb_drc::FabProfile` the compaction DRC gate should use,
@@ -3725,6 +3737,9 @@ fn compact_options_from(input: &CompactInput) -> crate::compact::CompactOptions 
     }
     if let Some(v) = input.iters {
         opts.place_iters = v.max(0.0) as usize;
+    }
+    if let Some(v) = input.solder_gap_mm {
+        opts.solder_gap_mm = v.max(0.0);
     }
     opts
 }

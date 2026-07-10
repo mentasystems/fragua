@@ -41,7 +41,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let in_path = args.get(1).cloned().unwrap_or_else(|| {
         eprintln!(
-            "usage: compact <in.json> <out.json> [seed=N] [aspect=keep|free] [step=MM] [iters=N] [min_w=MM] [min_h=MM]"
+            "usage: compact <in.json> <out.json> [seed=N] [aspect=keep|free] [step=MM] [iters=N] [min_w=MM] [min_h=MM] [solder_gap=MM]"
         );
         std::process::exit(2);
     });
@@ -63,6 +63,9 @@ fn main() {
     }
     if let Some(v) = parse_kv(kv, "iters").and_then(|s| s.parse().ok()) {
         opts.place_iters = v;
+    }
+    if let Some(v) = parse_kv(kv, "solder_gap").and_then(|s| s.parse().ok()) {
+        opts.solder_gap_mm = v;
     }
     opts.min_w_mm = parse_kv(kv, "min_w").and_then(|s| s.parse().ok());
     opts.min_h_mm = parse_kv(kv, "min_h").and_then(|s| s.parse().ok());

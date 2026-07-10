@@ -1345,6 +1345,7 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                     ("max_step", AttrType::NumInto("max_step_mm")),
                     ("min_step", AttrType::NumInto("min_step_mm")),
                     ("min_gap", AttrType::NumInto("min_gap_mm")),
+                    ("solder_gap", AttrType::NumInto("solder_gap_mm")),
                     ("gap_penalty", AttrType::NumInto("gap_penalty_factor")),
                     ("congestion", AttrType::NumInto("congestion_penalty_factor")),
                     ("congestion_res", AttrType::NumInto("congestion_resolution")),
@@ -1359,7 +1360,7 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
 
         "compact" => {
             // compact [min_w=MM] [min_h=MM] [step=MM] [seed=N] [iters=N]
-            //         [aspect=keep|free] [min_gap=MM]
+            //         [aspect=keep|free] [min_gap=MM] [solder_gap=MM]
             let mut args = json!({});
             apply_kv(
                 &mut args,
@@ -1373,6 +1374,7 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                     ("iters", AttrType::Num),
                     ("aspect", AttrType::Str),
                     ("min_gap", AttrType::NumInto("min_gap_mm")),
+                    ("solder_gap", AttrType::NumInto("solder_gap_mm")),
                 ],
             )?;
             Ok(Cmd {

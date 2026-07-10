@@ -50,9 +50,15 @@ pub struct CompactOptions {
     /// still run a bounded greedy refinement.
     pub aspect_free: bool,
     /// Base soft body-to-body gap (mm) at full size. Scaled down as the
-    /// outline shrinks, but never below the placer's hard 0.5 mm
-    /// clearance. `None` = use the placer default (2.0 mm).
+    /// outline shrinks, but never below the hard solder-access gap
+    /// (`solder_gap_mm`). `None` = use the placer default (2.0 mm).
     pub min_gap_mm: Option<f64>,
+    /// Hard solder-access floor (mm) plumbed straight to the placer's
+    /// `solder_gap_mm`. Even the tightest compaction never leaves two
+    /// component bodies closer than this — the user hand-solders and needs
+    /// iron-tip access, so parts must never end up nearly touching.
+    /// Default 1.0 mm.
+    pub solder_gap_mm: f64,
     /// Binary-search iterations in phase 1.
     pub binary_steps: usize,
     /// Hard cap on total feasibility checks (placer+router+DRC runs)
@@ -82,6 +88,7 @@ impl Default for CompactOptions {
             place_iters: 8000,
             aspect_free: false,
             min_gap_mm: None,
+            solder_gap_mm: 1.0,
             binary_steps: 7,
             max_checks: 40,
             time_budget: Duration::from_secs(240),
@@ -582,14 +589,16 @@ fn try_feasible(
     clamp_silk_texts(&mut b.silk_texts, new_outline);
 
     // Scale the soft gap preference down with the board, floored at the
-    // placer's hard 0.5 mm clearance.
+    // hard solder-access gap so the soft preference never drops below the
+    // gap the user needs for hand-soldering.
     let scale = (w_mm * h_mm / old_area).sqrt();
-    let min_gap = (base_min_gap * scale).max(PlaceOptions::default().min_clearance_mm);
+    let min_gap = (base_min_gap * scale).max(opts.solder_gap_mm);
 
     let place_opts = PlaceOptions {
         seed,
         max_iterations: opts.place_iters,
         min_gap_mm: min_gap,
+        solder_gap_mm: opts.solder_gap_mm,
         ..PlaceOptions::default()
     };
     let movable: Vec<String> = b
@@ -963,6 +972,29 @@ mod tests {
             );
             assert!(gap <= clr + 1.0, "dead border {gap} beyond clearance {clr}");
         }
+    }
+
+    #[test]
+    fn compaction_preserves_solder_access_gap() {
+        // A roomy board still compacts, but the result must never pack two
+        // component bodies closer than the hard solder-access gap (1.0 mm
+        // default) — the user hand-solders and needs iron-tip room.
+        let board = two_part_board(40.0, 40.0);
+        let out = compact(
+            &board,
+            &Arc::new(Schematic::default()),
+            &MarginMap::new(),
+            &HashMap::new(),
+            None,
+            &fast_opts(),
+        )
+        .expect("compact ok");
+        assert!(out.shrunk, "expected a shrink on a roomy board");
+        let gap = pcb_placer::min_pairwise_gap(&out.board, &MarginMap::new());
+        assert!(
+            gap >= 1.0 - 0.02,
+            "compaction packed bodies below the 1.0 mm solder gap: {gap:.3} mm",
+        );
     }
 
     #[test]

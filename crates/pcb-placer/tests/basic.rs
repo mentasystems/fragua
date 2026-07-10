@@ -1,7 +1,7 @@
 //! Smoke tests: SA placer must reduce HPWL on a contrived bad layout.
 
 use pcb_core::{Board, CopperLayer, Footprint, Id, Length, Pad, Point, Rect};
-use pcb_placer::{place, MarginMap, PlaceOptions};
+use pcb_placer::{min_pairwise_gap, place, MarginMap, PlaceOptions};
 
 fn pad(num: &str, off_x: f64, off_y: f64, net: Option<&str>) -> Pad {
     Pad {
@@ -87,6 +87,79 @@ fn placer_reduces_hpwl_on_two_far_apart_resistors() {
         report.moved.contains(&"R1".to_string()) || report.moved.contains(&"R2".to_string()),
         "expected at least one of R1/R2 to move, got {:?}",
         report.moved,
+    );
+}
+
+/// The solder-access hard floor: two parts on the same net want to pack
+/// as tight as HPWL allows. With the soft gap preference OFF, only the
+/// hard clearance governs their spacing — so the finished layout must
+/// leave >= `solder_gap_mm` between bodies (default 1.0 mm) so the user
+/// can get a soldering iron between them, and `solder_gap=0` must degrade
+/// to the old 0.5 mm `min_clearance` floor (packing tighter).
+#[test]
+fn solder_gap_is_a_hard_floor_by_default() {
+    // Same-net pair at opposite corners of a narrow board → HPWL strongly
+    // rewards bringing them together, exercising the hard floor.
+    let gap_after_place = |solder_gap_mm: f64| -> f64 {
+        let mut board = Board::new();
+        board.outline = Some(Rect::from_corners(
+            Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            Point::new(Length::from_mm(40.0), Length::from_mm(12.0)),
+        ));
+        let mk = |reference: &str, x, y| {
+            footprint(
+                reference,
+                x,
+                y,
+                vec![
+                    pad("1", -1.0, 0.0, Some("S")),
+                    pad("2", 1.0, 0.0, Some("S")),
+                ],
+            )
+        };
+        board.add_footprint(mk("R1", 4.0, 6.0));
+        board.add_footprint(mk("R2", 36.0, 6.0));
+        let opts = PlaceOptions {
+            seed: 12345,
+            max_iterations: 10000,
+            // Turn the soft preference off so ONLY the hard floor governs.
+            min_gap_mm: 0.0,
+            gap_penalty_factor: 0.0,
+            solder_gap_mm,
+            ..PlaceOptions::default()
+        };
+        place(
+            &mut board,
+            &["R1".to_string(), "R2".to_string()],
+            &opts,
+            &MarginMap::new(),
+        )
+        .expect("placer should succeed");
+        min_pairwise_gap(&board, &MarginMap::new())
+    };
+
+    // Default 1.0 mm floor: never violated, no matter how much HPWL wants
+    // the parts touching.
+    let default_gap = gap_after_place(1.0);
+    assert!(
+        default_gap >= 1.0 - 0.02,
+        "default solder-access floor violated: min pairwise gap {default_gap:.3} mm < 1.0",
+    );
+
+    // solder_gap=0 degrades to the old behaviour: the 0.5 mm min_clearance
+    // is the only hard floor, so SA packs tighter than the 1.0 mm default.
+    let old_gap = gap_after_place(0.0);
+    assert!(
+        old_gap >= 0.5 - 0.02,
+        "min_clearance floor violated: min pairwise gap {old_gap:.3} mm < 0.5",
+    );
+    assert!(
+        old_gap < 1.0,
+        "solder_gap=0 should reproduce sub-1mm packing, got {old_gap:.3} mm",
+    );
+    assert!(
+        old_gap < default_gap + 1e-9,
+        "solder_gap=0 ({old_gap:.3}) should pack at least as tight as default ({default_gap:.3})",
     );
 }
 

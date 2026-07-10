@@ -526,6 +526,28 @@ impl LibraryEntry {
         derive_photo_transform(a, b, cal.a_px, cal.b_px)
     }
 
+    /// SVG-style affine `[a,b,c,d,e,f]` mapping a raw image pixel of the
+    /// calibrated photo to the PLACED footprint's local mm frame: the
+    /// per-photo calibration (`px → native-local mm`) composed under the
+    /// entry's `footprint_view_transform` (`native → placed-local mm`).
+    ///
+    /// This is the exact matrix the board-canvas photo overlay nests under
+    /// the footprint's own `translate(x,y) rotate(rotation)` group, so a
+    /// calibration pin pixel lands on the same placed-local point the
+    /// footprint's pad does. Because the whole chain (this matrix, then the
+    /// shared `rotate`/`translate`, then the board SVG's outer
+    /// `scale(1,-1)`) is identical to how pads are drawn, the overlay
+    /// tracks the pads at ANY footprint rotation. Kept here — one pure,
+    /// unit-tested source of truth — so the Tauri overlay payload and its
+    /// regression test can't drift apart.
+    pub fn photo_overlay_matrix(&self, cal: &PhotoCalibration) -> Result<[f64; 6], String> {
+        let transform = self.photo_transform(cal)?;
+        Ok(affine_compose(
+            self.footprint_view_transform.to_affine_mm(),
+            transform.to_affine(),
+        ))
+    }
+
     /// Derive the per-side placement margin implied by `body`: how far
     /// the body extends beyond the pad bounding box on each side (Y-up),
     /// clamped to ≥ 0 so a body smaller than the pads yields no margin.

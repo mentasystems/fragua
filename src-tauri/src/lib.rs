@@ -264,12 +264,13 @@ fn collect_photo_overlays(project: &pcb_core::Project) -> Vec<PhotoOverlayPayloa
         let Ok(dim) = imagesize::size(&path) else {
             continue;
         };
-        // Compose the calibration (px → native local mm) with the
-        // entry's view transform (native → placed local mm).
-        let matrix = pcb_core::affine_compose(
-            entry.footprint_view_transform.to_affine_mm(),
-            transform.to_affine(),
-        );
+        // Calibration (px → native-local mm) composed under the entry's
+        // view transform (native → placed-local mm). Single source of
+        // truth in `pcb_core` so the overlay payload and its regression
+        // test share one implementation.
+        let Ok(matrix) = entry.photo_overlay_matrix(cal) else {
+            continue;
+        };
         out.push(PhotoOverlayPayload {
             reference: fp.reference.clone(),
             key: fp.key.clone(),

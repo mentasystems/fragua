@@ -122,6 +122,14 @@ pub struct PlaceOptions {
     /// allowed, so the placer can separate an overlapping starting layout.
     /// Distinct from `min_gap_mm` (a soft *preference*, typically larger).
     pub min_clearance_mm: f64,
+    /// **Hard** solder-access floor (mm). The effective hard clearance the
+    /// SA enforces is `max(min_clearance_mm, solder_gap_mm)`, so the final
+    /// placement never leaves two component bodies closer than this — the
+    /// user hand-solders and needs iron-tip access between parts, so parts
+    /// must NEVER end up nearly touching after auto-place / compact.
+    /// Default 1.0 mm. Set to 0 to degrade to the old behaviour where
+    /// `min_clearance_mm` (0.5 mm) is the only hard floor.
+    pub solder_gap_mm: f64,
     /// Score weight on the soft-gap penalty term. Penalty per pair is
     /// `(min_gap_mm - actual_gap)^2` (mm²) when below the threshold;
     /// the score adds `gap_penalty_factor * Σ penalty` to HPWL. Default
@@ -163,6 +171,10 @@ impl Default for PlaceOptions {
             // violated by the placer. JLCPCB's component-to-component
             // recommendation is ~0.5 mm; smaller risks placement/assembly.
             min_clearance_mm: 0.5,
+            // 1.0 mm hand-soldering access gap — the real hard floor. Parts
+            // must never end up nearly touching: the user needs iron-tip
+            // room between bodies. Overrides min_clearance_mm upward.
+            solder_gap_mm: 1.0,
             // Steep enough that SA reliably enforces `min_gap_mm` on
             // small nets — a 1 mm shortfall on one pair costs
             // 16 mm-equivalent of HPWL, well above the noise floor.
@@ -327,14 +339,17 @@ pub fn place(
             continue;
         }
         // Hard clearance: never accept a move that leaves the moved
-        // footprint closer than `min_clearance_mm` to any other body — so
-        // the result always has a real margin between component edges (no
-        // overlap, no touching). EXCEPTION: if the part is already inside
-        // the margin (e.g. an overlapping starting layout), allow a move
-        // that *increases* its worst gap, so SA can separate things out
-        // instead of being frozen.
+        // footprint closer than the hard floor to any other body — so the
+        // result always has a real margin between component edges (no
+        // overlap, no touching). The floor is `max(min_clearance_mm,
+        // solder_gap_mm)`: the solder-access gap (default 1.0 mm) so the
+        // user can get an iron tip between parts. EXCEPTION: if the part is
+        // already inside the margin (e.g. an overlapping starting layout),
+        // allow a move that *increases* its worst gap, so SA can separate
+        // things out instead of being frozen.
+        let hard_clearance = opts.min_clearance_mm.max(opts.solder_gap_mm);
         let after_gap = probe_min_gap(board, &probe, margins);
-        if after_gap < opts.min_clearance_mm {
+        if after_gap < hard_clearance {
             let before_gap = footprint_min_gap(board, probe.id, margins);
             if after_gap <= before_gap {
                 continue; // would create or worsen a sub-margin clearance
