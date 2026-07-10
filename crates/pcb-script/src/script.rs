@@ -72,6 +72,7 @@ pub(crate) const VERBS: &[&str] = &[
     "attach",
     "detach",
     "calibrate-photo",
+    "rectify-photo",
     "body-rect",
     "find-lib",
     "list-lib",
@@ -1031,6 +1032,41 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                     "b_px_y": b_px_y,
                     "a_pad": tokens[7],
                     "b_pad": tokens[8],
+                }),
+            })
+        }
+        "rectify-photo" => {
+            // rectify-photo KEY ATT X1 Y1 X2 Y2 X3 Y3 X4 Y4 W_MM H_MM
+            // Corners are RAW source-image pixels in TL,TR,BR,BL output
+            // order; W_MM/H_MM are the board's real size.
+            need_args(
+                line,
+                tokens,
+                12,
+                "rectify-photo KEY ATT X1 Y1 X2 Y2 X3 Y3 X4 Y4 W_MM H_MM",
+            )?;
+            let x1 = parse_num(&tokens[3], line, "X1")?;
+            let y1 = parse_num(&tokens[4], line, "Y1")?;
+            let x2 = parse_num(&tokens[5], line, "X2")?;
+            let y2 = parse_num(&tokens[6], line, "Y2")?;
+            let x3 = parse_num(&tokens[7], line, "X3")?;
+            let y3 = parse_num(&tokens[8], line, "Y3")?;
+            let x4 = parse_num(&tokens[9], line, "X4")?;
+            let y4 = parse_num(&tokens[10], line, "Y4")?;
+            let w_mm = parse_num(&tokens[11], line, "W_MM")?;
+            let h_mm = parse_num(&tokens[12], line, "H_MM")?;
+            Ok(Cmd {
+                line,
+                tool: "library.rectify_photo".into(),
+                args: json!({
+                    "key": tokens[1],
+                    "att": tokens[2],
+                    "x1": x1, "y1": y1,
+                    "x2": x2, "y2": y2,
+                    "x3": x3, "y3": y3,
+                    "x4": x4, "y4": y4,
+                    "w_mm": w_mm,
+                    "h_mm": h_mm,
                 }),
             })
         }

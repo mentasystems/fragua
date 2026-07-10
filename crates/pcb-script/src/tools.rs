@@ -167,20 +167,43 @@ LIBRARY (build first, reuse forever):\n\
                                                  numbers those marks sit on. Reports the derived scale\n\
                                                  (mm/px) and the implied photo width in mm. Pick two\n\
                                                  pads as far apart as possible for accuracy.\n\
+  rectify-photo KEY ATT X1 Y1 X2 Y2 X3 Y3 X4 Y4 W_MM H_MM\n\
+                                               — ID-scanner-style crop + deskew. Removes the\n\
+                                                 perspective distortion of a handheld photo so the\n\
+                                                 overlay is exact. ATT resolves like calibrate-photo\n\
+                                                 (id prefix / filename). X1..Y4 are the module's four\n\
+                                                 BOARD corners in RAW source-image pixels (y-down),\n\
+                                                 given TL,TR,BR,BL as they should appear in the OUTPUT\n\
+                                                 (this order sets the rectified orientation — make it\n\
+                                                 match the footprint TOP view: pin-1 corner at the\n\
+                                                 output top-left). W_MM/H_MM are the board's real\n\
+                                                 size (use the entry's body-rect dims). Writes a NEW\n\
+                                                 `photo-rectified` attachment at 40 px/mm and, if the\n\
+                                                 source photo was calibrated, remaps the calibration\n\
+                                                 onto it (should come out axis-aligned; the residual\n\
+                                                 from square is reported — > 2° means the corners or\n\
+                                                 their order are wrong). Rectified attachments take\n\
+                                                 priority over plain photos in the board overlay.\n\
   body-rect KEY MINX MINY MAXX MAXY            — physical module body in footprint-local mm (Y-up,\n\
                                                  same frame as `pad`). Stores the body rect AND\n\
                                                  auto-derives the per-side placement margin (how far\n\
                                                  the body overhangs the pad bbox) so placer/DRC/render\n\
                                                  respect the true footprint. `body-rect KEY clear`\n\
                                                  drops it.\n\
-  # calibrate-photo / body-rect target CONFIRMED entries only: a fresh\n\
-  #   `lib` sits in the review queue and its `attach`ed photos have no\n\
-  #   ids until a human confirms. Recipe for a photo-calibrated part:\n\
+  # calibrate-photo / rectify-photo / body-rect target CONFIRMED entries\n\
+  #   only: a fresh `lib` sits in the review queue and its `attach`ed\n\
+  #   photos have no ids until a human confirms. Recipe for a\n\
+  #   photo-calibrated, perspective-corrected part:\n\
   #     lib mymod ...pads...        # queue for review\n\
   #     attach mymod photo top.jpg  # staged on the pending entry\n\
   #   → confirm in the review pane, THEN:\n\
   #     calibrate-photo mymod top.jpg 412 980 1631 980 1 8   # two pins one known pitch apart\n\
   #     body-rect mymod -3.0 -2.5 3.0 2.5\n\
+  #     # optional but recommended for handheld photos — crop+deskew so the\n\
+  #     # overlay is exact (measure the 4 board corners in the source photo):\n\
+  #     rectify-photo mymod top.jpg 120 90 1840 60 1900 1520 90 1560 6.0 5.0\n\
+  #     # the rectified attachment auto-inherits the calibration; if it\n\
+  #     # reports no calibration, calibrate-photo the new attachment.\n\
   delete-lib KEY\n\
   find-lib KEY                                 — full record + pads + silk\n\
   # Library example with body outline + pin 1 dot + auto-ref label:\n\
@@ -426,6 +449,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "library.create" => tool_library_create(project, args),
         "library.attach" => tool_library_attach(project, args),
         "library.calibrate_photo" => tool_library_calibrate_photo(project, args),
+        "library.rectify_photo" => tool_library_rectify_photo(project, args),
         "library.set_body_rect" => tool_library_set_body_rect(project, args),
         "library.delete_attachment" => tool_library_delete_attachment(project, args),
         "library.delete" => tool_library_delete(project, args),
@@ -2218,6 +2242,85 @@ fn tool_library_calibrate_photo(project: &Project, args: &Value) -> Result<Value
         "rotation_deg": transform.rotation_deg,
         "photo_width_px": width_px,
         "photo_width_mm": width_mm,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct LibraryRectifyPhotoInput {
+    key: String,
+    att: String,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    x3: f64,
+    y3: f64,
+    x4: f64,
+    y4: f64,
+    w_mm: f64,
+    h_mm: f64,
+}
+
+fn tool_library_rectify_photo(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: LibraryRectifyPhotoInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("rectify-photo: {e}")))?;
+    // Rectification needs a real attachment id, which only exists once the
+    // entry is confirmed to the on-disk library (same gate as calibrate).
+    let entry = ensure_confirmed(project, "rectify-photo", &input.key)?;
+    let att_id = resolve_attachment_id(&entry, &input.att).map_err(ToolError::invalid_params)?;
+    let src_filename = entry
+        .attachments
+        .iter()
+        .find(|a| a.id == att_id)
+        .map_or(att_id.clone(), |a| a.filename.clone());
+    let corners = [
+        (input.x1, input.y1),
+        (input.x2, input.y2),
+        (input.x3, input.y3),
+        (input.x4, input.y4),
+    ];
+    let outcome = project
+        .library()
+        .rectify_photo(&input.key, &att_id, corners, input.w_mm, input.h_mm)
+        .map_err(ToolError::invalid_params)?;
+    project.notify_library_changed();
+
+    // Human-readable summary, including the calibration-remap verdict.
+    let cal_msg = match &outcome.calibration {
+        Some(c) => {
+            let verdict = if c.residual_deg <= 2.0 {
+                "auto-remapped, axis-aligned"
+            } else {
+                "REMAPPED BUT OFF-AXIS — re-check corners/order"
+            };
+            format!(
+                "; calibration {verdict}: scale {:.5} mm/px, residual {:.2}° from square",
+                c.scale_mm_per_px, c.residual_deg
+            )
+        }
+        None => {
+            "; original had no calibration — run calibrate-photo on the rectified attachment".into()
+        }
+    };
+    let msg = format!(
+        "Rectified {src_filename} → {} ({}×{} px, {:.1} px/mm) on {}{cal_msg}",
+        outcome.filename, outcome.width_px, outcome.height_px, outcome.px_per_mm, input.key
+    );
+    project.log(ActivityLevel::Info, msg.clone());
+    Ok(text_result(msg).with_data(json!({
+        "key": input.key,
+        "source_attachment_id": att_id,
+        "attachment_id": outcome.attachment_id,
+        "filename": outcome.filename,
+        "width_px": outcome.width_px,
+        "height_px": outcome.height_px,
+        "px_per_mm": outcome.px_per_mm,
+        "calibration": outcome.calibration.map(|c| json!({
+            "remapped": true,
+            "scale_mm_per_px": c.scale_mm_per_px,
+            "rotation_deg": c.rotation_deg,
+            "residual_deg": c.residual_deg,
+        })),
     })))
 }
 

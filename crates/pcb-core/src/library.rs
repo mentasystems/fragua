@@ -365,6 +365,41 @@ pub fn affine_compose(outer: [f64; 6], inner: [f64; 6]) -> [f64; 6] {
     ]
 }
 
+/// Outcome of `Library::rectify_photo`: the new rectified attachment plus
+/// the fate of the original photo's calibration under the homography.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RectifyOutcome {
+    /// Id of the freshly-created "photo-rectified" attachment.
+    pub attachment_id: String,
+    /// Filename of the new attachment (`<orig-stem>-rect.jpg`).
+    pub filename: String,
+    pub width_px: u32,
+    pub height_px: u32,
+    /// Pixels-per-mm baked into the rectified image (fixed by construction,
+    /// reduced only if the long side hit the size cap).
+    pub px_per_mm: f64,
+    /// `Some` when the original attachment carried a calibration that we
+    /// remapped onto the rectified image. Carries the re-derived scale, the
+    /// residual rotation from axis-aligned (nearest multiple of 90°), and
+    /// whether the remapped calibration validated (re-derived cleanly).
+    pub calibration: Option<RectifyCalibration>,
+}
+
+/// The remapped-calibration report inside `RectifyOutcome`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RectifyCalibration {
+    /// Re-derived photo→board scale of the rectified image; should land at
+    /// `1 / px_per_mm` once the corners match the footprint orientation.
+    pub scale_mm_per_px: f64,
+    /// Re-derived rotation of the rectified calibration (degrees). Near a
+    /// multiple of 90° when the corner order matches the footprint.
+    pub rotation_deg: f64,
+    /// Absolute residual from the nearest multiple of 90° — how far the
+    /// rectified photo is from perfectly axis-aligned. Large (> ~2°) means
+    /// the detected corners or the corner order are off.
+    pub residual_deg: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Attachment {
     /// `UUIDv4`. Also the on-disk basename (extension follows the mime).
@@ -847,6 +882,102 @@ impl Library {
         Ok(true)
     }
 
+    /// Rectify (crop + deskew) one photo attachment into a new
+    /// "photo-rectified" attachment, ID-scanner style. `corners` are the
+    /// four board corners in the ORIGINAL image's raw pixels (y-down),
+    /// given in TL,TR,BR,BL order as they should appear in the OUTPUT —
+    /// that order fixes the rectified image's orientation. `quad_w_mm ×
+    /// quad_h_mm` is the board's real size, which pins the output to a
+    /// fixed px/mm so the rectified photo is metrically exact.
+    ///
+    /// If the original attachment has a calibration, its two pin marks are
+    /// carried through the homography onto the new attachment and the
+    /// remap is validated by re-deriving the transform (which should come
+    /// out axis-aligned — rotation ≈ a multiple of 90°; the residual is
+    /// reported). The new attachment is appended to the entry.
+    pub fn rectify_photo(
+        &self,
+        key: &str,
+        attachment_id: &str,
+        corners: [(f64, f64); 4],
+        quad_w_mm: f64,
+        quad_h_mm: f64,
+    ) -> Result<RectifyOutcome, String> {
+        let entry = self
+            .find(key)
+            .ok_or_else(|| format!("no library entry with key {key}"))?;
+        let src_att = entry
+            .attachments
+            .iter()
+            .find(|a| a.id == attachment_id)
+            .ok_or_else(|| format!("rectify: no attachment {attachment_id} on {key}"))?
+            .clone();
+        if !src_att.mime.starts_with("image/") {
+            return Err(format!(
+                "rectify: attachment {} is {} — not an image",
+                src_att.filename, src_att.mime
+            ));
+        }
+        let bytes = self.read_attachment(&src_att)?;
+        let rect = crate::rectify::rectify_image(&bytes, &corners, quad_w_mm, quad_h_mm)?;
+
+        // Derive the new filename from the original stem.
+        let stem = Path::new(&src_att.filename)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("photo");
+        let filename = format!("{stem}-rect.jpg");
+        let new_att = self.attach(
+            key,
+            "photo-rectified".into(),
+            filename.clone(),
+            "image/jpeg".into(),
+            &rect.jpeg,
+        )?;
+
+        // Carry the original calibration through the homography, if any.
+        let calibration = match &src_att.calibration {
+            None => None,
+            Some(cal) => {
+                let map = |(x, y): (f64, f64)| {
+                    crate::rectify::apply_homography(&rect.src_to_dst, x, y).ok_or_else(|| {
+                        "rectify: calibration mark maps to infinity under the homography"
+                            .to_string()
+                    })
+                };
+                let a_px = map(cal.a_px)?;
+                let b_px = map(cal.b_px)?;
+                let new_cal = PhotoCalibration {
+                    a_px,
+                    b_px,
+                    a_pad: cal.a_pad.clone(),
+                    b_pad: cal.b_pad.clone(),
+                };
+                // Re-derive against the entry's pads to validate + report.
+                let transform = entry.photo_transform(&new_cal)?;
+                self.set_photo_calibration(key, &new_att.id, new_cal)?;
+                // Residual: distance of the derived rotation from the
+                // nearest multiple of 90°, folded into [0, 45].
+                let r = transform.rotation_deg.rem_euclid(90.0);
+                let residual = r.min(90.0 - r);
+                Some(RectifyCalibration {
+                    scale_mm_per_px: transform.scale_mm_per_px,
+                    rotation_deg: transform.rotation_deg,
+                    residual_deg: residual,
+                })
+            }
+        };
+
+        Ok(RectifyOutcome {
+            attachment_id: new_att.id,
+            filename,
+            width_px: rect.width,
+            height_px: rect.height,
+            px_per_mm: rect.px_per_mm,
+            calibration,
+        })
+    }
+
     /// Drop the body rectangle from an entry. The derived placement
     /// margin is left as-is so any manual override survives. Returns
     /// `true` if the entry was found.
@@ -1162,6 +1293,139 @@ mod tests {
         let (x, y) = apply_affine(m, 3.0, 4.0);
         approx(x, 16.0); // 3*2 + 10
         approx(y, 28.0); // 4*2 + 20
+    }
+
+    #[test]
+    fn rectify_photo_remaps_calibration_axis_aligned() {
+        use image::ImageFormat;
+        // Temp library so we don't touch the real ~/.pcb-library.
+        let tmp = std::env::temp_dir().join(format!(
+            "pcb-rectify-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        let lib = Library::open_at(&tmp).expect("open temp library");
+
+        // Two pads 8 mm apart on X (±4, 0).
+        let mut entry = entry_with_pads(vec![
+            pad("1", -4.0, 0.0, 1.0, 1.0),
+            pad("2", 4.0, 0.0, 1.0, 1.0),
+        ]);
+        entry.key = "cam".into();
+        lib.upsert(entry).expect("upsert");
+
+        // Synthetic 400×400 photo; the board (10×10 mm) fills it, axis
+        // aligned. 40 px/mm. Pads land at image (40,200) and (360,200).
+        let img = image::RgbImage::from_pixel(400, 400, image::Rgb([128, 128, 128]));
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
+            .expect("encode png");
+        let att = lib
+            .attach(
+                "cam",
+                "photo".into(),
+                "top.png".into(),
+                "image/png".into(),
+                &png,
+            )
+            .expect("attach");
+
+        // Calibrate the original: pads 8 mm ↔ 320 px → 0.025 mm/px, rot 0.
+        lib.calibrate_photo(
+            "cam",
+            &att.id,
+            PhotoCalibration {
+                a_px: (40.0, 200.0),
+                b_px: (360.0, 200.0),
+                a_pad: "1".into(),
+                b_pad: "2".into(),
+            },
+        )
+        .expect("calibrate original");
+
+        // Rectify using the full-image quad (already axis aligned) → the
+        // homography is ~identity, so the remap must stay axis-aligned.
+        let outcome = lib
+            .rectify_photo(
+                "cam",
+                &att.id,
+                [(0.0, 0.0), (400.0, 0.0), (400.0, 400.0), (0.0, 400.0)],
+                10.0,
+                10.0,
+            )
+            .expect("rectify");
+        approx(outcome.px_per_mm, 40.0);
+        assert_eq!(outcome.width_px, 400);
+        let cal = outcome.calibration.expect("calibration remapped");
+        assert!(
+            (cal.scale_mm_per_px - 0.025).abs() < 1e-4,
+            "scale {}",
+            cal.scale_mm_per_px
+        );
+        assert!(cal.residual_deg < 0.5, "residual {}", cal.residual_deg);
+
+        // The new attachment exists, is "photo-rectified", and is calibrated.
+        let reloaded = lib.find("cam").expect("find");
+        let new = reloaded
+            .attachments
+            .iter()
+            .find(|a| a.id == outcome.attachment_id)
+            .expect("new attachment present");
+        assert_eq!(new.kind, "photo-rectified");
+        assert!(new.calibration.is_some(), "rectified attachment calibrated");
+        assert!(new.filename.ends_with("-rect.jpg"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn rectify_photo_rejects_degenerate_quad() {
+        let tmp = std::env::temp_dir().join(format!(
+            "pcb-rectify-bad-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        let lib = Library::open_at(&tmp).expect("open temp library");
+        let mut entry = entry_with_pads(vec![
+            pad("1", -4.0, 0.0, 1.0, 1.0),
+            pad("2", 4.0, 0.0, 1.0, 1.0),
+        ]);
+        entry.key = "cam".into();
+        lib.upsert(entry).expect("upsert");
+        let img = image::RgbImage::from_pixel(100, 100, image::Rgb([0, 0, 0]));
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode png");
+        let att = lib
+            .attach(
+                "cam",
+                "photo".into(),
+                "top.png".into(),
+                "image/png".into(),
+                &png,
+            )
+            .expect("attach");
+        // Collinear corners → error, and no rectified attachment is added.
+        let before = lib.find("cam").unwrap().attachments.len();
+        assert!(lib
+            .rectify_photo(
+                "cam",
+                &att.id,
+                [(0.0, 0.0), (50.0, 0.0), (100.0, 0.0), (50.0, 10.0)],
+                10.0,
+                10.0
+            )
+            .is_err());
+        assert_eq!(lib.find("cam").unwrap().attachments.len(), before);
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

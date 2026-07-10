@@ -240,11 +240,19 @@ fn collect_photo_overlays(project: &pcb_core::Project) -> Vec<PhotoOverlayPayloa
         let Some(entry) = library.find(&fp.key) else {
             continue;
         };
-        // First image attachment that carries a calibration.
-        let Some(att) = entry
-            .attachments
-            .iter()
-            .find(|a| a.mime.starts_with("image/") && a.calibration.is_some())
+        // First calibrated image attachment, but a rectified one
+        // (kind "photo-rectified") wins over a plain calibrated photo when
+        // both exist — the rectified image is crop+deskewed so its overlay
+        // is metrically exact.
+        let calibrated = || {
+            entry
+                .attachments
+                .iter()
+                .filter(|a| a.mime.starts_with("image/") && a.calibration.is_some())
+        };
+        let Some(att) = calibrated()
+            .find(|a| a.kind == "photo-rectified")
+            .or_else(|| calibrated().next())
         else {
             continue;
         };

@@ -19,5 +19,9 @@ serde_json = "1"
 base64 = "0.22"
 imagesize = "0.13"
 
+[dev-dependencies]
+# Tests synthesise real (decodable) images for the rectify-photo verb.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [lints]
 workspace = true
