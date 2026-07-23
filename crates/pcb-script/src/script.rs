@@ -1373,6 +1373,11 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                     ("gap_penalty", AttrType::NumInto("gap_penalty_factor")),
                     ("congestion", AttrType::NumInto("congestion_penalty_factor")),
                     ("congestion_res", AttrType::NumInto("congestion_resolution")),
+                    ("global", AttrType::BoolInto("global")),
+                    ("global_iters", AttrType::NumInto("global_iters")),
+                    ("bins", AttrType::NumInto("density_bins")),
+                    ("density", AttrType::NumInto("target_density")),
+                    ("overflow", AttrType::NumInto("target_overflow")),
                 ],
             )?;
             Ok(Cmd {

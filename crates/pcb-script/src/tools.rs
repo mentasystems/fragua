@@ -273,12 +273,19 @@ PALETTE / PLACEMENT:\n\
                                                  then re-spawn from the palette to pick up the\n\
                                                  updated geometry.\n\
   auto-place REF [REF...] [iters=N] [seed=N] [max_step=N] [min_step=N] [min_gap=N] [solder_gap=N] [gap_penalty=N] [congestion=N] [congestion_res=N]\n\
-                                               — simulated-annealing placer over the listed refs.\n\
+             [global=true|false] [global_iters=N] [bins=N] [density=N] [overflow=N]\n\
+                                               — two-stage placer over the listed refs: an\n\
+                                                 electrostatic global stage (ePlace-style: smooth\n\
+                                                 wirelength gradient + Poisson density field, with\n\
+                                                 90° rotation probing) finds the structure, then\n\
+                                                 simulated annealing legalises and polishes.\n\
                                                  Pinned refs (everything not listed) stay put.\n\
                                                  Optimises HPWL + a soft body-to-body gap penalty\n\
                                                  + a congestion proxy (how many net pad-bboxes\n\
                                                  share the same routing cell). Obeys outline +\n\
                                                  edge_mounted; hard-rejects pad overlap. Defaults:\n\
+                                                 global=true (global_iters=600, bins=64,\n\
+                                                 density=1.0, overflow=0.08),\n\
                                                  iters=8000 (~3 s for ~20 components), seed=clock,\n\
                                                  max_step=20 mm, min_gap=2.0 mm, gap_penalty=16,\n\
                                                  congestion=1, congestion_res=32. solder_gap=1.0 mm\n\
@@ -3442,6 +3449,16 @@ struct AutoPlaceInput {
     congestion_penalty_factor: Option<f64>,
     #[serde(default)]
     congestion_resolution: Option<f64>,
+    #[serde(default)]
+    global: Option<bool>,
+    #[serde(default)]
+    global_iters: Option<f64>,
+    #[serde(default)]
+    density_bins: Option<f64>,
+    #[serde(default)]
+    target_density: Option<f64>,
+    #[serde(default)]
+    target_overflow: Option<f64>,
 }
 
 fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolError> {
@@ -3476,6 +3493,21 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
     if let Some(v) = input.congestion_resolution {
         opts.congestion_resolution = v.max(0.0) as u32;
     }
+    if let Some(v) = input.global {
+        opts.global_stage = v;
+    }
+    if let Some(v) = input.global_iters {
+        opts.global_iterations = v.max(1.0) as usize;
+    }
+    if let Some(v) = input.density_bins {
+        opts.density_bins = v.max(16.0) as usize;
+    }
+    if let Some(v) = input.target_density {
+        opts.target_density = v.clamp(0.3, 1.5);
+    }
+    if let Some(v) = input.target_overflow {
+        opts.target_overflow = v.clamp(0.005, 1.0);
+    }
 
     // Place on a clone so the project lock is released quickly. Apply
     // the resulting positions back through the regular `move_footprint_to`
@@ -3502,7 +3534,6 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
                 live_updates.push((fp.id, entry.edge_mounted));
             }
         }
-        drop(lib);
         for (id, flag) in live_updates {
             project.set_footprint_edge_mounted(id, flag);
         }
@@ -3574,10 +3605,15 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
     project.log(
         ActivityLevel::Info,
         format!(
-            "auto-place: HPWL {:.1} → {:.1} mm ({:+.1} mm), congestion {:.0} → {:.0} ({:+.0}), {} accepted of {} iters, applied {} moves",
+            "auto-place: HPWL {:.1} → {:.1} mm ({:+.1} mm){}, congestion {:.0} → {:.0} ({:+.0}), {} accepted of {} iters, applied {} moves",
             report.initial_hpwl_mm,
             report.final_hpwl_mm,
             report.final_hpwl_mm - report.initial_hpwl_mm,
+            report
+                .global
+                .as_ref()
+                .map(|g| format!(" (global: {} iters → {:.1} mm, overflow {:.3})", g.iterations, g.hpwl_mm, g.overflow))
+                .unwrap_or_default(),
             report.initial_congestion,
             report.final_congestion,
             report.final_congestion - report.initial_congestion,
@@ -3616,6 +3652,11 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
         "initial_hpwl_mm": round2(report.initial_hpwl_mm),
         "final_hpwl_mm": round2(report.final_hpwl_mm),
         "delta_mm": round2(report.final_hpwl_mm - report.initial_hpwl_mm),
+        "global": report.global.as_ref().map(|g| json!({
+            "iterations": g.iterations,
+            "overflow": round2(g.overflow),
+            "hpwl_mm": round2(g.hpwl_mm),
+        })),
         "initial_congestion": round2(report.initial_congestion),
         "final_congestion": round2(report.final_congestion),
         "iterations": report.iterations,
@@ -3708,7 +3749,6 @@ fn tool_compact_run(project: &Project, args: &Value) -> Result<Value, ToolError>
                 live_updates.push((fp.id, entry.edge_mounted));
             }
         }
-        drop(lib);
         for (id, flag) in live_updates {
             project.set_footprint_edge_mounted(id, flag);
         }

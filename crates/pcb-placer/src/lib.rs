@@ -1,10 +1,20 @@
-//! `pcb-placer` — simulated-annealing footprint placer.
+//! `pcb-placer` — two-stage footprint placer: electrostatic global
+//! placement (ePlace-style, see `global.rs`) followed by a
+//! simulated-annealing legalisation/refinement stage.
 //!
 //! Given a board, a set of "movable" footprint references, and an
 //! options bundle, the placer searches for new positions that minimise
 //! total HPWL (sum of half-perimeter wire length over every net) while
 //! keeping all footprints inside the outline, non-overlapping, and (for
 //! `edge_mounted = true` parts) still touching the outline.
+//!
+//! The global stage finds the layout *structure* analytically — smooth
+//! wirelength gradient plus a Poisson-solved density field that lets
+//! parts flow past each other instead of hopping over the local minima
+//! SA alone gets stuck in. The SA stage then enforces the hard
+//! constraints (solder-gap floor, outline, edge-mount) and polishes 90°
+//! rotations, starting from an already-good layout so a low temperature
+//! and small steps suffice.
 //!
 //! Movability is per-call, not per-footprint state: callers pass the
 //! list of refs they want the placer to touch. Everything else stays
@@ -19,6 +29,10 @@
 use std::collections::HashMap;
 
 use pcb_core::{Board, Footprint, Id, Length, Point, Rect};
+
+mod global;
+
+pub use global::GlobalReport;
 
 /// Per-footprint placement margin in mm, in the footprint's LOCAL
 /// frame: `[top, right, bottom, left]`. Stored on `LibraryEntry` and
@@ -151,6 +165,34 @@ pub struct PlaceOptions {
     /// "tight HPWL but unroutable" layouts; tune down if it spreads
     /// parts so far apart wire goes back up.
     pub congestion_penalty_factor: f64,
+    /// Run the electrostatic global-placement stage before SA. On by
+    /// default; turn off to reproduce the old SA-only behaviour (the SA
+    /// then runs with the caller's temperatures/steps untouched).
+    pub global_stage: bool,
+    /// Gradient iterations for the global stage. It exits early once
+    /// density overflow drops under `target_overflow`, so this is a
+    /// ceiling, not a fixed cost.
+    pub global_iterations: usize,
+    /// Bins per axis of the electrostatic density grid (clamped 16-256).
+    /// 64 → ~1.3 mm bins on an 85 mm board: finer than any footprint
+    /// body, coarse enough that a solve stays microseconds.
+    pub density_bins: usize,
+    /// Target bin utilisation (fraction of a bin's area that may be
+    /// covered by inflated footprint bodies) before density is counted
+    /// as overflow. Charges are already inflated by the solder half-gap,
+    /// so 1.0 = "bodies plus mandatory gaps tile perfectly" — exactly
+    /// legal packing; anything above it is real overlap. Lower values
+    /// spread parts more (router slack) at a wirelength cost.
+    pub target_density: f64,
+    /// Global stage stops once the fraction of movable charge above
+    /// `target_density` drops below this. ePlace-conventional ~0.08.
+    pub target_overflow: f64,
+    /// Clearance non-edge-mounted parts keep from the outline, mm.
+    /// Default 0.3 covers the DRC edge check (0.2 default, 0.3 with the
+    /// common fab profiles) so auto-placed pads never land within
+    /// flagging distance of the cut. Compaction sets 0: its trim phase
+    /// owns the outline and re-validates with a full DRC pass.
+    pub edge_clearance_mm: f64,
 }
 
 impl Default for PlaceOptions {
@@ -188,16 +230,26 @@ impl Default for PlaceOptions {
             // empirically enough to discourage piling nets in one
             // corridor without dominating the score.
             congestion_penalty_factor: 1.0,
+            global_stage: true,
+            global_iterations: 600,
+            density_bins: 64,
+            target_density: 1.0,
+            target_overflow: 0.08,
+            edge_clearance_mm: 0.3,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct PlaceReport {
-    /// HPWL at the start of the run, mm.
+    /// Raw (unweighted) HPWL at the start of the run, mm — before the
+    /// global stage. Same metric the DRC and router report.
     pub initial_hpwl_mm: f64,
-    /// HPWL of the best placement found, mm.
+    /// Raw HPWL of the best placement found, mm.
     pub final_hpwl_mm: f64,
+    /// Outcome of the electrostatic global stage; `None` when it was
+    /// disabled or had nothing to do.
+    pub global: Option<GlobalReport>,
     /// Congestion overflow at the start, summed over the rasterised
     /// grid. 0 = every cell is touched by at most one net's pad bbox.
     pub initial_congestion: f64,
@@ -251,6 +303,7 @@ pub fn place(
         return Ok(PlaceReport {
             initial_hpwl_mm: total_hpwl(board),
             final_hpwl_mm: total_hpwl(board),
+            global: None,
             initial_congestion: 0.0,
             final_congestion: 0.0,
             iterations: 0,
@@ -290,6 +343,43 @@ pub fn place(
         }
     }
 
+    // Raw HPWL / congestion before anything moves — the report baseline.
+    let initial_hpwl = total_hpwl(board);
+    let initial_congestion = if opts.congestion_resolution > 0 {
+        congestion_overflow(board, outline, opts.congestion_resolution)
+    } else {
+        0.0
+    };
+
+    // Stage 1: electrostatic global placement. Finds the layout
+    // structure analytically; may leave small residual overlaps that
+    // the SA stage legalises. When it ran, the SA is re-tuned into a
+    // refinement role: low temperature and small steps so it polishes
+    // and legalises instead of re-scrambling the global solution.
+    let global_report = if opts.global_stage {
+        Some(global::global_place(
+            board,
+            &movable_ids,
+            opts,
+            margins,
+            outline,
+        ))
+    } else {
+        None
+    };
+    let sa_opts: PlaceOptions = if global_report.is_some() {
+        PlaceOptions {
+            initial_temp: 5.0,
+            final_temp: 0.05,
+            max_step_mm: 8.0,
+            min_step_mm: 0.25,
+            ..opts.clone()
+        }
+    } else {
+        opts.clone()
+    };
+    let opts = &sa_opts;
+
     // Net membership: for each movable footprint, which nets does it
     // contribute pads to? Used to compute incremental HPWL deltas
     // after a move (HPWL per net depends on min/max pad coords).
@@ -303,20 +393,20 @@ pub fn place(
         nets.dedup();
         nets_of_id.insert(*id, nets);
     }
-
-    let initial_hpwl = total_hpwl(board);
-    let initial_congestion = if opts.congestion_resolution > 0 {
+    // SA baseline is the *current* board — post-global when stage 1 ran.
+    let sa_start_congestion = if opts.congestion_resolution > 0 {
         congestion_overflow(board, outline, opts.congestion_resolution)
     } else {
         0.0
     };
-    let initial_score = initial_hpwl
+    let sa_start_hpwl = total_hpwl(board);
+    let initial_score = sa_start_hpwl
         + opts.gap_penalty_factor * total_gap_penalty(board, opts.min_gap_mm, margins)
-        + opts.congestion_penalty_factor * initial_congestion;
+        + opts.congestion_penalty_factor * sa_start_congestion;
     let mut current_score = initial_score;
     let mut best_score = initial_score;
-    let mut best_hpwl = initial_hpwl;
-    let mut best_congestion = initial_congestion;
+    let mut best_hpwl = sa_start_hpwl;
+    let mut best_congestion = sa_start_congestion;
     let mut best_positions: HashMap<Id, Point> = movable_ids
         .iter()
         .map(|id| (*id, board.footprints[id].position))
@@ -392,7 +482,7 @@ pub fn place(
         // body may hang off an edge whose pads already touch that
         // edge — same rule as place/move/DRC (`body_outline_violation`)
         // so an OLED / breakout can sit header-on-board, body off-edge.
-        if !pads_inside_outline(&probe, outline) {
+        if !pads_inside_outline(&probe, outline, opts.edge_clearance_mm) {
             continue;
         }
         {
@@ -511,6 +601,7 @@ pub fn place(
     Ok(PlaceReport {
         initial_hpwl_mm: initial_hpwl,
         final_hpwl_mm: best_hpwl,
+        global: global_report,
         initial_congestion,
         final_congestion: best_congestion,
         iterations: opts.max_iterations,
@@ -520,18 +611,19 @@ pub fn place(
     })
 }
 
-/// Sum of **weighted** HPWL across every multi-pad net on the board, mm.
-///
-/// Weight is `1 / max(1, n_pads - 1)` (classic clique model). Without
-/// this, fat power nets (`+3V3`, `GND` with 7–15 pads) dominate the SA
-/// score and a 2-pin series resistor like an SSR LED series R can be
-/// left 40 mm from both of its neighbours while the placer chases
-/// millimetres on the power plane. With the weight, a 2-pin net at
-/// 50 mm costs the same as a 20-pin net at ~950 mm — short nets pull
-/// their components into clusters.
+/// Sum of **raw** (unweighted) HPWL across every multi-pad net, mm —
+/// the metric the DRC and router report, used for the placement report
+/// baselines. The SA *score* uses the weighted `net_hpwl` instead (see
+/// `net_weight`); mixing them is fine because the SA only ever compares
+/// accumulated deltas, never this absolute baseline.
 fn total_hpwl(board: &Board) -> f64 {
-    let mut nets: HashMap<&str, ([f64; 4], usize)> = HashMap::new();
-    for fp in board.footprints.values() {
+    // BTreeMap + insertion-order footprints: the global stage's plateau
+    // detector gates control flow on this value, so the float summation
+    // order must be identical run to run — HashMap iteration order is
+    // not.
+    let mut nets: std::collections::BTreeMap<&str, ([f64; 4], usize)> =
+        std::collections::BTreeMap::new();
+    for fp in board.footprints_in_order() {
         for pad in &fp.pads {
             let Some(net) = pad.net.as_deref() else {
                 continue;
@@ -557,14 +649,18 @@ fn total_hpwl(board: &Board) -> f64 {
     }
     nets.values()
         .filter(|(b, count)| *count >= 2 && b[2] >= b[0] && b[3] >= b[1])
-        .map(|(b, count)| {
-            let raw = (b[2] - b[0]) + (b[3] - b[1]);
-            raw * net_weight(*count)
-        })
+        .map(|(b, _)| (b[2] - b[0]) + (b[3] - b[1]))
         .sum()
 }
 
-/// Weight for a net with `n_pads` pads. See `total_hpwl`.
+/// Weight for a net with `n_pads` pads, used by the SA score (via
+/// `net_hpwl`) and the global stage's WA wirelength — NOT by the raw
+/// `total_hpwl` the report shows.
+///
+/// Without it, fat power nets (`+3V3`, `GND` with 7–15 pads) dominate
+/// the objective and a 2-pin series resistor can be left 40 mm from
+/// both of its neighbours while the placer chases millimetres on the
+/// power plane.
 ///
 /// Base clique weight is `1/(n-1)`. Multiplied by 4 so two-pin nets
 /// (series R, LED, SSR LED drive…) pull their ends together hard
@@ -605,10 +701,7 @@ fn net_hpwl(board: &Board, net: &str) -> f64 {
 /// Translation that moves `fp` so its pad bbox touches the nearest side
 /// of `outline`. Used to un-stick edge-mounted parts that spawned
 /// interior before the SA loop starts.
-fn snap_delta_to_nearest_edge(
-    fp: &Footprint,
-    outline: pcb_core::Rect,
-) -> Option<(Length, Length)> {
+fn snap_delta_to_nearest_edge(fp: &Footprint, outline: pcb_core::Rect) -> Option<(Length, Length)> {
     let b = fp.bounds()?;
     let d_left = (b.min.x.0 - outline.min.x.0).abs();
     let d_right = (outline.max.x.0 - b.max.x.0).abs();
@@ -868,19 +961,32 @@ fn would_overlap(
     false
 }
 
-/// True if every corner of `probe`'s bbox (margins included) sits
-/// inside `outline`. The margin pushes a part off the edge if it has
-/// `top_mm`/etc. set — useful for connectors that need clearance from
-/// the cut line.
-/// Pads fully on-board (no pad copper past the outline).
-fn pads_inside_outline(probe: &Footprint, outline: pcb_core::Rect) -> bool {
+/// Pads fully on-board (no pad copper past the outline). Free (non
+/// edge-mounted) parts additionally keep `edge_clearance_mm` from the
+/// cut so the DRC edge check never flags an auto-placed pad; edge-
+/// mounted parts must be able to touch the outline. The plastic body is
+/// deliberately NOT considered here — `body_outline_violation` at the
+/// call site owns that rule.
+fn pads_inside_outline(
+    probe: &Footprint,
+    outline: pcb_core::Rect,
+    edge_clearance_mm: f64,
+) -> bool {
     let Some(b) = probe.bounds() else {
         return false;
     };
-    b.min.x.0 >= outline.min.x.0
-        && b.min.y.0 >= outline.min.y.0
-        && b.max.x.0 <= outline.max.x.0
-        && b.max.y.0 <= outline.max.y.0
+    // Free parts keep the same edge clearance the global stage enforces
+    // so the DRC's edge check never flags an auto-placed pad; edge-
+    // mounted parts must be able to touch the outline.
+    let e = if probe.edge_mounted {
+        Length::ZERO
+    } else {
+        Length::from_mm(edge_clearance_mm)
+    };
+    b.min.x.0 >= outline.min.x.0 + e.0
+        && b.min.y.0 >= outline.min.y.0 + e.0
+        && b.max.x.0 <= outline.max.x.0 - e.0
+        && b.max.y.0 <= outline.max.y.0 - e.0
 }
 
 /// Library placement margin for a probe footprint, if any.

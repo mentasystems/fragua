@@ -599,6 +599,17 @@ fn try_feasible(
         max_iterations: opts.place_iters,
         min_gap_mm: min_gap,
         solder_gap_mm: opts.solder_gap_mm,
+        // Compaction starts from an already-structured layout and probes
+        // MANY candidate outlines — re-running the electrostatic global
+        // stage on every candidate would re-flow the whole board each
+        // time (slow, and it can undo the structure the previous steps
+        // settled on). SA-only is the right tool for "same layout,
+        // slightly smaller box".
+        global_stage: false,
+        // Compaction owns the outline (trim phase + full DRC re-check);
+        // the placer's own edge stand-off would just waste packable
+        // millimetres here.
+        edge_clearance_mm: 0.0,
         ..PlaceOptions::default()
     };
     let movable: Vec<String> = b

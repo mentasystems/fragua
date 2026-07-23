@@ -299,3 +299,126 @@ fn series_resistor_pulled_toward_its_nets() {
         report.moved
     );
 }
+
+/// Realistic IoT-board shape: two multi-pin modules, an OLED, an
+/// edge-mounted screw terminal and five passives, all scattered to the
+/// worst corners of an 85×52 board. The two-stage placer (electrostatic
+/// global + SA legalisation) must recover a tight cluster: big raw-HPWL
+/// cut, hard solder floor honoured, everything inside the outline, and
+/// the screw terminal still on the outline edge.
+#[test]
+fn two_stage_placer_untangles_scattered_iot_board() {
+    let mut board = Board::new();
+    board.outline = Some(Rect::from_corners(
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+        Point::new(Length::from_mm(85.0), Length::from_mm(52.0)),
+    ));
+
+    // "ESP module": 8 pads down two sides, 12×8 mm.
+    let module = |reference: &str, x, y, nets: [&str; 8]| {
+        let mut pads = Vec::new();
+        for (i, n) in nets.iter().enumerate() {
+            let (col, row) = (i / 4, i % 4);
+            pads.push(pad(
+                &format!("{}", i + 1),
+                if col == 0 { -5.0 } else { 5.0 },
+                row as f64 * 2.0 - 3.0,
+                Some(n),
+            ));
+        }
+        footprint(reference, x, y, pads)
+    };
+    // Passive: 2 pads, 3.2 mm apart.
+    let passive = |reference: &str, x, y, a: &str, b: &str| {
+        footprint(
+            reference,
+            x,
+            y,
+            vec![pad("1", -1.6, 0.0, Some(a)), pad("2", 1.6, 0.0, Some(b))],
+        )
+    };
+
+    board.add_footprint(module(
+        "U1",
+        8.0,
+        45.0,
+        ["+3V3", "GND", "SCK", "MOSI", "MISO", "NSS", "SDA", "SCL"],
+    ));
+    board.add_footprint(module(
+        "U2",
+        78.0,
+        6.0,
+        ["+3V3", "GND", "SCK", "MOSI", "MISO", "NSS", "BUSY", "DIO1"],
+    ));
+    board.add_footprint(module(
+        "DS1",
+        78.0,
+        46.0,
+        ["+3V3", "GND", "SDA", "SCL", "NC1", "NC2", "NC3", "NC4"],
+    ));
+    board.add_footprint(passive("R1", 6.0, 4.0, "SDA", "+3V3"));
+    board.add_footprint(passive("R2", 40.0, 50.0, "SCL", "+3V3"));
+    board.add_footprint(passive("R3", 42.0, 4.0, "SSR_LED", "GND"));
+    board.add_footprint(passive("C1", 6.0, 26.0, "+3V3", "GND"));
+    board.add_footprint(passive("C2", 80.0, 26.0, "+3V3", "GND"));
+    let mut term = passive("J1", 44.0, 26.0, "LOCK_A", "LOCK_B");
+    term.edge_mounted = true;
+    board.add_footprint(term);
+    board.add_footprint(passive("U3", 20.0, 20.0, "SSR_LED", "LOCK_A"));
+
+    let movable: Vec<String> = ["U1", "U2", "DS1", "R1", "R2", "R3", "C1", "C2", "J1", "U3"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let opts = PlaceOptions {
+        seed: 42,
+        ..PlaceOptions::default()
+    };
+    let report = place(&mut board, &movable, &opts, &MarginMap::new()).expect("place");
+
+    // Global stage must have run and produced the bulk of the gain.
+    let global = report.global.as_ref().expect("global stage should run");
+    assert!(
+        global.hpwl_mm < report.initial_hpwl_mm,
+        "global stage should cut HPWL: {:.1} → {:.1}",
+        report.initial_hpwl_mm,
+        global.hpwl_mm,
+    );
+    // End-to-end: at least a 55 % raw-HPWL reduction on this layout.
+    assert!(
+        report.final_hpwl_mm < report.initial_hpwl_mm * 0.45,
+        "expected ≥55 % HPWL cut, got {:.1} → {:.1} mm",
+        report.initial_hpwl_mm,
+        report.final_hpwl_mm,
+    );
+    // Hard solder floor: no two bodies closer than 1 mm (small epsilon
+    // for the nm→mm rounding).
+    let gap = min_pairwise_gap(&board, &MarginMap::new());
+    assert!(
+        gap >= 1.0 - 0.02,
+        "solder floor violated: min gap {gap:.3} mm"
+    );
+    // Everything inside the outline.
+    let outline = board.outline.unwrap();
+    for fp in board.footprints_in_order() {
+        let b = fp.bounds().unwrap();
+        assert!(
+            b.min.x.0 >= outline.min.x.0
+                && b.min.y.0 >= outline.min.y.0
+                && b.max.x.0 <= outline.max.x.0
+                && b.max.y.0 <= outline.max.y.0,
+            "{} left the outline",
+            fp.reference,
+        );
+    }
+    // Edge-mounted terminal still touches an edge.
+    let j1 = board
+        .footprints_in_order()
+        .find(|fp| fp.reference == "J1")
+        .unwrap()
+        .clone();
+    assert!(
+        board.edge_mount_violation(&j1).is_none(),
+        "J1 must stay on the outline edge"
+    );
+}
