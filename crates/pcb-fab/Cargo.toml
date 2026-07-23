@@ -10,7 +10,7 @@ pcb-core = { path = "../pcb-core" }
 pcb-gerber = { path = "../pcb-gerber" }
 pcb-drc = { path = "../pcb-drc" }
 pcb-erc = { path = "../pcb-erc" }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 serde = { version = "1", features = ["derive"] }
 
 [lints]
