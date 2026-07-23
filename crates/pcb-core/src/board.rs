@@ -1269,16 +1269,19 @@ impl Board {
     }
 
     /// If `probe`'s inflated body bbox extends past the board outline
-    /// on any side, return a human-readable description. This is the
-    /// universal physical-feasibility check: the part's plastic must
-    /// fit on the board. The `edge_mounted` flag does NOT exempt a
-    /// footprint here — an edge-mounted connector may have its pads
-    /// flush with the outline, but the body still has to land on
-    /// copper. The `EDGE_TOUCH_TOLERANCE_MM` tolerance (0.5 mm) is
-    /// kept so a body that just kisses the outline is not flagged.
+    /// on any side, return a human-readable description.
+    ///
+    /// **Exception — hanging modules:** if the *pad* bbox touches a
+    /// board edge (within `EDGE_TOUCH_TOLERANCE_MM`), body overhang on
+    /// *that same* edge is allowed. That covers 0.96" OLEDs, breakout
+    /// boards and similar modules whose pin header sits on the copper
+    /// while the plastic body hangs off the outline. Overhang on any
+    /// *other* edge (not backed by pads on that edge) is still an error.
+    ///
     /// Returns `None` when:
     ///   - the board has no outline yet, or
-    ///   - the inflated bbox fits within the outline (within tolerance).
+    ///   - the inflated bbox fits within the outline (within tolerance),
+    ///   - or every overshoot is on an edge the pads already touch.
     #[must_use]
     pub fn body_outline_violation(
         &self,
@@ -1292,19 +1295,37 @@ impl Board {
         let over_right = bbox.max.x.0 - outline.max.x.0;
         let over_bottom = outline.min.y.0 - bbox.min.y.0;
         let over_top = bbox.max.y.0 - outline.max.y.0;
-        let worst = over_left.max(over_right).max(over_bottom).max(over_top);
+
+        // Which edges do the *pads* already touch? Body may hang off
+        // those edges only.
+        let pad_bb = probe.bounds();
+        let (pad_left, pad_right, pad_bottom, pad_top) = if let Some(p) = pad_bb {
+            (
+                (p.min.x.0 - outline.min.x.0).abs() <= tol_nm,
+                (outline.max.x.0 - p.max.x.0).abs() <= tol_nm,
+                (p.min.y.0 - outline.min.y.0).abs() <= tol_nm,
+                (outline.max.y.0 - p.max.y.0).abs() <= tol_nm,
+            )
+        } else {
+            (false, false, false, false)
+        };
+
+        let mut worst = 0i64;
+        let mut side = "";
+        for (over, allowed, name) in [
+            (over_left, pad_left, "left"),
+            (over_right, pad_right, "right"),
+            (over_bottom, pad_bottom, "bottom"),
+            (over_top, pad_top, "top"),
+        ] {
+            if over > tol_nm && !allowed && over > worst {
+                worst = over;
+                side = name;
+            }
+        }
         if worst <= tol_nm {
             return None;
         }
-        let side = if worst == over_left {
-            "left"
-        } else if worst == over_right {
-            "right"
-        } else if worst == over_bottom {
-            "bottom"
-        } else {
-            "top"
-        };
         let mm = worst as f64 / 1_000_000.0;
         Some(format!(
             "inflated body extends {mm:.2} mm past the {side} board outline"

@@ -265,7 +265,9 @@ pub fn place(
     // (spawned before the library flag was set, or after a bad manual
     // place), every SA move that stays interior is hard-rejected and
     // they freeze off-edge forever. Snap them to the nearest edge
-    // first so the search starts in a feasible region.
+    // first so the search starts in a feasible region. Refresh
+    // `starting_positions` after the snap so "moved" is relative to
+    // the post-snap pose (the real SA baseline).
     for id in &movable_ids {
         let Some(fp) = board.footprints.get(id).cloned() else {
             continue;
@@ -280,6 +282,11 @@ pub fn place(
             if let Some(fp) = board.footprints.get_mut(id) {
                 fp.position = Point::new(fp.position.x + dx, fp.position.y + dy);
             }
+        }
+    }
+    for id in &movable_ids {
+        if let Some(fp) = board.footprints.get(id) {
+            starting_positions.insert(*id, fp.position);
         }
     }
 
@@ -339,20 +346,41 @@ pub fn place(
         let Some(fp) = board.footprints.get(&id) else {
             continue;
         };
-        let move_kind = if rng.next_u32().is_multiple_of(8) {
-            // 1/8 of the moves try a 90° rotation in place — cheap way
-            // to fix orientation without burning translation moves.
-            MoveKind::Rotate90 { footprint: id }
-        } else {
-            // Random translation within `step_mm` mm in either axis.
-            let dx_mm = (rng.next_f64() - 0.5) * 2.0 * step_mm;
-            let dy_mm = (rng.next_f64() - 0.5) * 2.0 * step_mm;
-            MoveKind::Translate {
-                footprint: id,
-                new_pos: Point::new(
-                    fp.position.x + Length::from_mm(dx_mm),
-                    fp.position.y + Length::from_mm(dy_mm),
-                ),
+        let move_kind = {
+            let roll = rng.next_u32() % 16;
+            if roll == 0 {
+                // 1/16: 90° rotation in place — cheap orientation fix.
+                MoveKind::Rotate90 { footprint: id }
+            } else if roll == 1 {
+                // 1/16: long-range teleport to a random point inside the
+                // outline. Local steps can't hop a large obstacle (OLED
+                // body, dense module clusters): every intermediate cell
+                // that collides is hard-rejected, so a part trapped in a
+                // pocket freezes there forever. Teleports let SA escape.
+                let ow = outline.width().to_mm();
+                let oh = outline.height().to_mm();
+                let margin = 2.0; // keep away from the absolute edge
+                let x = outline.min.x.to_mm()
+                    + margin
+                    + rng.next_f64() * (ow - 2.0 * margin).max(0.0);
+                let y = outline.min.y.to_mm()
+                    + margin
+                    + rng.next_f64() * (oh - 2.0 * margin).max(0.0);
+                MoveKind::Translate {
+                    footprint: id,
+                    new_pos: Point::new(Length::from_mm(x), Length::from_mm(y)),
+                }
+            } else {
+                // Local translation within `step_mm` mm in either axis.
+                let dx_mm = (rng.next_f64() - 0.5) * 2.0 * step_mm;
+                let dy_mm = (rng.next_f64() - 0.5) * 2.0 * step_mm;
+                MoveKind::Translate {
+                    footprint: id,
+                    new_pos: Point::new(
+                        fp.position.x + Length::from_mm(dx_mm),
+                        fp.position.y + Length::from_mm(dy_mm),
+                    ),
+                }
             }
         };
 
@@ -360,8 +388,20 @@ pub fn place(
         // check constraints. Reject hard violations outright.
         let (probe, original_position, original_rotation) = make_probe(board, &move_kind);
         let Some(probe) = probe else { continue };
-        if !inside_outline(&probe, outline, margins) {
+        // Pads must stay on copper (inside the outline). The plastic
+        // body may hang off an edge whose pads already touch that
+        // edge — same rule as place/move/DRC (`body_outline_violation`)
+        // so an OLED / breakout can sit header-on-board, body off-edge.
+        if !pads_inside_outline(&probe, outline) {
             continue;
+        }
+        {
+            let margin = margin_for_fp(&probe, margins);
+            // Synthesize a temporary board view: body_outline_violation
+            // only needs `outline` + the probe footprint's geometry.
+            if board.body_outline_violation(&probe, margin).is_some() {
+                continue;
+            }
         }
         // Hard clearance: never accept a move that leaves the moved
         // footprint closer than the hard floor to any other body — so the
@@ -832,14 +872,31 @@ fn would_overlap(
 /// inside `outline`. The margin pushes a part off the edge if it has
 /// `top_mm`/etc. set — useful for connectors that need clearance from
 /// the cut line.
-fn inside_outline(probe: &Footprint, outline: pcb_core::Rect, margins: &MarginMap) -> bool {
-    let Some(b) = fp_bounds_with_margin(probe, margins) else {
+/// Pads fully on-board (no pad copper past the outline).
+fn pads_inside_outline(probe: &Footprint, outline: pcb_core::Rect) -> bool {
+    let Some(b) = probe.bounds() else {
         return false;
     };
     b.min.x.0 >= outline.min.x.0
         && b.min.y.0 >= outline.min.y.0
         && b.max.x.0 <= outline.max.x.0
         && b.max.y.0 <= outline.max.y.0
+}
+
+/// Library placement margin for a probe footprint, if any.
+fn margin_for_fp(
+    probe: &Footprint,
+    margins: &MarginMap,
+) -> pcb_core::PlacementMargin {
+    match margins.get(&probe.id) {
+        Some([t, r, b, l]) => pcb_core::PlacementMargin {
+            top_mm: *t,
+            right_mm: *r,
+            bottom_mm: *b,
+            left_mm: *l,
+        },
+        None => pcb_core::PlacementMargin::default(),
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -677,12 +677,8 @@ fn check_body_off_board(board: &Board, outline: Rect, opts: &DrcOptions, report:
     if opts.placement_margins.is_empty() {
         return;
     }
+    let _ = outline; // used inside board.body_outline_violation
     for fp in board.footprints_in_order() {
-        // NOTE: `edge_mounted` is NOT an exception here. A connector
-        // whose pads touch the outline is fine, but the part's plastic
-        // body still has to fit inside the board — there is no scenario
-        // where a physical component can hang in mid-air past the cut
-        // line.
         let margin = margin_for(opts, fp);
         // No margin → fall back to the existing edge-clearance check on
         // raw pads; no point re-flagging an unannotated footprint as
@@ -690,38 +686,20 @@ fn check_body_off_board(board: &Board, outline: Rect, opts: &DrcOptions, report:
         if margin.is_zero() {
             continue;
         }
+        // Shared rule with place/move: body may hang off an edge whose
+        // pads already touch that edge (OLED / breakout modules).
+        let Some(reason) = board.body_outline_violation(fp, margin) else {
+            continue;
+        };
         let Some(bbox) = fp.inflated_bbox(margin) else {
             continue;
         };
-        let over_left = outline.min.x.0 - bbox.min.x.0;
-        let over_right = bbox.max.x.0 - outline.max.x.0;
-        let over_bottom = outline.min.y.0 - bbox.min.y.0;
-        let over_top = bbox.max.y.0 - outline.max.y.0;
-        let worst = over_left.max(over_right).max(over_bottom).max(over_top);
-        // Allow up to 0.5 mm of overhang — same tolerance the placement
-        // APIs use so a body that just kisses the outline isn't flagged.
-        if worst <= 500_000 {
-            continue;
-        }
-        let side = if worst == over_left {
-            "left"
-        } else if worst == over_right {
-            "right"
-        } else if worst == over_bottom {
-            "bottom"
-        } else {
-            "top"
-        };
-        let mm = worst as f64 / 1_000_000.0;
         let cx = f64::midpoint(bbox.min.x.to_mm(), bbox.max.x.to_mm());
         let cy = f64::midpoint(bbox.min.y.to_mm(), bbox.max.y.to_mm());
         report.push(Violation {
             kind: ViolationKind::BodyOffBoard,
             severity: Severity::Error,
-            message: format!(
-                "{} body extends {mm:.2} mm past the {side} board outline",
-                fp.reference
-            ),
+            message: format!("{} {reason}", fp.reference),
             x_mm: cx,
             y_mm: cy,
             involved: vec![fp.reference.clone()],

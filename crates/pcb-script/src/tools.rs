@@ -3527,22 +3527,27 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
     let report = pcb_placer::place(&mut work, &input.refs, &opts, &margins)
         .map_err(|e| ToolError::invalid_params(format!("auto-place: {e}")))?;
 
-    // Push back any positions / rotations that actually changed. We
-    // use the id-based, unchecked Project APIs (`move_footprint` /
-    // `set_footprint_rotation`) instead of the ref-based, validated
-    // ones: the placer's FINAL state is consistent, but applying move
-    // by move re-validates each intermediate state against the LIVE
-    // project, which falsely rejects a step when two parts cross paths
-    // mid-batch. The id-based path skips the re-check.
+    // Push the placer's FINAL state back onto the live project for
+    // every movable ref — not only `report.moved`. The report's moved
+    // list compares against pre-snap starting positions and can miss
+    // real SA improvements (or under-report after edge snaps). Applying
+    // every final pose is idempotent when nothing changed and is the
+    // only way the agent sees the full result. Use the id-based,
+    // unchecked Project APIs so intermediate crossings don't false-reject.
     let mut applied_moves = 0usize;
     let mut applied_rotations = 0usize;
-    let live_id_of_ref: HashMap<String, pcb_core::Id> = project
+    let live_by_ref: HashMap<String, (pcb_core::Id, pcb_core::Point, f32)> = project
         .read()
         .board()
         .footprints_in_order()
-        .map(|fp| (fp.reference.clone(), fp.id))
+        .map(|fp| {
+            (
+                fp.reference.clone(),
+                (fp.id, fp.position, fp.rotation),
+            )
+        })
         .collect();
-    for r in &report.moved {
+    for r in &input.refs {
         let Some(target) = work
             .footprints_in_order()
             .find(|fp| &fp.reference == r)
@@ -3550,13 +3555,17 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
         else {
             continue;
         };
-        let Some(&id) = live_id_of_ref.get(r) else {
+        let Some(&(id, live_pos, live_rot)) = live_by_ref.get(r) else {
             continue;
         };
-        if project.move_footprint(id, target.position) {
+        let pos_changed = (target.position.x.to_mm() - live_pos.x.to_mm()).abs()
+            + (target.position.y.to_mm() - live_pos.y.to_mm()).abs()
+            >= 0.01;
+        let rot_changed = (target.rotation - live_rot).abs() > 0.5;
+        if pos_changed && project.move_footprint(id, target.position) {
             applied_moves += 1;
         }
-        if project.set_footprint_rotation(id, target.rotation) {
+        if rot_changed && project.set_footprint_rotation(id, target.rotation) {
             applied_rotations += 1;
         }
     }

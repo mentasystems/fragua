@@ -76,10 +76,11 @@ fn placer_reduces_hpwl_on_two_far_apart_resistors() {
         report.final_hpwl_mm,
     );
     // With only one floating net and a clear board, SA usually gets to
-    // within a few mm of zero.
+    // within a few mm of zero. HPWL is *weighted* (2-pin nets ×4), so
+    // a 2 mm residual is reported as ~8 weighted-mm — allow headroom.
     assert!(
-        report.final_hpwl_mm < 10.0,
-        "SA didn't converge: HPWL {:.2} mm > 10 mm",
+        report.final_hpwl_mm < 40.0,
+        "SA didn't converge: weighted HPWL {:.2} mm > 40",
         report.final_hpwl_mm,
     );
     // R1 and R2 are both on the same net so both should have moved.
@@ -205,4 +206,96 @@ fn pinned_footprints_do_not_move() {
         .unwrap();
     assert_eq!(r1_before.x.0, r1_after.x.0);
     assert_eq!(r1_before.y.0, r1_after.y.0);
+}
+
+
+/// A 2-pin series resistor between two distant chips must be pulled
+/// toward the segment joining them. Regression for door-board R3
+/// (SSR LED series) freezing far from both ends of its net.
+#[test]
+fn series_resistor_pulled_toward_its_nets() {
+    let mut board = Board::new();
+    board.outline = Some(Rect::from_corners(
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+        Point::new(Length::from_mm(100.0), Length::from_mm(40.0)),
+    ));
+
+    // U1 left drives DRV; U3 right sinks LED; R3 series between them.
+    board.add_footprint(footprint(
+        "U1",
+        10.0,
+        20.0,
+        vec![
+            pad("1", -2.0, 0.0, Some("GND")),
+            pad("2", 2.0, 0.0, Some("DRV")),
+        ],
+    ));
+    board.add_footprint(footprint(
+        "U3",
+        90.0,
+        20.0,
+        vec![
+            pad("1", -2.0, 0.0, Some("LED")),
+            pad("2", 2.0, 0.0, Some("GND")),
+        ],
+    ));
+    // Stranded at the top, far from the U1–U3 line at y=20.
+    board.add_footprint(footprint(
+        "R3",
+        50.0,
+        35.0,
+        vec![
+            pad("1", -1.6, 0.0, Some("DRV")),
+            pad("2", 1.6, 0.0, Some("LED")),
+        ],
+    ));
+
+    let r3_before_y = board
+        .footprints_in_order()
+        .find(|f| f.reference == "R3")
+        .unwrap()
+        .position
+        .y
+        .to_mm();
+
+    let opts = PlaceOptions {
+        max_iterations: 15000,
+        seed: 7,
+        min_gap_mm: 1.5,
+        gap_penalty_factor: 1.0,
+        congestion_penalty_factor: 0.0,
+        congestion_resolution: 0,
+        max_step_mm: 25.0,
+        ..PlaceOptions::default()
+    };
+    let report = place(
+        &mut board,
+        &["R3".to_string()],
+        &opts,
+        &MarginMap::new(),
+    )
+    .expect("placer should succeed");
+
+    assert!(
+        report.final_hpwl_mm < report.initial_hpwl_mm - 5.0,
+        "expected clear HPWL drop, got {:.1} → {:.1}",
+        report.initial_hpwl_mm,
+        report.final_hpwl_mm,
+    );
+
+    let r3_after = board
+        .footprints_in_order()
+        .find(|f| f.reference == "R3")
+        .unwrap()
+        .position;
+    assert!(
+        r3_after.y.to_mm() < r3_before_y - 5.0,
+        "R3 should move toward the U1–U3 segment at y=20: before y={r3_before_y:.1}, after y={:.1}",
+        r3_after.y.to_mm()
+    );
+    assert!(
+        report.moved.contains(&"R3".to_string()),
+        "R3 must be reported as moved, got {:?}",
+        report.moved
+    );
 }
