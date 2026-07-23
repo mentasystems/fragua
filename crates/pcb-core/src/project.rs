@@ -419,6 +419,18 @@ impl Project {
         moved
     }
 
+    /// Sync the `edge_mounted` flag on a placed footprint (e.g. after
+    /// the library entry is flipped). No geometry check — just the flag.
+    pub fn set_footprint_edge_mounted(&self, id: Id, edge_mounted: bool) -> bool {
+        let mut inner = self.inner.write().expect("project lock poisoned");
+        if let Some(fp) = inner.board.footprints.get_mut(&id) {
+            fp.edge_mounted = edge_mounted;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Set a footprint's rotation by id, bypassing the overlap and
     /// edge-mount probe that `rotate_footprint` runs. Used by trusted
     /// callers (the auto-placer) that have already validated the full

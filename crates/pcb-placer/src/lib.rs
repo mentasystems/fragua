@@ -167,14 +167,16 @@ impl Default for PlaceOptions {
             // footprints without DRC pad-pad clearance violations on
             // the typical 0.2 mm clearance.
             min_gap_mm: 2.0,
-            // 0.5 mm hard margin between any two component bodies — never
-            // violated by the placer. JLCPCB's component-to-component
-            // recommendation is ~0.5 mm; smaller risks placement/assembly.
+            // 0.5 mm fab-style hard margin between any two component
+            // bodies. JLCPCB's component-to-component recommendation is
+            // ~0.5 mm; smaller risks placement/assembly. Overridden
+            // upward by `solder_gap_mm` for hand-soldering.
             min_clearance_mm: 0.5,
-            // 1.0 mm hand-soldering access gap — the real hard floor. Parts
-            // must never end up nearly touching: the user needs iron-tip
-            // room between bodies. Overrides min_clearance_mm upward.
-            solder_gap_mm: 1.0,
+            // Hand-soldering access floor — must match
+            // `pcb_core::MIN_FOOTPRINT_GAP_MM` so place/move/rotate and
+            // auto-place/compact agree. Parts must never end up nearly
+            // touching: the user needs iron-tip room between bodies.
+            solder_gap_mm: pcb_core::MIN_FOOTPRINT_GAP_MM,
             // Steep enough that SA reliably enforces `min_gap_mm` on
             // small nets — a 1 mm shortfall on one pair costs
             // 16 mm-equivalent of HPWL, well above the noise floor.
@@ -256,6 +258,29 @@ pub fn place(
             moved: Vec::new(),
             skipped,
         });
+    }
+
+    // Edge-mounted connectors (screw terminals, USB modules, headers…)
+    // must sit on the outline. If they start floating in the middle
+    // (spawned before the library flag was set, or after a bad manual
+    // place), every SA move that stays interior is hard-rejected and
+    // they freeze off-edge forever. Snap them to the nearest edge
+    // first so the search starts in a feasible region.
+    for id in &movable_ids {
+        let Some(fp) = board.footprints.get(id).cloned() else {
+            continue;
+        };
+        if !fp.edge_mounted {
+            continue;
+        }
+        if board.edge_mount_violation(&fp).is_none() {
+            continue;
+        }
+        if let Some((dx, dy)) = snap_delta_to_nearest_edge(&fp, outline) {
+            if let Some(fp) = board.footprints.get_mut(id) {
+                fp.position = Point::new(fp.position.x + dx, fp.position.y + dy);
+            }
+        }
     }
 
     // Net membership: for each movable footprint, which nets does it
@@ -455,9 +480,17 @@ pub fn place(
     })
 }
 
-/// Sum of HPWL across every multi-pad net on the board, mm.
+/// Sum of **weighted** HPWL across every multi-pad net on the board, mm.
+///
+/// Weight is `1 / max(1, n_pads - 1)` (classic clique model). Without
+/// this, fat power nets (`+3V3`, `GND` with 7–15 pads) dominate the SA
+/// score and a 2-pin series resistor like an SSR LED series R can be
+/// left 40 mm from both of its neighbours while the placer chases
+/// millimetres on the power plane. With the weight, a 2-pin net at
+/// 50 mm costs the same as a 20-pin net at ~950 mm — short nets pull
+/// their components into clusters.
 fn total_hpwl(board: &Board) -> f64 {
-    let mut nets: HashMap<&str, [f64; 4]> = HashMap::new();
+    let mut nets: HashMap<&str, ([f64; 4], usize)> = HashMap::new();
     for fp in board.footprints.values() {
         for pad in &fp.pads {
             let Some(net) = pad.net.as_deref() else {
@@ -466,25 +499,42 @@ fn total_hpwl(board: &Board) -> f64 {
             let center = fp.pad_world_center(pad);
             let x = center.x.to_mm();
             let y = center.y.to_mm();
-            let entry = nets.entry(net).or_insert([
-                f64::INFINITY,
-                f64::INFINITY,
-                f64::NEG_INFINITY,
-                f64::NEG_INFINITY,
-            ]);
-            entry[0] = entry[0].min(x);
-            entry[1] = entry[1].min(y);
-            entry[2] = entry[2].max(x);
-            entry[3] = entry[3].max(y);
+            let entry = nets.entry(net).or_insert((
+                [
+                    f64::INFINITY,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                ],
+                0,
+            ));
+            entry.0[0] = entry.0[0].min(x);
+            entry.0[1] = entry.0[1].min(y);
+            entry.0[2] = entry.0[2].max(x);
+            entry.0[3] = entry.0[3].max(y);
+            entry.1 += 1;
         }
     }
     nets.values()
-        .filter(|b| b[2] >= b[0] && b[3] >= b[1])
-        .map(|b| (b[2] - b[0]) + (b[3] - b[1]))
+        .filter(|(b, count)| *count >= 2 && b[2] >= b[0] && b[3] >= b[1])
+        .map(|(b, count)| {
+            let raw = (b[2] - b[0]) + (b[3] - b[1]);
+            raw * net_weight(*count)
+        })
         .sum()
 }
 
-/// HPWL of a single net, mm. Returns 0 if the net has 0 or 1 pads.
+/// Weight for a net with `n_pads` pads. See `total_hpwl`.
+///
+/// Base clique weight is `1/(n-1)`. Multiplied by 4 so two-pin nets
+/// (series R, LED, SSR LED drive…) pull their ends together hard
+/// enough to beat residual fat-net / congestion noise on typical
+/// IoT boards.
+fn net_weight(n_pads: usize) -> f64 {
+    4.0 / (n_pads.saturating_sub(1).max(1) as f64)
+}
+
+/// Weighted HPWL of a single net, mm. Returns 0 if the net has 0 or 1 pads.
 fn net_hpwl(board: &Board, net: &str) -> f64 {
     let mut min_x = f64::INFINITY;
     let mut min_y = f64::INFINITY;
@@ -509,7 +559,33 @@ fn net_hpwl(board: &Board, net: &str) -> f64 {
     if count < 2 {
         return 0.0;
     }
-    (max_x - min_x) + (max_y - min_y)
+    ((max_x - min_x) + (max_y - min_y)) * net_weight(count)
+}
+
+/// Translation that moves `fp` so its pad bbox touches the nearest side
+/// of `outline`. Used to un-stick edge-mounted parts that spawned
+/// interior before the SA loop starts.
+fn snap_delta_to_nearest_edge(
+    fp: &Footprint,
+    outline: pcb_core::Rect,
+) -> Option<(Length, Length)> {
+    let b = fp.bounds()?;
+    let d_left = (b.min.x.0 - outline.min.x.0).abs();
+    let d_right = (outline.max.x.0 - b.max.x.0).abs();
+    let d_bottom = (b.min.y.0 - outline.min.y.0).abs();
+    let d_top = (outline.max.y.0 - b.max.y.0).abs();
+    let nearest = d_left.min(d_right).min(d_bottom).min(d_top);
+    let (mut dx, mut dy) = (Length::ZERO, Length::ZERO);
+    if nearest == d_left {
+        dx = outline.min.x - b.min.x;
+    } else if nearest == d_right {
+        dx = outline.max.x - b.max.x;
+    } else if nearest == d_bottom {
+        dy = outline.min.y - b.min.y;
+    } else {
+        dy = outline.max.y - b.max.y;
+    }
+    Some((dx, dy))
 }
 
 /// Routing-congestion proxy: rasterise every net's pad bounding box

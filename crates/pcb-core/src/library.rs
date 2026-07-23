@@ -818,6 +818,23 @@ impl Library {
         Ok(true)
     }
 
+    /// Set whether footprints spawned from this entry must sit on the
+    /// board outline (screw terminals, USB modules, edge headers…).
+    /// Returns `true` if the entry was found. Already-placed footprints
+    /// keep their baked `edge_mounted` flag until re-spawned or the
+    /// auto-placer re-syncs from the library.
+    pub fn set_edge_mounted(&self, key: &str, edge_mounted: bool) -> Result<bool, String> {
+        let mut inner = self.inner.write().expect("library lock poisoned");
+        let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) else {
+            return Err(format!("library: no entry with key {key}"));
+        };
+        entry.edge_mounted = edge_mounted;
+        let snapshot = inner.clone();
+        drop(inner);
+        self.save(&snapshot)?;
+        Ok(true)
+    }
+
     /// Store (or overwrite) the two-point photo calibration on one
     /// attachment. Returns `true` if the attachment was found.
     pub fn set_photo_calibration(

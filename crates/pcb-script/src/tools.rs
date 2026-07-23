@@ -184,6 +184,10 @@ LIBRARY (build first, reuse forever):\n\
                                                  from square is reported — > 2° means the corners or\n\
                                                  their order are wrong). Rectified attachments take\n\
                                                  priority over plain photos in the board overlay.\n\
+  edge-mount KEY true|false                    — library entry must sit on board outline\n\
+                                                 (screw terminals, USB modules, edge headers).\n\
+                                                 auto-place re-syncs placed footprints from this\n\
+                                                 flag and snaps them to the nearest edge.\n\
   body-rect KEY MINX MINY MAXX MAXY            — physical module body in footprint-local mm (Y-up,\n\
                                                  same frame as `pad`). Stores the body rect AND\n\
                                                  auto-derives the per-side placement margin (how far\n\
@@ -365,7 +369,7 @@ VALIDATION / EXPORT:\n\
 - The result is per-line; if line N fails, lines N+1..end still run.\n\
 - For a single action, send a one-line script.\n\
 - Order matters: lib before palette, sym before net, palette before place, place before route.\n\
-- Footprints need ≥0.5 mm body-to-body gap (enforced); edge-mounted parts must touch the outline.\n\
+- Footprints need ≥1.0 mm body-to-body gap (hand-solder floor, same as auto-place solder_gap); edge-mounted parts must touch the outline.\n\
 \n\
 === DESIGN STRATEGY (how to fix things) ===\n\
 The pipeline runs ERC → placement → routing → DRC. Each layer catches\n\
@@ -456,6 +460,7 @@ pub async fn dispatch(project: &Project, name: &str, args: &Value) -> Result<Val
         "library.calibrate_photo" => tool_library_calibrate_photo(project, args),
         "library.rectify_photo" => tool_library_rectify_photo(project, args),
         "library.set_body_rect" => tool_library_set_body_rect(project, args),
+        "library.set_edge_mounted" => tool_library_set_edge_mounted(project, args),
         "library.delete_attachment" => tool_library_delete_attachment(project, args),
         "library.delete" => tool_library_delete(project, args),
         "placement.place_from_palette" => tool_place_from_palette(project, args),
@@ -2344,6 +2349,33 @@ struct LibrarySetBodyRectInput {
     clear: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct LibrarySetEdgeMountedInput {
+    key: String,
+    edge_mounted: bool,
+}
+
+fn tool_library_set_edge_mounted(project: &Project, args: &Value) -> Result<Value, ToolError> {
+    let input: LibrarySetEdgeMountedInput = serde_json::from_value(args.clone())
+        .map_err(|e| ToolError::invalid_params(format!("edge-mount: {e}")))?;
+    ensure_confirmed(project, "edge-mount", &input.key)?;
+    project
+        .library()
+        .set_edge_mounted(&input.key, input.edge_mounted)
+        .map_err(ToolError::invalid_params)?;
+    project.notify_library_changed();
+    let msg = format!(
+        "edge-mount on {}: {}",
+        input.key,
+        if input.edge_mounted { "true" } else { "false" }
+    );
+    project.log(ActivityLevel::Info, msg.clone());
+    Ok(text_result(msg).with_data(json!({
+        "key": input.key,
+        "edge_mounted": input.edge_mounted,
+    })))
+}
+
 fn tool_library_set_body_rect(project: &Project, args: &Value) -> Result<Value, ToolError> {
     let input: LibrarySetBodyRectInput = serde_json::from_value(args.clone())
         .map_err(|e| ToolError::invalid_params(format!("body-rect: {e}")))?;
@@ -3449,6 +3481,32 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
     // the resulting positions back through the regular `move_footprint_to`
     // / `rotate_footprint` APIs so the UI sees the moves event by event.
     let mut work = project.read().board().clone();
+    // Re-sync `edge_mounted` from the live library onto every
+    // footprint that has a library key. Footprints bake the flag at
+    // palette-spawn time; if the library entry is later flipped to
+    // edge-mounted (e.g. screw terminals), already-placed parts would
+    // otherwise keep floating interior forever. Also push the flag
+    // back onto the live project so compact / DRC see it.
+    {
+        let lib = project.library();
+        let mut live_updates: Vec<(pcb_core::Id, bool)> = Vec::new();
+        for fp in work.footprints.values_mut() {
+            if fp.key.is_empty() {
+                continue;
+            }
+            let Some(entry) = lib.find(&fp.key) else {
+                continue;
+            };
+            if fp.edge_mounted != entry.edge_mounted {
+                fp.edge_mounted = entry.edge_mounted;
+                live_updates.push((fp.id, entry.edge_mounted));
+            }
+        }
+        drop(lib);
+        for (id, flag) in live_updates {
+            project.set_footprint_edge_mounted(id, flag);
+        }
+    }
     // Build a per-id margin map from the library so footprints linked
     // to a `LibraryEntry::placement_margin` get extra body-to-body
     // breathing room during the SA search.
@@ -3621,8 +3679,31 @@ fn tool_compact_run(project: &Project, args: &Value) -> Result<Value, ToolError>
         }
     }
 
-    // Work on a clone so the project lock is released quickly.
-    let board = project.read().board().clone();
+    // Work on a clone so the project lock is released quickly. Re-sync
+    // edge_mounted from the library first (same as auto-place) so a
+    // screw terminal flipped to edge-mounted in the library still
+    // snaps to the outline during compaction.
+    let mut board = project.read().board().clone();
+    {
+        let lib = project.library();
+        let mut live_updates: Vec<(pcb_core::Id, bool)> = Vec::new();
+        for fp in board.footprints.values_mut() {
+            if fp.key.is_empty() {
+                continue;
+            }
+            let Some(entry) = lib.find(&fp.key) else {
+                continue;
+            };
+            if fp.edge_mounted != entry.edge_mounted {
+                fp.edge_mounted = entry.edge_mounted;
+                live_updates.push((fp.id, entry.edge_mounted));
+            }
+        }
+        drop(lib);
+        for (id, flag) in live_updates {
+            project.set_footprint_edge_mounted(id, flag);
+        }
+    }
     let schematic = {
         let snap = project.read();
         std::sync::Arc::new(snap.schematic().clone())

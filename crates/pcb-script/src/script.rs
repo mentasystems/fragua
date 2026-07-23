@@ -74,6 +74,7 @@ pub(crate) const VERBS: &[&str] = &[
     "calibrate-photo",
     "rectify-photo",
     "body-rect",
+    "edge-mount",
     "find-lib",
     "list-lib",
     "delete-lib",
@@ -1103,6 +1104,29 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                     }),
                 })
             }
+        }
+
+        "edge-mount" => {
+            // edge-mount KEY true|false|yes|no|1|0
+            // Marks a library entry as edge-mounted so place / auto-place
+            // / compact keep its pads on the board outline (screw
+            // terminals, USB modules, headers…).
+            need_args(line, tokens, 2, "edge-mount KEY true|false")?;
+            let flag = match tokens[2].to_ascii_lowercase().as_str() {
+                "true" | "yes" | "1" | "on" => true,
+                "false" | "no" | "0" | "off" => false,
+                other => {
+                    return Err(ParseError::at(
+                        line,
+                        format!("edge-mount: expected true|false, got `{other}`"),
+                    ));
+                }
+            };
+            Ok(Cmd {
+                line,
+                tool: "library.set_edge_mounted".into(),
+                args: json!({ "key": tokens[1], "edge_mounted": flag }),
+            })
         }
 
         "palette" => {

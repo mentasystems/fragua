@@ -1049,11 +1049,19 @@ fn is_zero_length(v: &Length) -> bool {
     v.0 == 0
 }
 
-/// Minimum body-to-body clearance between two footprints (mm). Anything
-/// closer than this can't be hand-soldered or reworked without disturbing
-/// the neighbour, so the placement APIs reject overlapping placements
-/// down to this gap.
-const MIN_FOOTPRINT_GAP_MM: f64 = 0.5;
+/// Minimum body-to-body clearance between two footprints (mm).
+///
+/// Enforced by `place` / `move` / `rotate` via `first_overlapper` and
+/// `first_body_overlapper`. Must match the auto-placer / compact default
+/// `solder_gap_mm` (1.0 mm): the user hand-solders and needs iron-tip
+/// access between parts. Pad-only footprints (no `body_rect`) use the
+/// pad AABB as the body, so two 1206 resistors need ≥ 1 mm between pad
+/// hulls — not the old 0.5 mm which still looked "touching" on screen
+/// and left no soldering room.
+///
+/// Keep this in lock-step with `pcb_placer::PlaceOptions::solder_gap_mm`
+/// default; if one changes, change the other.
+pub const MIN_FOOTPRINT_GAP_MM: f64 = 1.0;
 
 /// Tolerance (mm) for "this footprint touches the outline" — bigger
 /// than the trace clearance default so rounding doesn't reject borderline
@@ -1221,18 +1229,20 @@ impl Board {
     }
 
     /// Reference of the first board footprint whose **inflated body
-    /// bbox** (pads + the library-authored placement margin) intersects
-    /// `probe`'s inflated body bbox, or `None` if clear. `ignore_id`
-    /// skips a single footprint (same use as `first_overlapper`).
-    /// `margin_for` resolves a footprint's library margin — typically
+    /// bbox** (pads + the library-authored placement margin, then
+    /// expanded by `MIN_FOOTPRINT_GAP_MM / 2` on every side) intersects
+    /// `probe`'s similarly expanded body bbox, or `None` if clear.
+    /// `ignore_id` skips a single footprint (same use as
+    /// `first_overlapper`). `margin_for` resolves a footprint's library
+    /// margin — typically
     /// `|fp| library.find(&fp.key).map(|e| e.placement_margin).unwrap_or_default()`.
     ///
-    /// Unlike `first_overlapper`, this does NOT add the
-    /// `MIN_FOOTPRINT_GAP_MM` half-gap: the margin itself is the user's
-    /// declared keep-out, and stacking the two would double-reject
-    /// borderline-but-intended placements. The hard pad-overlap check
-    /// from `first_overlapper` is still applied separately by the
-    /// placement APIs, so pad-on-pad shorts remain rejected.
+    /// The solder-access half-gap is applied on top of the body margin so
+    /// modules with a real `body_rect` (ESP, LoRa, OLED…) also keep ≥
+    /// `MIN_FOOTPRINT_GAP_MM` of free space between plastic bodies — the
+    /// same floor the auto-placer enforces via `solder_gap_mm`. Pad-only
+    /// footprints (zero margin) fall back to the same geometry as
+    /// `first_overlapper`.
     #[must_use]
     pub fn first_body_overlapper<F>(
         &self,
@@ -1243,13 +1253,14 @@ impl Board {
     where
         F: Fn(&Footprint) -> crate::library::PlacementMargin,
     {
-        let probe_bounds = probe.inflated_bbox(margin_for(probe))?;
+        let half_gap = Length::from_mm(MIN_FOOTPRINT_GAP_MM / 2.0);
+        let probe_bounds = probe.inflated_bbox(margin_for(probe))?.expand(half_gap);
         for fp in self.footprints_in_order() {
             if Some(fp.id) == ignore_id {
                 continue;
             }
             if let Some(b) = fp.inflated_bbox(margin_for(fp)) {
-                if probe_bounds.intersects(&b) {
+                if probe_bounds.intersects(&b.expand(half_gap)) {
                     return Some(fp.reference.clone());
                 }
             }
@@ -1795,5 +1806,35 @@ mod tests {
         assert_eq!(bb.max.x.0, raw.max.x.0);
         assert_eq!(bb.min.y.0, raw.min.y.0);
         assert_eq!(bb.max.y.0, raw.max.y.0);
+    }
+
+    /// place/move hard floor: two pad-only footprints closer than
+    /// `MIN_FOOTPRINT_GAP_MM` between pad AABBs must be rejected.
+    /// Regression for R1/R2-style 1206 pairs that used to sit at 0.8 mm
+    /// pad-edge gap (allowed under the old 0.5 mm floor) and looked
+    /// "touching" on the board view.
+    #[test]
+    fn first_overlapper_enforces_solder_access_gap() {
+        let mut board = Board::new();
+        // Two-pad fp: pads at local ±1.0 → pad AABB width 2.5 mm
+        // (outer edges at ±1.25). Centres dx mm apart → pad-edge gap
+        // = dx - 2.5.
+        let a = make_two_pad_fp(Point::new(Length::from_mm(0.0), Length::from_mm(0.0)), 0.0);
+        let mut b = make_two_pad_fp(Point::new(Length::from_mm(0.0), Length::from_mm(0.0)), 0.0);
+        b.reference = "B".into();
+        b.id = Id::new();
+        // gap = 0.8 mm (< 1.0) → must reject
+        b.position = Point::new(Length::from_mm(3.3), Length::from_mm(0.0));
+        board.add_footprint(a);
+        assert!(
+            board.first_overlapper(&b, None).is_some(),
+            "0.8 mm pad-edge gap must be rejected (solder floor is 1.0 mm)"
+        );
+        // gap = 1.2 mm (> 1.0) → must accept
+        b.position = Point::new(Length::from_mm(3.7), Length::from_mm(0.0));
+        assert!(
+            board.first_overlapper(&b, None).is_none(),
+            "1.2 mm pad-edge gap must be accepted"
+        );
     }
 }
