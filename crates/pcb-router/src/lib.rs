@@ -16,9 +16,11 @@ mod escape;
 mod fanout;
 mod grid;
 mod length_match;
+mod organic;
 mod router;
 mod stitching;
 
 pub use length_match::{length_match_pass, LengthAdjustment};
+pub use organic::{OrganicOptions, OrganicReport};
 pub use router::{route, NetOverride, Outcome, RouteOptions, RouteReport};
 pub use stitching::add_stitching_vias;

@@ -45,6 +45,12 @@ pub struct RouteOptions {
     /// clone and keeps the router lock-free with respect to the
     /// schematic.
     pub schematic: Option<Arc<Schematic>>,
+    /// Run the organic post-pass (string-pulling + arc fillets) on the
+    /// routed copper. DRC-neutral by construction — every rewrite is
+    /// clearance-checked before being accepted. See `organic.rs`.
+    pub organic: bool,
+    /// Largest fillet radius the organic pass attempts, mm.
+    pub organic_fillet_mm: f64,
     /// If `Some`, use this exact net order as the first-pass ordering instead
     /// of the built-in "fewest pads first" heuristic. Net names not present
     /// in the board are silently dropped; nets in the board but missing from
@@ -87,6 +93,8 @@ impl Default for RouteOptions {
             via_diameter: Length::from_mm(0.6),
             net_overrides: HashMap::new(),
             schematic: None,
+            organic: true,
+            organic_fillet_mm: 3.0,
             initial_net_order: None,
             heuristic_weight: 1.0,
         }
@@ -124,7 +132,7 @@ pub fn is_power_net(net: &str) -> bool {
 /// last: a power rail that resolved to the bare global default is widened
 /// to the floor, while a net that explicitly asked for a specific width
 /// (via a class or override) keeps it.
-fn effective_net_rules(opts: &RouteOptions, net: &str) -> (Length, Length) {
+pub(crate) fn effective_net_rules(opts: &RouteOptions, net: &str) -> (Length, Length) {
     // `explicit` tracks whether the width came from a real class/override
     // (respect it) or fell through to the global default (floor it).
     let (mut w, c, explicit_width) = {
@@ -227,6 +235,9 @@ pub struct RouteReport {
     /// to fix the still-failing nets. Generated post-hoc from the best
     /// report — empty when every net routed.
     pub hints: Vec<String>,
+    /// What the organic post-pass did; `None` when disabled or nothing
+    /// was routed.
+    pub organic: Option<crate::organic::OrganicReport>,
 }
 
 /// Hard cap on rip-up-and-reroute passes. Each pass clears all routing
@@ -310,6 +321,7 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
             total_lower_bound_mm: 0.0,
             iterations: 0,
             hints: Vec::new(),
+            organic: None,
         };
     }
 
@@ -531,9 +543,37 @@ pub fn route(board: &mut Board, opts: &RouteOptions) -> RouteReport {
         board.add_trace(stub.clone());
     }
     // Post-passes: auto-stitching vias for pours with a Grid policy,
-    // then length matching for nets that ask for it. Length matching
-    // requires a schematic (it's the source of target lengths).
+    // then the organic smoothing pass (BEFORE length matching, so the
+    // meander tuner works on — and re-tunes — the final geometry), then
+    // length matching for nets that ask for it.
     crate::stitching::add_stitching_vias(board, opts);
+    if opts.organic {
+        let org_opts = crate::organic::OrganicOptions {
+            max_fillet_radius_mm: opts.organic_fillet_mm,
+            ..crate::organic::OrganicOptions::default()
+        };
+        let org = crate::organic::organic_pass(board, &org_opts, opts, effective_net_rules);
+        if org.chains > 0 {
+            // Refresh per-net and total lengths from the smoothed copper.
+            let mut net_len: HashMap<&str, f64> = HashMap::new();
+            for t in &board.traces {
+                let dx = t.start.x.to_mm() - t.end.x.to_mm();
+                let dy = t.start.y.to_mm() - t.end.y.to_mm();
+                *net_len.entry(t.net.as_str()).or_default() += (dx * dx + dy * dy).sqrt();
+            }
+            let mut total = 0.0;
+            for (name, outcome) in &mut best_report.per_net {
+                if let Outcome::Ok { length_mm, .. } = outcome {
+                    if let Some(l) = net_len.get(name.as_str()) {
+                        *length_mm = *l;
+                    }
+                    total += *length_mm;
+                }
+            }
+            best_report.total_length_mm = total;
+            best_report.organic = Some(org);
+        }
+    }
     if let Some(sch) = opts.schematic.as_ref() {
         let _ = crate::length_match::length_match_pass(board, sch.as_ref());
     }
@@ -880,6 +920,7 @@ fn route_pass(
         total_lower_bound_mm,
         iterations: 0,
         hints: Vec::new(),
+        organic: None,
     }
 }
 

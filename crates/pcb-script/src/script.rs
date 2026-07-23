@@ -1242,6 +1242,8 @@ fn compile_command(line: usize, tokens: &[String]) -> Result<Cmd, ParseError> {
                     ("via_cost", AttrType::Num),
                     ("cell", AttrType::NumInto("cell_mm")),
                     ("order", AttrType::Str),
+                    ("organic", AttrType::BoolInto("organic")),
+                    ("fillet", AttrType::NumInto("organic_fillet_mm")),
                 ],
             )?;
             Ok(Cmd {

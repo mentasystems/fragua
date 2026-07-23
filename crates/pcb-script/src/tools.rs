@@ -315,9 +315,15 @@ PALETTE / PLACEMENT:\n\
 \n\
 ROUTING:\n\
   route [trace_width=N] [clearance=N] [via_drill=N] [via_diameter=N] [via_cost=N] [cell=N]\n\
-                                               — auto-route every net (A* on 2 layers); defaults\n\
-                                                 trace_width=0.25, clearance=0.20, via_drill=0.30,\n\
-                                                 via_diameter=0.60, cell=0.20, via_cost=8\n\
+        [organic=true|false] [fillet=MM]\n\
+                                               — auto-route every net (Theta* on 2 layers), then an\n\
+                                                 organic post-pass (rubber-band string-pulling +\n\
+                                                 arc fillets, TopoR-style flowing traces; clearance\n\
+                                                 checked, DRC-neutral). organic=false for raw grid\n\
+                                                 geometry; fillet caps the arc radius (default 3).\n\
+                                                 Defaults trace_width=0.25, clearance=0.20,\n\
+                                                 via_drill=0.30, via_diameter=0.60, cell=0.20,\n\
+                                                 via_cost=8\n\
   clear-route                                  — drop all traces and vias\n\
   clear-net NET                                — clear one net's traces/vias\n\
   trace top|bottom NET X1 Y1 X2 Y2 [width=N]   — manual trace segment\n\
@@ -3379,6 +3385,12 @@ struct RouteRunInput {
     /// router's first-pass ordering — useful for GA-driven tuning.
     #[serde(default)]
     order: Option<String>,
+    /// Organic post-pass (string-pulling + arc fillets). Default on.
+    #[serde(default)]
+    organic: Option<bool>,
+    /// Largest fillet radius for the organic pass, mm.
+    #[serde(default)]
+    organic_fillet_mm: Option<f64>,
 }
 
 fn de_u32_lenient<'de, D>(d: D) -> Result<u32, D::Error>
@@ -3571,12 +3583,7 @@ fn tool_placement_auto(project: &Project, args: &Value) -> Result<Value, ToolErr
         .read()
         .board()
         .footprints_in_order()
-        .map(|fp| {
-            (
-                fp.reference.clone(),
-                (fp.id, fp.position, fp.rotation),
-            )
-        })
+        .map(|fp| (fp.reference.clone(), (fp.id, fp.position, fp.rotation)))
         .collect();
     for r in &input.refs {
         let Some(target) = work
@@ -3934,6 +3941,8 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         via_diameter: Length::from_mm(input.via_diameter_mm),
         net_overrides,
         schematic: Some(schematic_arc),
+        organic: input.organic.unwrap_or(true),
+        organic_fillet_mm: input.organic_fillet_mm.unwrap_or(3.0),
         initial_net_order,
         // Greedy-search weight. 1.0 = admissible/optimal A*. Left at 1.0
         // because W>1 regresses wall-time on this multi-source Steiner
@@ -4035,8 +4044,18 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         let lines: Vec<String> = report.hints.iter().map(|h| format!("  - {h}")).collect();
         format!("\nhints:\n{}", lines.join("\n"))
     };
+    let organic_note = report
+        .organic
+        .as_ref()
+        .map(|o| {
+            format!(
+                "; organic: {} chains smoothed, {:.1} → {:.1} mm",
+                o.chains, o.length_before_mm, o.length_after_mm
+            )
+        })
+        .unwrap_or_default();
     Ok(text_result(format!(
-        "Routed: {} traces, {} vias, {:.1} mm wire, {} failed (detour {:.2}× over {:.1} mm lower bound), {} pass(es){}; DRC: {} error(s), {} warning(s){}",
+        "Routed: {} traces, {} vias, {:.1} mm wire, {} failed (detour {:.2}× over {:.1} mm lower bound), {} pass(es){}{}; DRC: {} error(s), {} warning(s){}",
         report.trace_count,
         report.via_count,
         report.total_length_mm,
@@ -4049,6 +4068,7 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         } else {
             format!(" ({} failed: {})", failed.len(), failed.join(", "))
         },
+        organic_note,
         drc_report.error_count,
         drc_report.warning_count,
         hints_block,
@@ -4062,6 +4082,13 @@ fn tool_route_run(project: &Project, args: &Value) -> Result<Value, ToolError> {
         "iterations": report.iterations,
         "per_net": per_net,
         "hints": report.hints,
+        "organic": report.organic.as_ref().map(|o| json!({
+            "chains": o.chains,
+            "segments_before": o.segments_before,
+            "segments_after": o.segments_after,
+            "length_before_mm": round2(o.length_before_mm),
+            "length_after_mm": round2(o.length_after_mm),
+        })),
         "drc": serde_json::to_value(&drc_report).unwrap_or(json!({})),
     })))
 }

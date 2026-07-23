@@ -450,12 +450,10 @@ pub fn place(
                 let ow = outline.width().to_mm();
                 let oh = outline.height().to_mm();
                 let margin = 2.0; // keep away from the absolute edge
-                let x = outline.min.x.to_mm()
-                    + margin
-                    + rng.next_f64() * (ow - 2.0 * margin).max(0.0);
-                let y = outline.min.y.to_mm()
-                    + margin
-                    + rng.next_f64() * (oh - 2.0 * margin).max(0.0);
+                let x =
+                    outline.min.x.to_mm() + margin + rng.next_f64() * (ow - 2.0 * margin).max(0.0);
+                let y =
+                    outline.min.y.to_mm() + margin + rng.next_f64() * (oh - 2.0 * margin).max(0.0);
                 MoveKind::Translate {
                     footprint: id,
                     new_pos: Point::new(Length::from_mm(x), Length::from_mm(y)),
@@ -967,11 +965,7 @@ fn would_overlap(
 /// mounted parts must be able to touch the outline. The plastic body is
 /// deliberately NOT considered here — `body_outline_violation` at the
 /// call site owns that rule.
-fn pads_inside_outline(
-    probe: &Footprint,
-    outline: pcb_core::Rect,
-    edge_clearance_mm: f64,
-) -> bool {
+fn pads_inside_outline(probe: &Footprint, outline: pcb_core::Rect, edge_clearance_mm: f64) -> bool {
     let Some(b) = probe.bounds() else {
         return false;
     };
@@ -990,10 +984,7 @@ fn pads_inside_outline(
 }
 
 /// Library placement margin for a probe footprint, if any.
-fn margin_for_fp(
-    probe: &Footprint,
-    margins: &MarginMap,
-) -> pcb_core::PlacementMargin {
+fn margin_for_fp(probe: &Footprint, margins: &MarginMap) -> pcb_core::PlacementMargin {
     match margins.get(&probe.id) {
         Some([t, r, b, l]) => pcb_core::PlacementMargin {
             top_mm: *t,

@@ -208,7 +208,6 @@ fn pinned_footprints_do_not_move() {
     assert_eq!(r1_before.y.0, r1_after.y.0);
 }
 
-
 /// A 2-pin series resistor between two distant chips must be pulled
 /// toward the segment joining them. Regression for door-board R3
 /// (SSR LED series) freezing far from both ends of its net.
@@ -268,13 +267,8 @@ fn series_resistor_pulled_toward_its_nets() {
         max_step_mm: 25.0,
         ..PlaceOptions::default()
     };
-    let report = place(
-        &mut board,
-        &["R3".to_string()],
-        &opts,
-        &MarginMap::new(),
-    )
-    .expect("placer should succeed");
+    let report = place(&mut board, &["R3".to_string()], &opts, &MarginMap::new())
+        .expect("placer should succeed");
 
     assert!(
         report.final_hpwl_mm < report.initial_hpwl_mm - 5.0,

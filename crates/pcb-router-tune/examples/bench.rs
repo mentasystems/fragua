@@ -148,6 +148,10 @@ fn main() {
         ),
         net_overrides: Default::default(),
         schematic: Some(sch.clone()),
+        // Bench compares raw search cost; the organic pass is a fixed
+        // small post-cost, so keep it on to match the `route` verb.
+        organic: true,
+        organic_fillet_mm: 3.0,
         initial_net_order: None,
         // Greedy-search weight, knob for A/B benchmarking. Default 1.0
         // (admissible/optimal A*). NOTE: on this multi-source Steiner
@@ -176,6 +180,7 @@ fn main() {
             total_lower_bound_mm: 0.0,
             iterations: 0,
             hints: vec![],
+            organic: None,
         }
     } else {
         pcb_router::route(&mut board, &opts)
