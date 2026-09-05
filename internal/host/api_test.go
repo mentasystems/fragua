@@ -10,8 +10,10 @@ import (
 )
 
 // tinyBoard is the smallest project the check endpoints have something to
-// say about: two parts, one net, no copper.
+// say about: two parts, one net, no copper. lib-gen keeps it off ~/.pcb-library
+// so CI runners (empty HOME) still spawn footprints.
 const tinyBoard = `outline 20 12
+lib-gen r_0603 family=chip size=0603 kind=r
 sym U1 ic key=x
   pin 1 L VCC role=power_out
   pin 2 L GND role=power_in
@@ -29,8 +31,12 @@ func newTestServer(t *testing.T, script string) *httptest.Server {
 	srv := httptest.NewServer(Handler(p))
 	t.Cleanup(srv.Close)
 	if script != "" {
-		if r := post(t, srv, "/script", "text/plain", script); r.status != 200 {
+		r := post(t, srv, "/script", "text/plain", script)
+		if r.status != 200 {
 			t.Fatalf("setup script HTTP %d: %s", r.status, r.body)
+		}
+		if strings.Contains(string(r.body), "error line") {
+			t.Fatalf("setup script: %s", r.body)
 		}
 	}
 	return srv
