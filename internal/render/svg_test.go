@@ -42,3 +42,43 @@ func clip(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
+
+func TestPourOpacityVisible(t *testing.T) {
+	b := core.NewBoard()
+	r := core.RectFromCorners(core.Origin, core.NewPoint(core.FromMM(20), core.FromMM(12)))
+	b.Outline = &r
+	b.Pours = append(b.Pours, core.Pour{Net: "GND", Layer: core.LayerTop})
+	svg := BoardSVG(b)
+	if !strings.Contains(svg, `fill-opacity="0.45"`) {
+		t.Fatalf("pour should use Hand-like opacity 0.45: %s", clip(svg, 240))
+	}
+}
+
+func TestSmallPadNetLabelEmitted(t *testing.T) {
+	b := core.NewBoard()
+	r := core.RectFromCorners(core.Origin, core.NewPoint(core.FromMM(10), core.FromMM(10)))
+	b.Outline = &r
+	net := "VSTOR"
+	b.AddFootprint(&core.Footprint{
+		Reference: "U3", Value: "max17220", Key: "max17220_wlp6",
+		Position: core.NewPoint(core.FromMM(5), core.FromMM(5)),
+		Pads: []core.Pad{
+			{Number: "5", Name: "IN", Size: [2]core.Length{core.FromMM(0.25), core.FromMM(0.25)}, Net: &net},
+		},
+	})
+	svg := BoardSVG(b)
+	idx := strings.Index(svg, `data-layer="pad-names"`)
+	if idx < 0 {
+		t.Fatal("missing pad-names group")
+	}
+	chunk := svg[idx:]
+	if end := strings.Index(chunk, "</g>"); end > 0 {
+		chunk = chunk[:end]
+	}
+	if !strings.Contains(chunk, ">VSTOR<") {
+		t.Fatalf("small pad with net should emit net label in pad-names: %s", clip(chunk, 300))
+	}
+	if !strings.Contains(chunk, `fill="#f0e68c"`) {
+		t.Fatalf("small-pad offset label should use light fill: %s", clip(chunk, 300))
+	}
+}

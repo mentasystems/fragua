@@ -304,7 +304,7 @@ func writePour(b *strings.Builder, board *core.Board, pour core.Pour, outline co
 	h := outline.Height().ToMM() - 2*inset
 	fill := padFill(pour.Layer)
 	// evenodd: board rect minus clearance holes around foreign pads
-	fmt.Fprintf(b, `<path data-net="%s" data-layer="%s" fill="%s" fill-opacity="0.16" fill-rule="evenodd" d="M%.3f,%.3f h%.3f v%.3f h%.3f z`,
+	fmt.Fprintf(b, `<path data-net="%s" data-layer="%s" fill="%s" fill-opacity="0.45" fill-rule="evenodd" d="M%.3f,%.3f h%.3f v%.3f h%.3f z`,
 		escape(pour.Net), escape(stack.LayerName(int(pour.Layer.Index))), fill, x, y, w, h, -w)
 	halo := 0.55
 	for _, fp := range footprintsStable(board) {
@@ -440,32 +440,53 @@ func writePad(b *strings.Builder, pad *core.Pad, stack core.LayerStackup) {
 }
 
 // writePadNames labels pads in world space so the human can hide the labels
-// without hiding the copper under them.
+// without hiding the copper under them. Prefers the pad's net name (Hand/Astra
+// style) so WLP pads show GND/VSTOR rather than pin numbers.
 func writePadNames(b *strings.Builder, board *core.Board) {
 	b.WriteString(`<g data-layer="pad-names" pointer-events="none">`)
 	for _, fp := range footprintsStable(board) {
 		for i := range fp.Pads {
 			p := &fp.Pads[i]
-			pw, ph := core.PadWorldSize(fp, p)
-			wmm, hmm := pw.ToMM(), ph.ToMM()
-			if wmm < 0.8 || hmm < 0.8 {
-				continue
+			label := padNet(p)
+			if label == "" {
+				label = p.Name
 			}
-			label := p.Name
 			if label == "" {
 				label = p.Number
 			}
+			if label == "" {
+				continue
+			}
+			pw, ph := core.PadWorldSize(fp, p)
+			wmm, hmm := pw.ToMM(), ph.ToMM()
+			c := core.PadWorldCenter(fp, p)
+			cx, cy := c.X.ToMM(), c.Y.ToMM()
 			chars := float64(len([]rune(label)))
 			if chars < 1 {
 				chars = 1
+			}
+			// Tiny pads (WLP balls ~0.25 mm) cannot hold readable text on-copper;
+			// place a light label beside them (outboard of the footprint center).
+			if wmm < 0.8 || hmm < 0.8 {
+				sz := clampF(math.Min(0.50, math.Max(wmm, hmm)*1.8), 0.45, 0.55)
+				fc := fp.Position
+				dx := cx - fc.X.ToMM()
+				gap := math.Max(wmm, hmm)/2 + 0.50
+				if dx < 0 {
+					fmt.Fprintf(b, `<g transform="translate(%.3f,%.3f) scale(1,-1)"><text x="0" y="0" text-anchor="end" dominant-baseline="middle" font-family="ui-monospace, monospace" font-size="%.2f" fill="#f0e68c">%s</text></g>`,
+						cx-gap, cy, sz, escape(label))
+				} else {
+					fmt.Fprintf(b, `<g transform="translate(%.3f,%.3f) scale(1,-1)"><text x="0" y="0" text-anchor="start" dominant-baseline="middle" font-family="ui-monospace, monospace" font-size="%.2f" fill="#f0e68c">%s</text></g>`,
+						cx+gap, cy, sz, escape(label))
+				}
+				continue
 			}
 			cap := math.Min(wmm, hmm) * 0.55
 			cap = clampF(cap, 0.30, 1.0)
 			byW := clampF(wmm/chars*1.4, 0.30, 1.0)
 			sz := math.Min(cap, byW)
-			c := core.PadWorldCenter(fp, p)
 			fmt.Fprintf(b, `<g transform="translate(%.3f,%.3f) scale(1,-1)"><text x="0" y="0" text-anchor="middle" dominant-baseline="middle" font-family="ui-monospace, monospace" font-size="%.2f" fill="#0e1116">%s</text></g>`,
-				c.X.ToMM(), c.Y.ToMM(), sz, escape(label))
+				cx, cy, sz, escape(label))
 		}
 	}
 	b.WriteString(`</g>`)
