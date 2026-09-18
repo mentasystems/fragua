@@ -192,14 +192,11 @@ func topoRouteAll(board *core.Board, opts Options) []topoNetResult {
 			})
 		}
 	}
-	for n, pads := range nets {
-		if len(pads) < 2 {
-			delete(nets, n)
-		}
-	}
 	order := make([]string, 0, len(nets))
-	for n := range nets {
-		order = append(order, n)
+	for n, pads := range nets {
+		if len(pads) >= 2 {
+			order = append(order, n)
+		}
 	}
 	spreadOf := func(pads []topoPad) float64 {
 		minx, miny := math.Inf(1), math.Inf(1)
@@ -500,6 +497,12 @@ type topoCame struct {
 	spot p2
 }
 
+// mlAStar walks the (face, layer) dual. Tie-breaks, all host-stable:
+//   - open set: lower f, then lower node (face*2+layer)
+//   - relaxation: strict <, so the first neighbour in the sorted adj
+//     list keeps an equal-cost parent (adj is sorted by nb, sa, sb)
+//   - start/goal face: lowest face id among triangles containing the
+//     pad (a pad centre is a CDT vertex and sits in several faces)
 func (e *topoEngine) mlAStar(from, to topoEndPt, wMM, clr, viaR float64, obs [2]*obstacleSet) ([]topoLeg, bool) {
 	mesh := e.layers[0].mesh
 	if mesh == nil {

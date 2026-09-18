@@ -27,7 +27,12 @@ unchanged. ePlace is deterministic (no RNG). Topo is deterministic
 (sites in board order, A* ties on indices, no RNG).
 
 Delaunay is a small Bowyer–Watson in `delaunay.go` rather than rust's
-`spade` crate. Generic Go only — no CAD wrapper.
+`spade` crate. Generic Go only — no CAD wrapper. Triangle ids, dual
+adjacency and A* neighbour order are sorted (site indices, then
+`nb,sa,sb`); equal-cost homotopy classes keep the lower `(face,layer)`
+node and the first sorted neighbour. A pad centre sits on a CDT vertex
+and belongs to several faces — the engine takes the lowest face id.
+No `range` over a map drives copper.
 
 ## Enabling topo
 
