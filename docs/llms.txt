@@ -20,6 +20,7 @@ fragua run board.fragua  # HTTP API + UI only
 - [AGENTS.md](https://github.com/mentasystems/fragua/blob/master/agent/AGENTS.md): the onboarding guide `fragua init` writes into a project.
 - [VISION.md](https://github.com/mentasystems/fragua/blob/master/VISION.md): what the product is and its non-negotiables.
 - [ARCHITECTURE.md](https://github.com/mentasystems/fragua/blob/master/ARCHITECTURE.md): packages and data flow.
+- [rust-vs-go.md](https://github.com/mentasystems/fragua/blob/master/docs/rust-vs-go.md): ePlace and topo are Go ports of rust 4e20ae0.
 - [CONTRIBUTING.md](https://github.com/mentasystems/fragua/blob/master/CONTRIBUTING.md): scope and house style.
 
 ## API

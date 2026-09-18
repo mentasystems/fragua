@@ -40,8 +40,8 @@ pcb/   (repo: mentasystems/fragua)
 ├── internal/
 │   ├── core/              project, board, schematic, library, geometry (nm)
 │   ├── script/            DSL parse + tool dispatch + help text
-│   ├── router/            Theta*, fanout/slots, RR&R, negotiate, organic, stitch
-│   ├── placer/            SA legalisation + decoupling ring + edge snap
+│   ├── router/            Theta*, fanout/slots, RR&R, negotiate, organic, stitch; opt-in topo
+│   ├── placer/            ePlace global + SA legalisation + decoupling ring + edge snap
 │   ├── drc/  erc/  si/
 │   ├── fab/  gerber/  odb/
 │   ├── render/            board + schematic SVG
@@ -64,9 +64,12 @@ stackup (`Default2Layer` / `Default4Layer`: F / GND / +3V3 / B), pours,
 and the event bus. File I/O is JSON (`.fragua` / legacy `.json`).
 
 ### `internal/router`
-Auto-routing. Stages: fab ceiling → QFN escape-slot matching + leftover
-far-ring → Prim/Theta* tree → RR&R (both-or-neither) → negotiate leftovers
-→ organic string-pull → pour stitch. Via-in-pad is an explicit exception
+Auto-routing. Default (`engine=grid` or unset) stages: fab ceiling → QFN
+escape-slot matching + leftover far-ring → Prim/Theta* tree → RR&R
+(both-or-neither) → negotiate leftovers → organic string-pull → pour stitch.
+`engine=topo` is an opt-in Delaunay homotopy / rubber-band engine (ported
+from rust `topo.rs`); it re-routes the whole board and is not the agent
+default. Via-in-pad is an explicit exception
 (`escape via-in-pad REF.PAD`), not the default. A net whose class width does
 not fit its escape retries with a short neck near its own pads (nominal width
 everywhere else), then one width tier down; both are counted in `Summary()`,
@@ -113,8 +116,10 @@ Three invariants the engine owes its callers:
   on it from either side and owes it no via.
 
 ### `internal/placer`
-Simulated annealing legalisation, decoupling-ring seating for passives,
-edge-mount snap. Deterministic for a fixed seed.
+ePlace global stage (Poisson/DCT electrostatics + Nesterov, ported from
+rust `global.rs`) then simulated-annealing legalisation, decoupling-ring
+seating for passives, edge-mount snap. The SA-only path (`global=0`) is
+deterministic for a fixed seed; ePlace itself has no RNG.
 
 ### `internal/drc` / `internal/erc`
 Geometric DRC (clearance, drill, edge, net split, unconnected pads) and

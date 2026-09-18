@@ -36,6 +36,7 @@ func Index() string {
 	b.WriteString("- [AGENTS.md](" + repo + "/blob/master/agent/AGENTS.md): the onboarding guide `fragua init` writes into a project.\n")
 	b.WriteString("- [VISION.md](" + repo + "/blob/master/VISION.md): what the product is and its non-negotiables.\n")
 	b.WriteString("- [ARCHITECTURE.md](" + repo + "/blob/master/ARCHITECTURE.md): packages and data flow.\n")
+	b.WriteString("- [rust-vs-go.md](" + repo + "/blob/master/docs/rust-vs-go.md): ePlace and topo are Go ports of rust 4e20ae0.\n")
 	b.WriteString("- [CONTRIBUTING.md](" + repo + "/blob/master/CONTRIBUTING.md): scope and house style.\n\n")
 
 	b.WriteString("## API\n\n")

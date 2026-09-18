@@ -40,13 +40,17 @@ external CAD tool:
    anything implied by the chosen ICs.
 6. **Board sizing** — rectangle (`outline W H [radius=R]`) or polygonal
    outline (`outline-poly …`), plus optional milled cutouts and NPTH holes.
-7. **Placement** — agent places footprints; `auto-place` runs global ePlace
-   + SA legalisation on movable parts; `edge-plan` / `edge-place` for
-   connectors; `elevated` for modules on headers. The human can drag any
-   component; the agent re-plans around fixed positions.
-8. **Auto-routing** — native router (RR&R + optional negotiation + fine-pitch
-   escape planning + organic post-pass; experimental topological engine)
-   lays traces and vias. Progress streams live; budgets keep agents unblocked.
+7. **Placement** — agent places footprints; `auto-place` runs ePlace
+   (Poisson/DCT density + WA wirelength + Nesterov, a Go port of rust
+   `global.rs` at 4e20ae0) then SA legalisation on movable parts;
+   `edge-plan` / `edge-place` for connectors; `elevated` for modules on
+   headers. The human can drag any component; the agent re-plans around
+   fixed positions.
+8. **Auto-routing** — native Theta* / RR&R router (optional negotiation,
+   fine-pitch escape planning, organic post-pass) lays traces and vias by
+   default. `route engine=topo` opts into the experimental topological
+   engine (Delaunay dual + homotopy A*, a Go port of rust `topo.rs` at
+   4e20ae0). Progress streams live; budgets keep agents unblocked.
 9. **Corrections** — DRC + manufacturing-DRC run continuously. Violations
    are highlighted on the canvas; the agent proposes fixes; the human
    approves or overrides.

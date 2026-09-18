@@ -2,8 +2,11 @@
 //
 // SA-only (GlobalStage=false) matches Rust pcb_placer::place with the
 // same seed, movable order, xorshift64* draws, schedule, hard floor,
-// and weighted-HPWL + soft-gap score. GlobalStage=true still runs a
-// cheap force pre-pass then retunes SA to the post-global schedule.
+// and weighted-HPWL + soft-gap score. GlobalStage=true runs the
+// literature ePlace solve (Poisson/DCT + WA wirelength + Nesterov,
+// ported from rust 4e20ae0 global.rs) then retunes SA to the
+// post-global refinement schedule. globalForce is kept only as the
+// old cheap-force baseline for tests.
 package placer
 
 import (
@@ -30,6 +33,16 @@ type Options struct {
 	MaxStepMM       float64
 	MinStepMM       float64
 	Decouple        bool
+	// GlobalIterations is the Nesterov ceiling for ePlace (Rust default 600).
+	// The loop exits early once overflow is legal and HPWL plateaus.
+	GlobalIterations int
+	// DensityBins is the Poisson grid resolution per axis (clamped 16–256).
+	DensityBins int
+	// TargetDensity is the bin utilisation ePlace treats as legal packing.
+	TargetDensity float64
+	// TargetOverflow is the movable-charge overflow at which ePlace stops
+	// growing λ (Rust / ePlace-conventional 0.08).
+	TargetOverflow float64
 	// Progress, when set, is called every ProgressEvery iterations of the
 	// SA loop so a host can stream a bar. Must not block.
 	Progress func(done, total int)
@@ -46,20 +59,24 @@ const progressEvery = 200
 // after a global stage the loop retunes T 5→0.05 / step 8→0.25).
 func DefaultOptions() Options {
 	return Options{
-		Seed:            42,
-		SolderGapMM:     core.MinFootprintGapMM,
-		Iterations:      8000,
-		MoveStdMM:       20.0,
-		GlobalStage:     true,
-		EdgeClearanceMM: 0.8,
-		MinGapMM:        2.0,
-		MinClearanceMM:  0.5,
-		GapPenalty:      16.0,
-		InitialTemp:     50.0,
-		FinalTemp:       0.05,
-		MaxStepMM:       20.0,
-		MinStepMM:       0.5,
-		Decouple:        true,
+		Seed:             42,
+		SolderGapMM:      core.MinFootprintGapMM,
+		Iterations:       8000,
+		MoveStdMM:        20.0,
+		GlobalStage:      true,
+		EdgeClearanceMM:  0.8,
+		MinGapMM:         2.0,
+		MinClearanceMM:   0.5,
+		GapPenalty:       16.0,
+		InitialTemp:      50.0,
+		FinalTemp:        0.05,
+		MaxStepMM:        20.0,
+		MinStepMM:        0.5,
+		Decouple:         true,
+		GlobalIterations: 600,
+		DensityBins:      64,
+		TargetDensity:    1.0,
+		TargetOverflow:   0.08,
 	}
 }
 
@@ -85,6 +102,14 @@ func ParseOptions(o Options, args string) Options {
 			o.Decouple = x != 0
 		case "iters":
 			o.Iterations = int(x)
+		case "global_iterations":
+			o.GlobalIterations = int(x)
+		case "density_bins":
+			o.DensityBins = int(x)
+		case "target_density":
+			o.TargetDensity = x
+		case "target_overflow":
+			o.TargetOverflow = x
 		}
 	}
 	return o
@@ -100,6 +125,8 @@ type Report struct {
 	// Place only moves footprints that already exist; the palette lives on the
 	// project, so the script layer seats them and reports the count here.
 	Seated int `json:"seated"`
+	// Global is the ePlace stage outcome; nil when GlobalStage was off.
+	Global *GlobalReport `json:"global,omitempty"`
 }
 
 // Summary is agent-friendly.
@@ -117,7 +144,7 @@ type pos struct {
 	rot  float64
 }
 
-// Place runs optional force-directed global placement then SA legalisation
+// Place runs optional ePlace global placement then SA legalisation
 // on refs (nil refs = all non-edge-mounted footprints, footprint-order).
 func Place(board *core.Board, refs []string, opts Options) (Report, error) {
 	if board.Outline == nil {
@@ -166,8 +193,10 @@ func Place(board *core.Board, refs []string, opts Options) (Report, error) {
 		}
 		return Report{}, fmt.Errorf("place: no movable footprints")
 	}
+	var global *GlobalReport
 	if opts.GlobalStage {
-		globalForce(board, fps, opts)
+		g := globalPlace(board, fps, opts)
+		global = &g
 	}
 
 	// After a global stage Rust retunes SA into a refinement role.
@@ -299,9 +328,12 @@ func Place(board *core.Board, refs []string, opts Options) (Report, error) {
 		FinalHPWLMM:   rawHPWL(board),
 		Moved:         moved,
 		Iterations:    ranIter,
+		Global:        global,
 	}, nil
 }
 
+// globalForce is the pre-ePlace cheap attraction/repulsion stand-in.
+// Kept so tests can show that real ePlace improves HPWL/overlap versus it.
 func globalForce(board *core.Board, fps []*core.Footprint, opts Options) {
 	type posSnap struct {
 		x, y core.Length
@@ -888,7 +920,9 @@ const noPlacePenalty = 100.0
 // score. That is not a corner case: the force-directed pre-pass drags a decap
 // straight onto its IC's pads by construction, and a script that seeds parts
 // before calling auto-place lands in the same state. The veto stops it getting
-// worse; this makes it get better.
+// worse; this makes it get better. The ePlace global stage (and the old
+// cheap-force baseline) can still hand SA a stacked decap; this term
+// walks it out.
 func overlapAreaMM2(board *core.Board, fps []*core.Footprint, gapMM float64) float64 {
 	if gapMM < 0 {
 		gapMM = 0
