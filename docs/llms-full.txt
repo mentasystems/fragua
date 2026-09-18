@@ -252,8 +252,8 @@ Script verbs (line-oriented, agent-first):
   move REF X Y | rotate REF DEG
   unplace REF | delete REF | clear-board
   auto-place [REF...] [seed=N] [iters=N]
-  route [max_seconds=N] [clearance=MM] [organic=true] [teardrop=true]
-        (max_seconds: default 600, max 3600; clearance: extra air, fab min is the floor)
+  route [max_seconds=N] [clearance=MM] [organic=true] [teardrop=true] [engine=grid|topo]
+        (max_seconds: default 600, max 3600; clearance: extra air, fab min is the floor; engine=topo is experimental)
   clear-route | clear-net NET | delete-trace ID | delete-via ID
   trace NET x1 y1 x2 y2 [layer=Top] [width=0.15]
   via NET x y [drill=0.3] [dia=0.6]
@@ -283,7 +283,7 @@ Script verbs (line-oriented, agent-first):
 
 An agent can take a board from 0 to a JLCPCB pack with the verbs above.
 Commercial floor: the same agent loop used on shipped boards:
-auto-place (SA + decouple + edge snap) → route (Theta* + fanout + stitch)
+auto-place (ePlace + SA + decouple + edge snap) → route (Theta* + fanout + stitch; engine=topo optional)
 → pour/stitch → drc/erc → pack.
 ```
 
@@ -768,13 +768,13 @@ Usage:
 Aliases:
   auto_place
 
-Global placement plus simulated-annealing legalisation over the listed parts
-(all movable parts if none listed). Parts bound by `palette` / `part` /
-`lib-gen` but never placed are seated on the board first (reported as
-`seated N new`), so you do not have to `place` them by hand. Anything you
-`place`d or `edge-place`d stays put and is routed around; name it as a REF
-to move it anyway. Pass a `seed` to make the result reproducible. Needs an
-outline.
+ePlace global placement (Poisson/DCT + Nesterov) plus simulated-annealing
+legalisation over the listed parts (all movable parts if none listed). Parts
+bound by `palette` / `part` / `lib-gen` but never placed are seated on the
+board first (reported as `seated N new`), so you do not have to `place` them
+by hand. Anything you `place`d or `edge-place`d stays put and is routed
+around; name it as a REF to move it anyway. Pass a `seed` to make the result
+reproducible. Needs an outline.
 
 Examples:
   auto-place
@@ -790,18 +790,22 @@ Full reference: `fragua help` or GET /help
 route — fragua script verb
 
 Usage:
-  route [max_seconds=N] [clearance=MM] [organic=true] [teardrop=true]
-  (max_seconds: default 600, max 3600; clearance: extra air, fab min is the floor)
+  route [max_seconds=N] [clearance=MM] [organic=true] [teardrop=true] [engine=grid|topo]
+  (max_seconds: default 600, max 3600; clearance: extra air, fab min is the floor; engine=topo is experimental)
 
 Auto-route every unrouted net: Theta* any-angle search with
-rip-up-and-reroute, fanout escapes and pour stitching. Report lines say how
-many nets routed and which failed. Re-running is cheap and only attacks what
-is still open.
+rip-up-and-reroute, fanout escapes and pour stitching. `engine=topo` opts
+into the Delaunay homotopy / rubber-band engine (clears existing copper and
+re-routes the board). Default is the grid engine — keep it for the agent
+path until you have a reason to try topo. Report lines say how many nets
+routed and which failed. Re-running the grid engine is cheap and only
+attacks what is still open.
 
 Examples:
   route
   route max_seconds=120
   route max_seconds=300 organic=true teardrop=true
+  route engine=topo max_seconds=60
 
 Full reference: `fragua help` or GET /help
 ```

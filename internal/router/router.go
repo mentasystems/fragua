@@ -37,6 +37,10 @@ type Options struct {
 	SearchClearMM   float64 // pad-edge search gap; 0 → fab ceiling
 	Teardrops       bool    // add copper teardrops at pad/via junctions
 	TeardropsSet    bool    // true if teardrop= was in the script args
+	// Engine selects the search: "grid" (default Theta*/RR&R) or "topo"
+	// (Delaunay homotopy, rust 4e20ae0 port). Empty means grid. Topo is
+	// opt-in so the default agent path cannot regress.
+	Engine string
 	// ClearanceSet marks an explicit clearance= from the script args. The
 	// fab floor still wins when the request is tighter than the process
 	// allows, but a caller asking for more air than the fab minimum gets it
@@ -216,6 +220,14 @@ func ParseOptions(o Options, args string) Options {
 			o.Teardrops = v == "true" || v == "1" || v == "on"
 			o.TeardropsSet = true
 			continue
+		case "engine":
+			switch strings.ToLower(v) {
+			case "topo", "topological":
+				o.Engine = EngineTopo
+			default:
+				o.Engine = EngineGrid
+			}
+			continue
 		}
 		var x float64
 		fmt.Sscanf(v, "%f", &x) // safe-ignore: unparsable numeric options intentionally leave x=0 and fall through to defaults
@@ -339,6 +351,9 @@ func Route(board *core.Board, opts Options) Report {
 	// "forever". The search is anytime, so the deadline caps the wall
 	// clock without throwing away the copper already committed.
 	opts.MaxSeconds = ClampBudget(opts.MaxSeconds)
+	if strings.EqualFold(opts.Engine, EngineTopo) {
+		return routeTopo(board, opts)
+	}
 	deadline := start.Add(time.Duration(opts.MaxSeconds * float64(time.Second)))
 	hasDeadline := true
 	pastDeadline := func() bool {
@@ -2592,6 +2607,7 @@ type obstacle struct {
 	c     p2
 	r     float64
 	clrMM float64
+	net   string
 }
 
 type obstacleSet struct {
@@ -2623,11 +2639,16 @@ func collectObstacles(board *core.Board, net string, layer uint8, opts Options) 
 			hw := pad.Size[0].ToMM() / 2
 			hh := pad.Size[1].ToMM() / 2
 			padClr := clr
+			n := ""
+			if pad.Net != nil {
+				n = *pad.Net
+			}
 			os.items = append(os.items, obstacle{
 				kind:  0,
 				min:   p2{cm[0] - hw, cm[1] - hh},
 				max:   p2{cm[0] + hw, cm[1] + hh},
 				clrMM: padClr,
+				net:   n,
 			})
 		}
 	}
@@ -2641,6 +2662,7 @@ func collectObstacles(board *core.Board, net string, layer uint8, opts Options) 
 			b:     ptMM(tr.End),
 			halfW: tr.Width.ToMM() / 2,
 			clrMM: clr,
+			net:   tr.Net,
 		})
 	}
 	for _, v := range board.Vias {
@@ -2652,6 +2674,7 @@ func collectObstacles(board *core.Board, net string, layer uint8, opts Options) 
 			c:     ptMM(v.Position),
 			r:     v.Diameter.ToMM() / 2,
 			clrMM: clr,
+			net:   v.Net,
 		})
 	}
 	for _, k := range board.Keepouts {
@@ -2775,6 +2798,46 @@ func polylineClear(pts []p2, obs *obstacleSet, hw, clr float64) bool {
 		}
 	}
 	return true
+}
+
+// firstBlockingNet is the first foreign net a polyline hits — used by
+// the topological engine to pick a rip-up victim.
+func (os *obstacleSet) firstBlockingNet(pts []p2, hw, clr float64) string {
+	if os == nil {
+		return ""
+	}
+	for i := 0; i+1 < len(pts); i++ {
+		if n := os.blockingNet(pts[i], pts[i+1], hw, clr); n != "" {
+			return n
+		}
+	}
+	return ""
+}
+
+func (os *obstacleSet) blockingNet(a, b p2, hw, clr float64) string {
+	const eps = 1e-4
+	for _, ob := range os.items {
+		need := hw + math.Max(clr, ob.clrMM)
+		var d float64
+		switch ob.kind {
+		case 0:
+			d = segRectDist(a, b, ob.min, ob.max)
+		case 1:
+			d = segSegDist(a, b, ob.a, ob.b) - ob.halfW
+			if d < 0 {
+				d = 0
+			}
+		case 2:
+			d = pointSegDist(ob.c, a, b) - ob.r
+			if d < 0 {
+				d = 0
+			}
+		}
+		if d+eps < need && ob.net != "" {
+			return ob.net
+		}
+	}
+	return ""
 }
 
 func stringPull(pts []p2, obs *obstacleSet, hw, clr float64) []p2 {

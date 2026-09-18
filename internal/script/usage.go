@@ -183,18 +183,20 @@ var Verbs = []VerbHelp{
 		Name:    "auto-place",
 		Aliases: []string{"auto_place"},
 		Usage:   "auto-place [REF...] [seed=N] [iters=N]",
-		Describe: "Global placement plus simulated-annealing legalisation over the listed parts (all movable parts if none listed). " +
+		Describe: "ePlace global placement (Poisson/DCT + Nesterov) plus simulated-annealing legalisation over the listed parts (all movable parts if none listed). " +
 			"Parts bound by `palette` / `part` / `lib-gen` but never placed are seated on the board first (reported as `seated N new`), so you do not have to `place` them by hand. " +
 			"Anything you `place`d or `edge-place`d stays put and is routed around; name it as a REF to move it anyway. Pass a `seed` to make the result reproducible. Needs an outline.",
 		Examples: []string{"auto-place", "auto-place R1 C1 C2 seed=42", "auto-place seed=7 iters=4000"},
 	},
 	{
 		Name:  "route",
-		Usage: "route [max_seconds=N] [clearance=MM] [organic=true] [teardrop=true]",
-		Notes: []string{"        (max_seconds: default 600, max 3600; clearance: extra air, fab min is the floor)"},
+		Usage: "route [max_seconds=N] [clearance=MM] [organic=true] [teardrop=true] [engine=grid|topo]",
+		Notes: []string{"        (max_seconds: default 600, max 3600; clearance: extra air, fab min is the floor; engine=topo is experimental)"},
 		Describe: "Auto-route every unrouted net: Theta* any-angle search with rip-up-and-reroute, fanout escapes and pour stitching. " +
-			"Report lines say how many nets routed and which failed. Re-running is cheap and only attacks what is still open.",
-		Examples: []string{"route", "route max_seconds=120", "route max_seconds=300 organic=true teardrop=true"},
+			"`engine=topo` opts into the Delaunay homotopy / rubber-band engine (clears existing copper and re-routes the board). " +
+			"Default is the grid engine — keep it for the agent path until you have a reason to try topo. " +
+			"Report lines say how many nets routed and which failed. Re-running the grid engine is cheap and only attacks what is still open.",
+		Examples: []string{"route", "route max_seconds=120", "route max_seconds=300 organic=true teardrop=true", "route engine=topo max_seconds=60"},
 	},
 	{
 		Name:     "clear-route",
@@ -532,7 +534,7 @@ Script verbs (line-oriented, agent-first):
 const usageFooter = `
 An agent can take a board from 0 to a JLCPCB pack with the verbs above.
 Commercial floor: the same agent loop used on shipped boards:
-auto-place (SA + decouple + edge snap) → route (Theta* + fanout + stitch)
+auto-place (ePlace + SA + decouple + edge snap) → route (Theta* + fanout + stitch; engine=topo optional)
 → pour/stitch → drc/erc → pack.
 `
 

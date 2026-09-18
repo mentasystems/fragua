@@ -44,6 +44,7 @@ type routeArgs struct {
 	Clearance  float64 `json:"clearance,omitempty" jsonschema:"Extra copper-to-copper air in mm on top of the design rules. The fab minimum is always the floor, so this can only widen."`
 	Organic    bool    `json:"organic,omitempty" jsonschema:"Run the organic string-pull post-pass that smooths the routed traces."`
 	Teardrop   bool    `json:"teardrop,omitempty" jsonschema:"Add teardrop fillets where traces meet pads and vias."`
+	Engine     string  `json:"engine,omitempty" jsonschema:"Search engine: grid (default Theta*/RR&R) or topo (experimental Delaunay homotopy). Leave empty for the stable default."`
 }
 
 type emptyArgs struct{}
@@ -189,6 +190,9 @@ func NewServer(b Backend) *sdk.Server {
 		}
 		if in.Teardrop {
 			line += " teardrop=true"
+		}
+		if strings.EqualFold(strings.TrimSpace(in.Engine), "topo") {
+			line += " engine=topo"
 		}
 		out, err := b.Script(ctx, line)
 		if err != nil {
