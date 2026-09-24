@@ -53,7 +53,7 @@ var Verbs = []VerbHelp{
 	{
 		Name:     "lib",
 		Usage:    "lib KEY … + indented pad NUMBER X Y W H",
-		Describe: "Define a custom footprint under KEY. Follow it with indented `pad NUMBER X Y W H` lines (mm, relative to the footprint origin). Use the built-in palette first — see `list-lib` — and only define a footprint the library lacks. `lcsc=`/`mpn=` name ONE part: on a passive they only reach the BOM when the entry also sets `value=` and the symbol's value agrees (put per-value ids on the `sym` line instead).",
+		Describe: "Define a custom footprint under KEY. Follow it with indented `pad NUMBER X Y W H` lines (mm, relative to the footprint origin). Use the built-in palette first — see `list-lib` — and only define a footprint the library lacks. `lcsc=`/`mpn=` name ONE part: on a passive they only reach the BOM when the entry also sets `value=` and the symbol's value agrees (put per-value ids on the `sym` line instead). `model=` is an optional 3D override (a KiCad `Library.3dshapes/Name.wrl` path or a local .wrl/.obj) used by `fragua render`.",
 		Examples: []string{"lib my_conn\n  pad 1 -1.27 0 1.0 1.8\n  pad 2 1.27 0 1.0 1.8"},
 	},
 	{
@@ -124,7 +124,7 @@ var Verbs = []VerbHelp{
 	{
 		Name:     "palette",
 		Usage:    "palette REF KEY | palette list",
-		Describe: "Bind a placed reference to a built-in footprint key (this is how a symbol gets a footprint). `palette list` prints the available keys.",
+		Describe: "Bind a placed reference to a built-in footprint key (this is how a symbol gets a footprint). `palette list` prints the available keys. `model=` overrides the 3D body for `fragua render` (KiCad `Library.3dshapes/Name.wrl`, or a local .wrl/.obj).",
 		Examples: []string{"palette list", "palette C1 c_0603 value=100nF", "palette U1 esp32_s3_zero"},
 	},
 	{
@@ -502,6 +502,7 @@ Usage:
                          [--seed N] [--budget S] [--json f] [--md f] [--strict]
   fragua render FILE     3D product-shot PNG (also: fragua render3d)
                          [--3d] [-o out.png] [--width PX] [--height PX]
+                         [--models kicad|easyeda|none] [--model-cache DIR] [--offline]
 
 Environment:
   FRAGUA_API_ADDR        listen address (default 127.0.0.1:7878)

@@ -13,6 +13,7 @@ func TestRunRenderWritesPNG(t *testing.T) {
 		filepath.Join("..", "..", "stress", "rp2040-minimal.fragua"),
 		"-o", out,
 		"--width", "280",
+		"--models", "none",
 	})
 	if err != nil {
 		t.Fatal(err)
