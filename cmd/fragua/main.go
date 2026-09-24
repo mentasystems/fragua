@@ -6,6 +6,7 @@
 //	fragua mcp [file]    same host, plus an MCP server on stdio
 //	fragua init [dir]    write agent onboarding files into a directory
 //	fragua bench [dir]   run the reference bench suite (place → route → drc)
+//	fragua render FILE   3D product-shot PNG (--3d, -o, --width)
 package main
 
 import (
@@ -41,6 +42,8 @@ func main() {
 		err = runInit(args[1:])
 	case "bench":
 		err = runBench(args[1:])
+	case "render", "render3d":
+		err = runRender(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q — try `fragua help` or `fragua run [file.fragua]`\n", args[0])
 		os.Exit(2)

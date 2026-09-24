@@ -188,6 +188,8 @@ Usage:
   fragua init [dir]      write agent onboarding files into a project directory
   fragua bench [dir]     run the reference boards (place → route → drc)
                          [--seed N] [--budget S] [--json f] [--md f] [--strict]
+  fragua render FILE     3D product-shot PNG (also: fragua render3d)
+                         [--3d] [-o out.png] [--width PX] [--height PX]
 
 Environment:
   FRAGUA_API_ADDR        listen address (default 127.0.0.1:7878)

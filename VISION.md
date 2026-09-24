@@ -87,5 +87,5 @@ external CAD tool:
   features. Human editing exists to *correct* the agent, not to design
   from scratch by hand.
 - A SPICE simulator, signal-integrity tool, or thermal analyzer.
-- 3D rendering of the board. Top-down 2D is enough for the agent loop.
+- A mechanical CAD kernel (STEP bodies, mates, enclosure fit). A static 3D product shot is `fragua render`; the agent loop still watches the 2D canvas.
 - Plugin/scripting APIs beyond the script verb language.
