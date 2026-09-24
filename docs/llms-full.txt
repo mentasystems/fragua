@@ -190,6 +190,7 @@ Usage:
                          [--seed N] [--budget S] [--json f] [--md f] [--strict]
   fragua render FILE     3D product-shot PNG (also: fragua render3d)
                          [--3d] [-o out.png] [--width PX] [--height PX]
+                         [--models kicad|easyeda|none] [--model-cache DIR] [--offline]
 
 Environment:
   FRAGUA_API_ADDR        listen address (default 127.0.0.1:7878)
@@ -407,7 +408,9 @@ W H` lines (mm, relative to the footprint origin). Use the built-in palette
 first — see `list-lib` — and only define a footprint the library lacks.
 `lcsc=`/`mpn=` name ONE part: on a passive they only reach the BOM when the
 entry also sets `value=` and the symbol's value agrees (put per-value ids on
-the `sym` line instead).
+the `sym` line instead). `model=` is an optional 3D override (a KiCad
+`Library.3dshapes/Name.wrl` path or a local .wrl/.obj) used by `fragua
+render`.
 
 Examples:
   lib my_conn
@@ -597,7 +600,9 @@ Usage:
   palette REF KEY | palette list
 
 Bind a placed reference to a built-in footprint key (this is how a symbol
-gets a footprint). `palette list` prints the available keys.
+gets a footprint). `palette list` prints the available keys. `model=`
+overrides the 3D body for `fragua render` (KiCad
+`Library.3dshapes/Name.wrl`, or a local .wrl/.obj).
 
 Examples:
   palette list

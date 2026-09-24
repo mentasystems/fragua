@@ -14,6 +14,7 @@ import (
 // renderValueFlags are flags whose value may be a separate argument.
 var renderValueFlags = map[string]bool{
 	"o": true, "out": true, "width": true, "height": true,
+	"models": true, "model-cache": true,
 }
 
 // runRender is `fragua render [--3d] FILE [-o out.png] [--width PX]`.
@@ -33,7 +34,7 @@ func runRender(args []string) error {
 			file, found = a, true
 			continue
 		default:
-			return fmt.Errorf("usage: fragua render [--3d] FILE [-o out.png] [--width PX]")
+			return fmt.Errorf("usage: fragua render [--3d] FILE [-o out.png] [--width PX] [--models kicad|easyeda|none]")
 		}
 		flags = append(flags, a)
 	}
@@ -44,18 +45,24 @@ func runRender(args []string) error {
 	outLong := fs.String("out", "", "output PNG path")
 	width := fs.Int("width", 1600, "image width in pixels")
 	height := fs.Int("height", 0, "image height in pixels (0: match the board)")
+	models := fs.String("models", "kicad", "model source: kicad, easyeda, kicad,easyeda, or none")
+	cache := fs.String("model-cache", "", "directory for downloaded 3D models")
+	offline := fs.Bool("offline", false, "do not download models; use the cache and a local KiCad install")
 	if err := fs.Parse(flags); err != nil {
 		return err
 	}
 	if file == "" {
-		return fmt.Errorf("usage: fragua render [--3d] FILE [-o out.png] [--width PX]")
+		return fmt.Errorf("usage: fragua render [--3d] FILE [-o out.png] [--width PX] [--models kicad|easyeda|none]")
 	}
 	p, err := core.LoadFromPath(file)
 	if err != nil {
 		return err
 	}
+	var report []render.ModelUse
 	pngBytes, err := render.BoardPNG3D(p.Board(), render.Shot3D{
 		Width: *width, Height: *height, Samples: 2,
+		Models: *models, CacheDir: *cache, Offline: *offline,
+		Report: &report,
 	})
 	if err != nil {
 		return err
@@ -77,5 +84,8 @@ func runRender(args []string) error {
 		return err
 	}
 	fmt.Printf("wrote %s (%d bytes)\n", out, len(pngBytes))
+	if *models != "" {
+		fmt.Println(render.SummarizeModels(report))
+	}
 	return nil
 }

@@ -78,6 +78,10 @@ type Footprint struct {
 	LcscID       string `json:"lcsc_id,omitempty"`
 	MPN          string `json:"mpn,omitempty"`
 	Manufacturer string `json:"manufacturer,omitempty"`
+	// Model overrides the 3D body used by `fragua render`. A KiCad
+	// library-relative path (Resistor_SMD.3dshapes/R_0603_1608Metric.wrl)
+	// or a local .wrl/.obj file. Empty means the footprint key is mapped.
+	Model string `json:"model,omitempty"`
 	// Fiducial is a board optical mark: in CPL, omitted from BOM.
 	Fiducial bool `json:"fiducial,omitempty"`
 	// Courtyard / body: used by DRC. BodyRect is footprint-local mm (Y-up).

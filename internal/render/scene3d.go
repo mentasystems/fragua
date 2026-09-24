@@ -9,8 +9,9 @@ import (
 )
 
 // Product-shot palette. Soldermask green, ENIG pads, bare FR-4 on the
-// edge — the stack a fabrication render is expected to show, without a
-// STEP model for every part.
+// edge — the stack a fabrication render is expected to show. Component
+// bodies come from a KiCad WRL when one is available, and from these
+// colors when the renderer falls back to a box.
 var (
 	colMask    = srgb8(18, 122, 58)
 	colMaskBot = srgb8(10, 74, 38)
@@ -38,20 +39,38 @@ const (
 )
 
 // Shot3D tunes a product-shot render. The zero value is a 1600px-wide
-// image with 2× supersampling and a frame matched to the board.
+// image with 2× supersampling, a frame matched to the board, and procedural
+// boxes only — no model download. The CLI sets Models to "kicad".
 type Shot3D struct {
 	Width   int // pixels; 0 → 1600
 	Height  int // pixels; 0 → derived from the board aspect
 	Samples int // supersample factor, 1..3; 0 → 2
+	// Models is "kicad", "easyeda", "kicad,easyeda", or "none".
+	// Empty means boxes only, so existing callers stay offline.
+	Models string
+	// CacheDir is the model cache root. Empty uses $XDG_CACHE_HOME/fragua/3d
+	// (or ~/.cache/fragua/3d).
+	CacheDir string
+	// Offline skips downloads. A missing model becomes a box.
+	Offline bool
+	// SearchDirs, when non-nil, replaces the KiCad 3D install directories.
+	// An empty slice searches only CacheDir.
+	SearchDirs []string
+	// Report, when non-nil, receives one entry per rendered footprint.
+	Report *[]ModelUse
+	// fetch overrides HTTP downloads in tests.
+	fetch fetchFunc
 }
 
 // BoardPNG3D renders board as a PNG product shot: thickness, soldermask,
-// copper, silkscreen, drills, and box bodies where no CAD model exists.
+// copper, silkscreen, drills, and a component body. Bodies are KiCad WRL
+// meshes when Models asks for them and a model loads; otherwise a box.
+// A missing model does not fail the render.
 func BoardPNG3D(board *core.Board, opt Shot3D) ([]byte, error) {
 	if board == nil || (board.Outline == nil && len(board.OutlinePoly) < 3) {
 		return nil, errNoOutline
 	}
-	scn, err := buildScene(board)
+	scn, err := buildScene(board, opt)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +220,7 @@ func fits(eye, forward, right, up vec3, fovY, aspect float64, pts []vec3) bool {
 	return true
 }
 
-func buildScene(board *core.Board) (scene, error) {
+func buildScene(board *core.Board, opt Shot3D) (scene, error) {
 	outer, ok := boardOutline(board)
 	if !ok || len(outer) < 3 {
 		return scene{}, errNoOutline
@@ -257,7 +276,15 @@ func buildScene(board *core.Board) (scene, error) {
 	}
 
 	s.addCopper(board, th)
-	bodies := s.addBodies(board, th)
+	var ld *loader
+	if opt.Models != "" || opt.Report != nil {
+		ld = newLoader(opt)
+	}
+	bodies := s.addBodies(board, th, ld)
+	if ld != nil && opt.Report != nil {
+		rep := append([]ModelUse(nil), ld.report...)
+		*opt.Report = rep
+	}
 	s.addSilk(board, th, bodies)
 
 	s.peakZ = th + 1.2
@@ -457,14 +484,21 @@ func (s *scene) addCopper(board *core.Board, th float64) {
 	}
 }
 
-func (s *scene) addBodies(board *core.Board, th float64) []bodyRec {
+func (s *scene) addBodies(board *core.Board, th float64, ld *loader) []bodyRec {
 	var out []bodyRec
 	zBase := th + maskGapMM
 	for _, fp := range footprintsStable(board) {
 		if fp == nil || fp.Fiducial || len(fp.Pads) == 0 {
 			continue
 		}
-		if fp.Layer.Index != 0 {
+		bottom := fp.Layer.Index != 0
+		if ld != nil {
+			if got, ok := ld.resolve(fp); ok {
+				out = append(out, s.placeCad(fp, got.mesh, got.anchorX, got.anchorY, got.rotZ, got.mirrorY, zBase))
+				continue
+			}
+		}
+		if bottom {
 			continue
 		}
 		kind := classifyPart(fp)

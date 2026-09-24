@@ -193,6 +193,9 @@ type LibraryEntry struct {
 	Pins []SchPin `json:"pins,omitempty"`
 	// SymbolKindName is the SymbolKind.Kind to spawn ("generic_ic", "resistor", …).
 	SymbolKindName string `json:"symbol_kind,omitempty"`
+	// Model is an optional 3D override copied onto footprints spawned from
+	// this entry. KiCad library-relative .wrl path, or a local .wrl/.obj.
+	Model string `json:"model,omitempty"`
 }
 
 // SymbolKindFor returns the symbol kind this entry should spawn, defaulting to
@@ -373,6 +376,7 @@ func (e *LibraryEntry) ToFootprint(reference, value string, layer Layer, rotatio
 		EdgeSide:        e.EdgeSide,
 		PlacementMargin: e.BodyKeepout(),
 		Elevated:        e.Elevated,
+		Model:           e.Model,
 	}
 	if e.BodyRect != nil {
 		br := *e.BodyRect

@@ -957,6 +957,8 @@ func addLibrary(p *core.Project, args string, pads []core.LibraryPad) (string, e
 			s := strings.TrimPrefix(t, "manufacturer=")
 			s = strings.TrimPrefix(s, "mfr=")
 			entry.Manufacturer = &s
+		case strings.HasPrefix(t, "model="):
+			entry.Model = strings.TrimPrefix(t, "model=")
 		}
 	}
 	if _, err := p.PutLibrary(entry); err != nil {
@@ -991,7 +993,7 @@ func paletteCmd(p *core.Project, args string) (string, error) {
 		return "", fmt.Errorf("palette REF KEY [rot=...] [value=...]")
 	}
 	ref, key := fields[0], fields[1]
-	var value string
+	var value, model string
 	rot := 0.0
 	layerTok := "Top"
 	for _, t := range fields[2:] {
@@ -1004,6 +1006,8 @@ func paletteCmd(p *core.Project, args string) (string, error) {
 			value = strings.TrimPrefix(t, "value=")
 		case strings.HasPrefix(t, "layer="):
 			layerTok = strings.TrimPrefix(t, "layer=")
+		case strings.HasPrefix(t, "model="):
+			model = strings.TrimPrefix(t, "model=")
 		}
 	}
 
@@ -1069,6 +1073,9 @@ func paletteCmd(p *core.Project, args string) (string, error) {
 
 	fp := entry.ToFootprint(ref, value, layer, rot)
 	fp.Description = desc
+	if model != "" {
+		fp.Model = model
+	}
 	if sym != nil && sym.LcscID == "" && isValuePart(sym.Kind.Kind) && (entry.DefaultValue == "" || !sameValue(fp.Value, entry.DefaultValue)) {
 		// A library entry's LCSC id names ONE part. For a passive that is one
 		// value, so unless the entry pins that value (value=) and the symbol

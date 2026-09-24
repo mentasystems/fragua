@@ -252,18 +252,20 @@ the copper shows without a refill.
 ## 3D product shot
 
 `fragua render` writes an angled PNG of a board — thickness, soldermask,
-copper, silkscreen, drills, and simple component bodies — for a blog, a
-handoff, or an agent checking its own work. The live UI stays the 2D SVG.
-There is no STEP library and no browser in the path.
+copper, silkscreen, drills, and component bodies — for a blog, a handoff, or
+an agent checking its own work. The live UI stays the 2D SVG. Bodies are
+KiCad WRL models downloaded into a local cache on demand (CC-BY-SA, not
+vendored); a missing model is a box, and the render still finishes.
 
 ```bash
 fragua render --3d stress/rp2040-minimal.fragua -o board.png --width 1600
+fragua render --3d board.fragua -o boxes.png --models=none
 ```
 
 `fragua render3d` is the same command. `-o` defaults to `<name>-3d.png`.
 See [docs/render-3d.md](docs/render-3d.md).
 
-![RP2040 minimal, 3D product shot](docs/images/rp2040-3d.png)
+![RP2040 minimal, KiCad 3D models](docs/images/rp2040-3d-models.png)
 
 ## Benchmark
 

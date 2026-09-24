@@ -208,7 +208,8 @@ screenshot that has to stand alone.
 
 `fragua render` (alias `fragua render3d`) writes a PNG from the same board
 model: extruded outline with soldermask and an FR-4 edge, top copper, silk,
-drills, and box bodies guessed from the footprint when no CAD model exists.
+drills, and a component body. Bodies are triangulated KiCad WRL meshes
+(cached on demand, not vendored) or the procedural box when no model loads.
 It is a software z-buffer in `internal/render` — no browser, no GPU, no
 external binary. The live canvas stays the 2D SVG.
 
