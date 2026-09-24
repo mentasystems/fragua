@@ -34,7 +34,7 @@ Agent loop: schematic → board → JLCPCB-ready zip.
 - `internal/drc` / `internal/erc`: geometric DRC and schematic ERC.
 - `internal/si`: signal-integrity audit (`si-check`) — impedance deviation, return-path plane gaps, diff-pair skew, via budget.
 - `internal/fab` + `internal/gerber` + `internal/odb`: JLCPCB / PCBWay / generic pack (Gerber + Excellon + BOM/CPL) and ODB++.
-- `internal/render`: board SVG (substrate, copper, silk, pad names, drills).
+- `internal/render`: board SVG (substrate, copper, silk, pad names, drills) and a static 3D product-shot PNG.
 - `internal/host` + `cmd/fragua`: HTTP API + embedded browser UI.
 
 `go test ./...` is green. Stress campaign notes: [`stress/`](stress/).
@@ -248,6 +248,22 @@ pack fab=kicad out=/tmp/board.kicad_pcb
 Footprints, pads and nets, tracks, vias, Edge.Cuts, silkscreen, courtyards,
 keepouts and the 4-layer stackup all come across, and pours ship pre-filled so
 the copper shows without a refill.
+
+## 3D product shot
+
+`fragua render` writes an angled PNG of a board — thickness, soldermask,
+copper, silkscreen, drills, and simple component bodies — for a blog, a
+handoff, or an agent checking its own work. The live UI stays the 2D SVG.
+There is no STEP library and no browser in the path.
+
+```bash
+fragua render --3d stress/rp2040-minimal.fragua -o board.png --width 1600
+```
+
+`fragua render3d` is the same command. `-o` defaults to `<name>-3d.png`.
+See [docs/render-3d.md](docs/render-3d.md).
+
+![RP2040 minimal, 3D product shot](docs/images/rp2040-3d.png)
 
 ## Benchmark
 

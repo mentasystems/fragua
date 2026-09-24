@@ -44,7 +44,7 @@ pcb/   (repo: mentasystems/fragua)
 │   ├── placer/            ePlace global + SA legalisation + decoupling ring + edge snap
 │   ├── drc/  erc/  si/
 │   ├── fab/  gerber/  odb/
-│   ├── render/            board + schematic SVG
+│   ├── render/            board + schematic SVG, static 3D PNG
 │   └── host/              HTTP API + UI
 │       └── ui/            index.html, app.css, js/ (go:embed, no build step)
 ├── scripts/install.sh
@@ -203,6 +203,14 @@ The `drc` group ships empty from the renderer and the UI fills it from
 `/drc` (markers are counter-scaled so they stay the same size on screen).
 `GET /screenshot?drc=1` bakes them in server-side instead, for a
 screenshot that has to stand alone.
+
+### 3D product shot
+
+`fragua render` (alias `fragua render3d`) writes a PNG from the same board
+model: extruded outline with soldermask and an FR-4 edge, top copper, silk,
+drills, and box bodies guessed from the footprint when no CAD model exists.
+It is a software z-buffer in `internal/render` — no browser, no GPU, no
+external binary. The live canvas stays the 2D SVG.
 
 The schematic (`/schematic`) is the same idea: `data-sym`, `data-kind`,
 `data-pin`, `data-pin-name`, `data-role`, `data-net`. It is a deterministic

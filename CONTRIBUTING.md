@@ -45,8 +45,8 @@ Set `FRAGUA_NO_BROWSER=1` to skip opening the browser.
   scratch by hand.
 - External CAD tool integrations (`kicad-cli`, FreeRouting, Altium import
   / export). The non-negotiable rule is "no shell-out".
-- 3D rendering / SPICE / signal integrity. These belong in adjacent
-  tools, not in the core loop.
+- SPICE, and a mechanical CAD kernel (STEP bodies, mates). Static 3D
+  product shots are in scope: `fragua render`.
 
 ## How to propose a change
 

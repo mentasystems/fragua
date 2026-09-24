@@ -28,6 +28,7 @@ func Index() string {
 	b.WriteString("fragua init              # AGENTS.md, a Claude Code skill, a Cursor rule, .mcp.json\n")
 	b.WriteString("fragua mcp board.fragua  # MCP server on stdio + HTTP API + UI on 127.0.0.1:7878\n")
 	b.WriteString("fragua run board.fragua  # HTTP API + UI only\n")
+	b.WriteString("fragua render --3d board.fragua -o board.png  # static 3D product shot\n")
 	b.WriteString("```\n\n")
 
 	b.WriteString("## Docs\n\n")
